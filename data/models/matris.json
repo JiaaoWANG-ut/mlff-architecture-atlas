@@ -1,0 +1,205 @@
+{
+  "id": "matris",
+  "name": "MatRIS",
+  "fullName": "MatRIS: Materials Representation and Interaction Simulation",
+  "year": 2026,
+  "authors": "Y. Zhou, S. Hu, X. Zhang, H. Wang, G. Tan, W. Jia",
+  "paper": {"title": "MatRIS: Toward Reliable and Efficient Pretrained Machine Learning Interatomic Potentials", "venue": "ICLR 2026", "url": "https://arxiv.org/abs/2603.02002"},
+  "repos": ["MatRIS"],
+  "family": "invariant-mpnn",
+  "tags": ["不变 MPNN", "原子图 + 线图（三体键角）", "逐通道 softmax 注意力（随边数线性）", "保守力/应力 + 磁矩头", "基础模型 OMat24/MPtrj/MatPES"],
+  "framework": "PyTorch（mode='fast'：load_inline 自定义 CUDA C++ 算子 + torch.compile）",
+  "license": "BSD-3-Clause（代码与权重）",
+  "oneLiner": "只用距离和键角的不变图网络：在原子图（键）与线图（键角）上交替做“逐通道 softmax”注意力和带截断包络的精修卷积；注意力只需对每条边做一次归一化，代价随边数线性增长。原子能求和后对坐标/应变自动微分得到保守的力与应力，另带原子磁矩头。",
+  "analogy": "像一场“分话题投票”的圆桌会：每个原子听所有邻居发言，但不是简单取平均，而是在 128 个话题（通道）上各自投票决定更听谁的（逐通道 softmax）。会前，每根“键”还先开个小会，了解和它共用同一原子的其它键夹着多大角（线图），再把这些角度见闻带到大会。到了“精修”环节，越远的邻居话筒音量越小，到截断半径处正好静音。",
+  "arch": {
+    "geometry": "键长 r_ij（Bessel×p=8 多项式包络，6 Å 与 4.5 Å 两套）+ 键角 θ_jik（cosθ 代入 Y_l^0，l≤3）；不使用方向球谐张量",
+    "equivariance": "E(3) 不变：特征只依赖距离与键角标量；力/应力由能量梯度给出，自动等变",
+    "lmax": "无等变隐藏特征（全为标量）；键角基 Y_l^0(cosθ)，l=0…3（max_l=4）",
+    "bodyOrder": "显式 3 体（线图键角）；多层叠加后隐式更高体序",
+    "layers": "10（MatRIS-10M，MBD YAML n_layers）；代码默认 6（v0.5.0 为 6）",
+    "cutoff": "原子图 6 Å；线图（三体）4.5 Å（10M 模型，代码默认 4 Å）",
+    "receptiveField": "形式上 ≈ 层数 × r_c = 10 × 6 Å ≈ 60 Å（非严格局域）",
+    "message": "e′=GMLP([e_ij,h_i,h_j])；logits=W·e_ij，按源/目标原子逐通道 softmax 加权求和；再做包络加权的精修卷积；线图同理（键↔键角）",
+    "readout": "RMSNorm → MLP[128,128]（SiLU）→ 原子能 ε_i → 求和；/N 得每原子能 + AtomRef 元素参考能",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R，torch.autograd.grad 一次反传（与应变梯度同时）；代码另有 is_conservation=False 的直接力头，发布模型用保守力",
+    "stress": "对称应变 ε 同时作用于坐标与晶胞，σ = (1/V)∂E/∂ε × 160.21766208 → GPa",
+    "longRange": "无显式长程项；仅靠 10 层消息传递的半局域感受野",
+    "dispersion": "无内置 D3/色散修正（代码中无相关接口）；训练数据为 PBE(+U) 或 MatPES r2SCAN",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "原子磁矩（MagmomHead，|MLP(h_i)| 非负标量，任务 'efsm'）",
+    "strictlyLocal": false,
+    "complexity": "O(L·(E+A)·C²)：E≈N·M 条边，A≈N·M₃² 个键角（M₃ 为 4.5 Å 内邻居数），GatedMLP 主导；注意力本身 O((E+A)·C)",
+    "accel": "自定义 CUDA 算子（融合注意力/在线 softmax、门控 MLP、包络散射）、torch.compile、GPU 邻居表（nvalchemiops）、可选 TF32 与激活重计算；ASE / TorchSim 接口，无 LAMMPS"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "没有球谐张量积，注意力也只是逐边 softmax；但 10 层 × 四个子块的门控 MLP 加上随邻居数平方增长的键角，总开销与 MACE 类相当，fast 模式的自定义算子明显缓解。"},
+    "expressiveness": {"v": 3, "why": "显式三体键角 + 深层注意力、容量约 10M 参数；但没有方向等变特征（键角只到 l=3 的勒让德展开），更高体序只能靠层数隐式累积。"},
+    "longRange": {"v": 2, "why": "没有色散、静电或电荷模块，超出截断的物理只靠多层消息传递的感受野。"},
+    "scalability": {"v": 2, "why": "只有 ASE/TorchSim 的单卡整图推理（可批处理、自适应激活重计算省显存）；没有 LAMMPS 或空间分解，10 层 × 6 Å 的感受野也让切分很困难。"},
+    "physics": {"v": 3, "why": "保守力、精确不变、能量为原子能之和；径向基带 p=8 包络，但注意力分支的 softmax 权重未乘截断包络，且没有 ZBL 近程排斥。"},
+    "coverage": {"v": 2, "why": "能量/力/应力之外只有原子磁矩（非负幅值），没有 Hessian、偶极、电荷等官方输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：元素、坐标、晶胞（坐标与应变可求导）",
+      "plain": "输入是原子序数 Z、笛卡尔坐标与晶胞矩阵（pymatgen Structure 或 ASE Atoms）。批处理时先把坐标设为 requires_grad；若要应力，还会引入一个全零的对称应变张量 ε，让坐标与晶胞都随之“虚拟形变”。随后对每条边计算边向量、长度和单位向量——之后所有几何量都由它们派生，力与应力就是能量对这些输入的导数。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\ \\mathbf L\\in\\mathbb R^{3\\times3};\\qquad \\mathbf r_{ij}=\\mathbf r_i-(\\mathbf r_j+\\mathbf n_{ij}\\mathbf L),\\ \\ r_{ij}=\\lVert\\mathbf r_{ij}\\rVert,\\ \\ \\hat{\\mathbf r}_{ij}=\\mathbf r_{ij}/r_{ij}",
+      "code": [{"repo": "MatRIS", "file": "matris/model/processgraph.py", "start": 210, "end": 235, "must": "batch_cart_coords.requires_grad_(True)", "caption": "process_graphs：坐标可求导、对称应变形变、计算边向量/长度/单位向量"}]
+    },
+    {
+      "stage": "graph",
+      "title": "两张图：原子图（6 Å 内的键）+ 线图（4.5 Å 内的键角）",
+      "plain": "先用 pymatgen 邻居表（CPU）或 nvalchemiops 的 cell list（GPU fast 模式）找出 6 Å 内的所有原子对，构成原子图；正反两条有向边配对成一条无向“键”。再把同一中心原子周围、长度都小于三体截断（10M 模型为 4.5 Å）的两条键连起来，构成线图——线图的节点是键、边是键角。这一思路与 CHGNet/M3GNet 一脉相承：角度信息不靠球谐张量，而靠“键与键之间的消息”。",
+      "math": "\\mathcal E=\\{(i,j):\\ r_{ij}<r_c\\},\\ r_c=6;\\qquad \\mathcal A=\\{(j,i,k):\\ r_{ij}\\le r_3,\\ r_{ik}<r_3,\\ j\\neq k\\},\\ r_3=4.5",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/graph/converter.py", "start": 139, "end": 162, "must": "structure.get_neighbor_list(", "caption": "GraphConverter.forward：GPU / CPU 两条路径构建邻居表"},
+        {"repo": "MatRIS", "file": "matris/graph/converter.py", "start": 34, "end": 51, "must": "left = by_center[distances[by_center] <= line_cutoff]", "caption": "build_graph_tensors：按中心原子枚举三体截断内的键对 → 线图"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → Bessel × 多项式包络；键角 → Y_l^0(cos θ)",
+      "plain": "每条键的长度用 7 个正弦 Bessel 函数展开（频率初值 nπ、可学习），再乘 p=8 的多项式包络，使基函数连同一、二阶导数在截断处平滑归零。同一长度展开两次：一次以 6 Å 为截断（原子图），一次以 4.5 Å 为截断（线图权重）。键角先算 cos θ = r̂_ij·r̂_ik，再代入 l=0…3 的 Y_l^0（即勒让德多项式）得到 16 维角度基；代码中这个“SH 三体基”的径向部分输入的是单位向量长度（恒为 1），所以它实际只依赖角度，键长依赖由线图包络权重提供。",
+      "math": "e_n(r)=\\sqrt{\\tfrac{2}{r_c}}\\,\\frac{\\sin(\\omega_n r/r_c)}{r}\\,u\\big(\\tfrac{r}{r_c}\\big),\\ \\omega_n^{\\rm init}=n\\pi,\\ n\\le7;\\quad u(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ p=8;\\qquad a_{lq}(\\theta_{jik})=c_{lq}\\,Y_l^0(\\cos\\theta_{jik}),\\ \\cos\\theta_{jik}=\\hat{\\mathbf r}_{ij}\\cdot\\hat{\\mathbf r}_{ik},\\ 0\\le l,q\\le3",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/basis_function.py", "start": 188, "end": 196, "must": "torch.sin(self.frequencies * d_scaled) / dist", "caption": "BesselExpansion：sin(ω_n r/r_c)/r × 包络"},
+        {"repo": "MatRIS", "file": "matris/model/basis_function.py", "start": 39, "end": 59, "must": "env_val = (1 - dist_scaled) ** 3 * env_val", "caption": "PolynomialEnvelope：整数 p 时按 (1−x)^3 因式分解计算，数值更稳"},
+        {"repo": "MatRIS", "file": "matris/model/feature_embed.py", "start": 189, "end": 209, "must": "angle = torch.acos(theta_ijk)", "caption": "ThreebodyEmbedding：单位向量点积 → 夹角 → SH 展开 → 线性 + SiLU"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始特征：原子、键、键角三套 128 维嵌入",
+      "plain": "原子序数经 nn.Embedding(94, 128) 查表，再过线性 + SiLU 得到原子特征 h_i；键的 Bessel 基经两次线性映射、LayerNorm 与线性 + SiLU 得到键特征 e_ij（每条无向键一份，正反方向共享）；角度基经线性 + SiLU 得到键角特征 t_jik。三种特征全是标量，所以网络天然具有旋转/平移不变性。",
+      "math": "h_i^{(0)}=\\mathrm{SiLU}\\big(W_h\\,\\mathrm{Emb}(Z_i)\\big),\\quad e_{ij}^{(0)}=\\mathrm{SiLU}\\big(W_3\\,\\mathrm{LN}(W_2W_1\\,\\mathbf e_{r_c}(r_{ij}))\\big),\\quad t_{jik}^{(0)}=\\mathrm{SiLU}\\big(W_4W_a\\,\\mathbf a(\\theta_{jik})\\big)",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/feature_embed.py", "start": 18, "end": 38, "must": "nn.Embedding(max_num_elements, atom_feat_dim)", "caption": "AtomTypeEmbedding：94 种元素查表 + SwishLayer"},
+        {"repo": "MatRIS", "file": "matris/model/feature_embed.py", "start": 124, "end": 152, "must": "edge_feat_undirect = self.edge_linear1(pairwise_rbf)", "caption": "EdgeBasisEmbedding：两套 Bessel 基（6 Å / 4.5 Å）与初始键特征"},
+        {"repo": "MatRIS", "file": "matris/model/model.py", "start": 325, "end": 335, "must": "node_feat = self.atom_embedding(", "caption": "forward_core：三种嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：逐通道 softmax 注意力（先线图，后原子图）",
+      "plain": "对每条有向边，把 [e_ij, h_i, h_j] 拼起来过门控 MLP（SiLU(核心)⊙sigmoid(门)）得到“消息值” e′_ij。注意力 logits 只由边特征线性给出（W_t e_ij、W_s e_ij），分别在“同一目标原子的所有边”和“同一源原子的所有边”上做逐通道 softmax——128 个通道各自决定更听哪个邻居。这里没有 Q·K 两两内积，代价与边数成线性。原子把两份加权和与自身特征拼接后再过门控 MLP，并加上逐通道可学习缩放的残差。同一层先在线图上跑一遍：此时“原子”换成键、“边”换成键角。",
+      "math": "e'_{ij}=\\mathrm{GMLP}([e_{ij},h_i,h_j]),\\quad \\alpha^{t}_{ij}=\\mathrm{softmax}_{j\\in\\mathcal N(i)}(W_t e_{ij}),\\ \\ \\alpha^{s}_{ki}=\\mathrm{softmax}_{k\\in\\mathcal N(i)}(W_s e_{ki});\\qquad h_i\\leftarrow\\mathrm{GMLP}\\Big(\\Big[h_i,\\ \\sum_{j}\\alpha^{t}_{ij}\\odot e'_{ij},\\ \\sum_{k}\\alpha^{s}_{ki}\\odot e'_{ki}\\Big]\\Big)+\\gamma\\odot h_i",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 130, "end": 163, "must": "[edge_feat_0, target_node_feat, source_node_feat], dim=1", "caption": "Graph_Attention_Layer：拼接 [e, h_目标, h_源] → 门控 MLP；logits 由边特征线性给出"},
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 195, "end": 226, "must": "source_alpha * attn_edge_feat", "caption": "Dimwise_softmax 加权后按源/目标原子求和（eager 路径；fast 模式为融合 CUDA 算子）"},
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 236, "end": 264, "must": "fusion_node_feat = torch.cat(", "caption": "节点更新：[h, 目标侧消息, 源侧消息] → 门控 MLP + 缩放残差"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：精修（Refinement）—— 包络加权的卷积",
+      "plain": "注意力之后再做一次“卷积式”精修：同样把 [e_ij, h_i, h_j] 送进门控 MLP，但每条边的贡献要乘一个由径向基线性组合出的权重 w_ij。由于径向基已乘包络、且线性层无偏置，w_ij 在截断处平滑趋于 0，新邻居进入时消息从零开始连续增长。线图上的权重是两条键权重之积（基于 4.5 Å 截断），输入还额外拼接中心原子特征。求和后经 FFN 更新节点，边/角特征也经 FFN 更新，均带逐通道缩放残差。",
+      "math": "w_{ij}=W_{\\rm env}\\,\\mathbf e_{r_c}(r_{ij})\\xrightarrow{\\,r_{ij}\\to r_c\\,}0,\\quad h_i\\leftarrow\\mathrm{FFN}\\Big(\\sum_{j}w_{ij}\\odot\\mathrm{GMLP}([e_{ij},h_i,h_j])\\Big)+\\gamma\\odot h_i;\\qquad w_{jik}=\\big(W'\\mathbf e_{r_3}(r_{ij})\\big)\\odot\\big(W'\\mathbf e_{r_3}(r_{ik})\\big)",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 361, "end": 377, "must": "self.learnable_envelope.weight", "caption": "原子图：径向基 → 可学习包络权重 w_ij；拼接 [e, h_目标, h_源]"},
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 445, "end": 466, "must": "smooth_weight = base_weights_i * base_weights_j", "caption": "线图权重为两条键包络之积；按目标节点加权求和"},
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 468, "end": 491, "must": "delta_node_feat = self.node_FFN(", "caption": "FFN 更新 + 有向边平均 + 缩放残差"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "一层四步，堆叠 10 层",
+      "plain": "每个 Interaction_Block 的顺序是：线图注意力（用键角更新键）→ 原子图注意力（用键更新原子）→ 线图精修 → 原子图精修。三体信息因此每层都先流入键、再流入原子。发布的 10M 模型堆叠 10 层（代码默认 6 层），各层参数独立；推理时可逐层做激活重计算以节省显存。",
+      "math": "(h,e,t)^{(\\ell)}\\xrightarrow{\\text{LG-attn}}\\ \\xrightarrow{\\text{AG-attn}}\\ \\xrightarrow{\\text{LG-refine}}\\ \\xrightarrow{\\text{AG-refine}}(h,e,t)^{(\\ell+1)},\\qquad \\ell=0,\\dots,L-1,\\ L=10",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/interaction_block.py", "start": 615, "end": 658, "must": "self.attn_block_line_graph(", "caption": "Interaction_Block.forward：线图注意力 → 原子图注意力 → 线图精修 → 原子图精修"},
+        {"repo": "MatRIS", "file": "matris/model/model.py", "start": 337, "end": 352, "must": "for mp_layer in self.interaction_block:", "caption": "forward_core：逐层堆叠（可选 checkpoint 重计算）"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：RMSNorm + MLP → 每个原子的能量",
+      "plain": "最后一层的原子特征先做 RMSNorm，再经隐藏宽度 [128, 128] 的 MLP（SiLU）输出标量原子能 ε_i，然后按结构把 ε_i 加起来。只读原子（标量）特征，键与键角特征不直接进入能量。",
+      "math": "\\varepsilon_i=\\mathrm{MLP}_{[128,128]}\\big(\\mathrm{RMSNorm}(h_i^{(L)})\\big),\\qquad E_{\\rm NN}=\\sum_{i=1}^{N}\\varepsilon_i",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/model.py", "start": 354, "end": 361, "must": "node_feat = self.readout_norm(node_feat)", "caption": "readout_norm（默认 RMSNorm）→ EnergyHead"},
+        {"repo": "MatRIS", "file": "matris/model/readout.py", "start": 80, "end": 93, "must": "index_add(0, batch_graph", "caption": "EnergyHead：原子能按结构求和"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：网络能量 + 元素参考能（AtomRef）",
+      "plain": "模型默认输出“每原子能”（is_intensive=True）：网络能量先除以原子数，再加上只依赖化学组成的线性参考能 Σ_Z w_Z·n_Z/N（AtomRef，按数据集线性回归拟合后冻结）。ASE 计算器再乘回原子数得到总能。参考能吸收各元素的能量基线，网络只需学习相互作用部分；总能是原子贡献之和，保证广延性。",
+      "math": "\\frac{E}{N}=\\frac{1}{N}\\sum_i\\varepsilon_i+\\sum_Z w_Z\\,\\frac{n_Z}{N}\\quad\\Longrightarrow\\quad E=\\sum_i\\big(\\varepsilon_i+w_{Z_i}\\big)",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/model.py", "start": 293, "end": 311, "must": "energy_per_atom = total_energy / atoms_per_graph_tensor", "caption": "每原子能 + 参考能"},
+        {"repo": "MatRIS", "file": "matris/model/reference_energy.py", "start": 43, "end": 55, "must": "ref_energy = self.fc(composition_feas).view(-1)", "caption": "AtomRef：元素计数（/N）→ 无偏置线性层"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对坐标自动微分（保守力）",
+      "plain": "力是网络能量 Σε_i 对坐标的负梯度，由 torch.autograd.grad 一次反传得到；需要应力时同一次反传也对应变求导。保守力保证 NVE 能量守恒，也让声子等二阶性质自洽。代码还保留 is_conservation=False 的直接力头（键特征经 MLP 输出 3 个分量，逐元素乘单位向量后求和），但 Matbench Discovery 收录的模型 targets 均为 EFS_GM（梯度力）。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E_{\\rm NN}}{\\partial\\mathbf r_i}\\qquad\\big(\\text{direct head: }\\mathbf F_i=\\textstyle\\sum_j\\mathrm{MLP}(e_{ij})\\odot\\hat{\\mathbf r}_{ij}\\big)",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/readout.py", "start": 242, "end": 261, "must": "force = -1 * grad[0]", "caption": "ForceStressHead（is_conservation=True）：autograd 求力"},
+        {"repo": "MatRIS", "file": "matris/model/readout.py", "start": 311, "end": 334, "must": "direct_edge_feas = direct_edge_feas * batch_graph", "caption": "可选直接力头（非保守）"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对虚拟应变求导",
+      "plain": "构图时引入全零对称应变 ε，坐标与晶胞都乘 (1+ε_sym)；能量对 ε 的梯度就是维里，除以体积并乘 160.21766208 换算为 GPa（ASE 计算器再转回 eV/Å³）。应力与力来自同一个能量面，变胞弛豫与 NPT 模拟因此自洽。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon_{\\rm s}),\\ \\mathbf L\\to\\mathbf L(\\mathbf 1+\\boldsymbol\\varepsilon_{\\rm s}),\\ \\boldsymbol\\varepsilon_{\\rm s}=\\tfrac12(\\boldsymbol\\varepsilon+\\boldsymbol\\varepsilon^{\\top});\\qquad \\boldsymbol\\sigma=\\frac{160.21766208}{V}\\,\\frac{\\partial E_{\\rm NN}}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}\\ \\text{(GPa)}",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/processgraph.py", "start": 213, "end": 224, "must": "symmetric_strains = 0.5 * (strains + strains.transpose(-1, -2))", "caption": "对称应变作用于坐标与晶胞"},
+        {"repo": "MatRIS", "file": "matris/model/readout.py", "start": 262, "end": 267, "must": "160.21766208", "caption": "应力 = 维里 / 体积 → GPa"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "附加输出：原子磁矩",
+      "plain": "任务含 'm'（如 efsm）时，归一化后的原子特征另经一个隐藏宽度 256 的 MLP，取绝对值作为每个原子的磁矩（μB）。它是从 DFT 磁矩标签学到的标量“大小”，不含自旋方向，也不进入能量；README 中 MPtrj 与 OAM 模型支持该输出，OMat24 与 MatPES 版本只输出 efs。",
+      "math": "m_i=\\Big|\\mathrm{MLP}_{[256]}\\big(\\mathrm{RMSNorm}(h_i^{(L)})\\big)\\Big|\\quad[\\mu_B]",
+      "code": [
+        {"repo": "MatRIS", "file": "matris/model/readout.py", "start": 157, "end": 167, "must": "magmom_feat = torch.abs(magmom_feat)", "caption": "MagmomHead：非负原子磁矩"},
+        {"repo": "MatRIS", "file": "matris/model/model.py", "start": 284, "end": 291, "must": "magmom = self.magmom_head(", "caption": "task 含 m 时输出磁矩"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "num_layers", "value": "10（MatRIS-10M）；代码默认 6", "note": "交互块层数（MBD YAML n_layers；v0.5.0 为 6）", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "num_layers: int = 6"}},
+    {"name": "pairwise_cutoff r_c", "value": "6 Å", "note": "原子图截断（MBD graph_construction_radius 6.0）", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "pairwise_cutoff: float = 6"}},
+    {"name": "three_body_cutoff r_3", "value": "4.5 Å（10M）；代码默认 4 Å", "note": "线图/键角截断（MBD upstream_config；v0.5.0 为 4.0）", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "three_body_cutoff: float = 4"}},
+    {"name": "node / edge / three_body_feat_dim", "value": "128 / 128 / 128", "note": "代码默认特征宽度（v0.5.0 YAML n_features=128）", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "node_feat_dim: int = 128"}},
+    {"name": "num_radial", "value": "7", "note": "Bessel 径向基个数，频率可学习（learnable_basis=True）", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "num_radial: int = 7"}},
+    {"name": "envelope_exponent p", "value": "8", "note": "多项式截断包络阶数", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "envelope_exponent: int = 8"}},
+    {"name": "three_body_expansion", "value": "SH：max_l=4 × max_n=4 → 16 维", "note": "键角基 Y_l^0(cosθ)，l=0…3", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "three_body_expansion: str = \"SH\""}},
+    {"name": "graph_conv_mlp / norm / act", "value": "GateMLP / RMSNorm / SiLU", "note": "交互块内的门控 MLP 与归一化", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "norm_type: str = \"rms\""}},
+    {"name": "mlp_hidden_dims（能量头）", "value": "(128, 128)", "note": "原子能 MLP 隐藏层", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "mlp_hidden_dims: Union[int, Sequence[int]] = (128, 128)"}},
+    {"name": "is_intensive / is_conservation", "value": "True / True", "note": "输出每原子能；力与应力由 autograd 得到", "code": {"repo": "MatRIS", "file": "matris/model/model.py", "start": 27, "end": 50, "must": "is_conservation: bool = True"}},
+    {"name": "参数量", "value": "10,443,505（10M）；5,825,620（v0.5.0）", "note": "Matbench Discovery YAML model_params"}
+  ],
+  "speedNotes": [
+    "FLOPs 主要花在每层四个子块的门控 MLP（核心 + 门两套 MLP）上：原子图在每条有向边上算一次，线图在每个键角上算一次；键角数 ∝ N·M₃²，所以三体截断从 4 Å 增到 4.5 Å 会明显增加成本。",
+    "注意力只是“逐通道 softmax + 加权求和”，没有 Q·K 两两内积，也没有球谐张量积，代价随边/角数量线性增长——这是它比等变 Transformer 便宜的关键。",
+    "mode='fast'：load_inline 编译的 CUDA C++ 算子（融合注意力/在线 softmax、门控 MLP、包络散射、有向边平均）+ torch.compile + GPU 邻居表与线图构建；README 称推理约快 5 倍，可选 TF32（约 1.5 倍）。",
+    "力与应力由一次 autograd 反传得到，需要保存 10 层的中间特征；推理时会按显存估计自适应开启激活重计算（activation_checkpoint）。"
+  ],
+  "weakNotes": [
+    "原子图截断 6 Å、三体截断 4.5 Å；10 层消息传递使感受野形式上可达 ~60 Å，但模型里没有任何显式 r⁻⁶ 色散或 r⁻¹ 静电项。",
+    "训练数据为 MPtrj / OMat24 / sAlex（PBE/PBE+U）以及 MatPES-PBE / r2SCAN。PBE 基本不含 vdW，层状材料层间结合、分子晶体、物理吸附会被低估；r2SCAN 版对中程作用更好，但同样没有长程色散尾巴。",
+    "代码中没有 D3/DFT-D 接口，也没有总电荷/自旋输入；带电缺陷、离子液体、电极界面等需要长程静电的体系超出设计范围，色散只能由用户在外部自行叠加。",
+    "注意力分支的 softmax 权重没有乘截断包络（包络只出现在精修块的卷积权重里），邻居跨过 6 Å / 4.5 Å 截断时的平滑性要靠学习保证，做高阶导数或长时间 NVE 时值得留意。",
+    "孤立分子/团簇：ASE 计算器会把非周期方向自动扩成大真空盒，但训练集以无机周期晶体为主。"
+  ],
+  "downstreamNotes": [
+    "保守力 + p=8 多项式包络，适合声子与热导：Matbench Discovery κ_SRME 为 MatRIS-10M-OAM 0.2183、MatRIS-10M-MP 0.4892、v0.5.0-MPtrj 0.8651。",
+    "稳定性筛选与几何优化：Matbench Discovery（unique prototypes）F1 为 10M-OAM 0.921、10M-MP 0.847、v0.5.0-MPtrj 0.809；10M-OAM 几何优化 RMSD 0.0601。",
+    "自带 StructOptimizer（FIRE + FrechetCellFilter 变胞弛豫）与 MolecularDynamics（NVE/NVT/NPT）封装，并可接入 TorchSim 做批量 GPU 模拟。",
+    "磁矩头（efsm）可给弛豫后的结构标注原子磁矩，但只输出非负幅值，不能区分铁磁/反铁磁排列。",
+    "没有官方 Hessian、偶极、极化率接口；声子需用有限位移（MBD κ 协议用 0.03 Å 位移）。"
+  ],
+  "strengths": ["无张量积的不变架构 + 线性复杂度注意力，配合自定义 CUDA 算子推理快", "显式三体线图，键角信息直接进入消息", "Matbench Discovery 成绩突出（10M-OAM：F1 0.921、κ_SRME 0.2183）", "多个基础模型：OMat24 / OAM / MPtrj / MatPES PBE·r2SCAN", "能量、保守力、应力、磁矩一体，ASE / TorchSim 即插即用"],
+  "weaknesses": ["无色散、静电与电荷/自旋输入", "10 层消息传递 + 线图，无 LAMMPS / 多 GPU 空间分解", "键角数随邻居数平方增长，密堆体系成本高", "注意力 softmax 不含截断包络，截断处平滑性靠学习", "输出性质较少（E/F/S + 磁矩幅值）"],
+  "pretrained": ["MatRIS-10M-OMAT (OMat24, efs)", "MatRIS-10M-OAM (OMat24 → sAlex + MPtrj, efsm)", "MatRIS-10M-MP (MPtrj, efsm)", "MatRIS-4M-MatPES-PBE v1 / v2 (efs)", "MatRIS-4M-MatPES-r2SCAN v1 / v2 (efs)"],
+  "mbdKeys": ["matris-10m-mp", "matris-10m-oam", "matris-v050-mptrj"],
+  "arenaKeys": []
+}

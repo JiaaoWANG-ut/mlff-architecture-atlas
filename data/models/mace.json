@@ -1,0 +1,180 @@
+{
+  "id": "mace",
+  "name": "MACE",
+  "fullName": "MACE: Higher Order Equivariant Message Passing (Multi-ACE)",
+  "year": 2022,
+  "authors": "I. Batatia, D. P. Kovács, G. Simm, C. Ortner, G. Csányi",
+  "paper": {"title": "MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields", "venue": "NeurIPS 2022", "url": "https://arxiv.org/abs/2206.07697"},
+  "repos": ["mace"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "ACE 高体序", "球谐张量积", "基础模型 MACE-MP/OFF/OMOL", "保守力"],
+  "framework": "PyTorch + e3nn（可选 cuEquivariance / OpenEquivariance 内核）",
+  "license": "MIT（部分 OMAT/MATPES 权重为 ASL 学术许可）",
+  "oneLiner": "把 ACE（原子团簇展开）的高阶多体基函数塞进消息传递：每层先像 NequIP 一样用球谐张量积收集邻居信息（A 基），再做一次“对称收缩”把 A 基自乘到 ν=3 阶（B 基），一层就是 4 体，2 层就足够准确。",
+  "analogy": "像给每个原子发一张“邻居问卷”：第一步统计每个方向、每个距离上有谁（A 基）；第二步把问卷里的问题两两、三三组合交叉分析（对称收缩），于是一次就能看出“三个邻居围成的形状”，不必像普通 GNN 那样靠很多层慢慢传话。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度 (Bessel×多项式包络) + 方向 (实球谐 Y_l^m, l ≤ max_ell=3)",
+    "equivariance": "O(3)/E(3) 等变（e3nn irreps，隐藏层 L=0/1/2 对应 small/medium/large）",
+    "lmax": "球谐 l≤3；隐藏特征 L_max = 0（small）/1（medium）/2（large）",
+    "bodyOrder": "每层 correlation ν=3 → 每层 4 体；2 层后有效体序更高",
+    "layers": "2（num_interactions 默认 2）",
+    "cutoff": "训练默认 5 Å；MACE-MP-0/MPA-0 为 6 Å",
+    "receptiveField": "2 × r_c ≈ 10–12 Å",
+    "message": "A 基：Σ_j R(r_ij) · [Y(r̂_ij) ⊗ h_j]（CG 张量积，/平均邻居数）；B 基：A 基的对称张量积到 ν 阶（元素相关权重）",
+    "readout": "第 1 层线性读出、最后一层 MLP(16×0e, SiLU)；各层原子能相加 → scale·x+shift → 加 E0",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R，torch.autograd.grad 一次反传得到",
+    "stress": "对称应变（displacement）技巧：位置与晶胞同乘 (1+ε_sym)，σ = (1/V) ∂E/∂ε",
+    "longRange": "基础模型默认无；扩展 MACE-LES（隐式电荷 + Ewald）与 PolarMACE（GTO 静电，k 空间）",
+    "dispersion": "mace_mp(dispersion=True) 外挂 torch-dftd 的 DFT-D3(BJ)，截断 40 Bohr，以 SumCalculator 叠加",
+    "chargeSpin": "基础 MACE-MP 无；可通过 embedding_specs 加入全局特征（如总电荷/自旋/头），PolarMACE 有电荷/场",
+    "otherOutputs": "Hessian（vmap 二阶导）、原子应力、边力、偶极/极化率（AtomicDipolesMACE / AtomicDielectricMACE）、磁矩/磁力（MagneticMACE）、BEC（MACE-LES）",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·C·P_TP) 的边上张量积 + O(N·C·P_ν) 的节点对称收缩；P 随 L 与 ν 快速增长",
+    "accel": "cuEquivariance / OpenEquivariance 融合内核、torch.compile、LAMMPS ML-IAP（多 GPU）、TorchSim"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "仅 2 层且大量计算在节点上（对称收缩），比多层 NequIP/Equiformer 快；但仍有球谐张量积，比 SchNet/NEP 类慢一个数量级左右。"},
+    "expressiveness": {"v": 5, "why": "等变 + 每层 4 体（ν=3）高体序，是“完备基”意义下表达力最强的一类。"},
+    "longRange": {"v": 3, "why": "基础模型只有 2×r_c 的半局域感受野；但官方提供 D3 外挂，且有 LES / PolarMACE 静电扩展。"},
+    "scalability": {"v": 3, "why": "2 层消息传递需要层间 ghost 特征通信；LAMMPS ML-IAP 支持多 GPU，但不如严格局域模型好切分。"},
+    "physics": {"v": 4, "why": "保守力、多项式平滑包络（C^p 连续）、E0 参考能分解、可选 ZBL 近程排斥。"},
+    "coverage": {"v": 5, "why": "能量/力/应力之外还有 Hessian、偶极、极化率、磁矩、BEC 等官方实现。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞",
+      "plain": "输入是 N 个原子的笛卡尔坐标 R、元素（以 one-hot 的 node_attrs 表示）、晶胞矩阵与周期性标志。关键一步是对坐标打开 requires_grad——后面所有的力都是“能量对坐标求导”得到的。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{0,1\\}^3",
+      "code": [{"repo": "mace", "file": "mace/modules/utils.py", "start": 854, "end": 864, "must": "requires_grad_(True)", "caption": "prepare_graph：坐标设为可求导，准备 displacement（用于应力）"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断半径内的所有原子对（含周期镜像）",
+      "plain": "用 matscipy 的 neighbour_list 找出所有距离小于 r_c 的原子对，每条边记录 (sender, receiver) 和跨越周期边界的整数平移 S。之后的一切计算都只在这些边上进行，所以总代价随原子数 N 线性增长。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\}",
+      "code": [{"repo": "mace", "file": "mace/data/neighborhood.py", "start": 140, "end": 168, "must": "neighbour_list(", "caption": "get_neighborhood：构建 edge_index 与周期平移 shifts"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → Bessel 径向基 × 平滑包络；方向 → 球谐函数",
+      "plain": "每条边的向量被拆成“多远”和“朝哪”。距离用 8 个 Bessel 函数展开并乘以多项式截断包络，使能量在 r_c 处平滑归零（力也连续）；方向用 l≤3 的实球谐 Y_l^m 编码——它们在旋转下按已知规律变换，这正是“等变”的来源。",
+      "math": "R_n(r)=\\sqrt{\\tfrac{2}{r_c}}\\,\\frac{\\sin(n\\pi r/r_c)}{r}\\,f_{\\text{cut}}(r),\\quad f_{\\text{cut}}=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c};\\qquad Y_{l}^{m}(\\hat{\\mathbf r}_{ij}),\\ l\\le 3",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 440, "end": 455, "must": "vectors = positions[receiver] - positions[sender] + shifts", "caption": "边向量与长度"},
+        {"repo": "mace", "file": "mace/modules/radial.py", "start": 49, "end": 51, "must": "torch.sin(self.bessel_weights * x)", "caption": "Bessel 径向基"},
+        {"repo": "mace", "file": "mace/modules/radial.py", "start": 131, "end": 142, "must": "envelope * (x < r_max)", "caption": "多项式平滑截断包络"},
+        {"repo": "mace", "file": "mace/modules/models.py", "start": 320, "end": 326, "must": "self.spherical_harmonics(vectors)", "caption": "forward 中：元素嵌入 + 球谐 + 径向特征"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：one-hot(Z) → 128 维标量通道",
+      "plain": "元素种类先变成 one-hot 向量，再经一个线性层变成每个原子的初始特征 h⁽⁰⁾（只含标量 0e 部分）。同时查表得到每种元素的孤立原子参考能 E0，它直接加到总能里。",
+      "math": "h_i^{(0)}=W_{\\text{emb}}\\,\\mathrm{onehot}(Z_i),\\qquad E^{(0)}=\\sum_i E_{0}(Z_i)",
+      "code": [{"repo": "mace", "file": "mace/modules/models.py", "start": 109, "end": 117, "must": "LinearNodeEmbeddingBlock(", "caption": "节点嵌入只有 0e 标量通道"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：A 基 —— 球谐张量积卷积（两体信息）",
+      "plain": "对每条边，把邻居特征 h_j 与方向球谐 Y(r̂_ij) 做 Clebsch–Gordan 张量积，权重由“距离 → MLP”给出；再把所有邻居的贡献加起来（除以平均邻居数做归一化）。这一步得到的 A_i 等价于 ACE 中的“原子基”，描述了 i 周围的密度在各个角动量通道上的投影。",
+      "math": "A^{(t)}_{i,k\\,l_3m_3}=\\frac{1}{\\bar n}\\sum_{j\\in\\mathcal N(i)}\\sum_{l_1m_1,l_2m_2}C^{l_3m_3}_{l_1m_1,l_2m_2}\\,R^{(t)}_{k,l_1l_2l_3}(r_{ij})\\,Y_{l_1}^{m_1}(\\hat{\\mathbf r}_{ij})\\,\\tilde h^{(t)}_{j,k\\,l_2m_2}",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 953, "end": 975, "must": "self.conv_tp_weights = nn.FullyConnectedNet(", "caption": "张量积 + 径向 MLP（[64,64,64]）生成逐边权重"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 1009, "end": 1037, "must": "self.conv_tp(", "caption": "RealAgnosticResidualInteractionBlock.forward：逐边张量积 → scatter_sum"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：B 基 —— 对称收缩（一次得到多体）",
+      "plain": "MACE 的核心创新：把 A_i 自己和自己做 ν 次张量积（ν=1,2,3），再用广义 CG 系数投影回各个 L 通道。因为 A 已经是“对邻居求和”的结果，乘 3 次就相当于同时考虑 3 个邻居 + 中心原子 = 4 体关联，但代价只与原子数成正比，而不是邻居数的 3 次方。权重随中心元素 z_i 变化。",
+      "math": "B^{(t)}_{i,\\eta_\\nu kLM}=\\sum_{\\mathbf{lm}}\\mathcal C^{LM}_{\\eta_\\nu,\\mathbf{lm}}\\prod_{\\xi=1}^{\\nu}A^{(t)}_{i,k\\,l_\\xi m_\\xi},\\qquad m^{(t)}_{i,kLM}=\\sum_{\\nu=1}^{3}\\sum_{\\eta_\\nu}W^{(t)}_{z_i kL,\\eta_\\nu}B^{(t)}_{i,\\eta_\\nu kLM}",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/symmetric_contraction.py", "start": 244, "end": 263, "must": "self.graph_opt_main(", "caption": "Contraction.forward：从最高阶 ν 递推收缩（类似 Horner 法）"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 500, "end": 513, "must": "return self.linear(node_feats) + sc", "caption": "乘积基块：对称收缩 → 线性 → 加残差 sc"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：每层都输出一个原子能",
+      "plain": "每一层的特征里只取标量（0e，旋转不变）部分去预测原子能：前面的层用线性读出，最后一层用一个小 MLP（16 个隐藏单元 + SiLU）。多层读出相加，相当于“多尺度”能量分解。",
+      "math": "E_i=\\sum_{t=1}^{T}\\mathcal R^{(t)}\\big(h^{(t)}_{i,\\,0e}\\big),\\quad \\mathcal R^{(t<T)}=W^{(t)}h,\\ \\ \\mathcal R^{(T)}=W_2\\,\\sigma(W_1 h)",
+      "code": [{"repo": "mace", "file": "mace/modules/blocks.py", "start": 111, "end": 119, "must": "self.linear_2(x)", "caption": "NonLinearReadoutBlock"}]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：Σ 原子能 × 尺度 + 偏移 + E0",
+      "plain": "交互能先做数据集统计意义上的缩放与平移（scale/shift），再对所有原子求和，最后加上孤立原子参考能。能量是“原子能之和”保证了广延性（体系加倍，能量加倍）。",
+      "math": "E=\\sum_i\\Big[E_0(Z_i)+s\\,E_i+\\mu\\Big]",
+      "code": [{"repo": "mace", "file": "mace/modules/models.py", "start": 579, "end": 586, "must": "total_energy = e0 + inter_e", "caption": "ScaleShiftMACE.forward"}]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "力不是网络直接“猜”的，而是对能量做一次反向传播得到的负梯度。好处：力场严格保守（NVE 下能量守恒，声子/弹性常数自洽）；代价：反传约等于再做一次前向，计算量 ~2–3 倍。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}",
+      "code": [{"repo": "mace", "file": "mace/modules/utils.py", "start": 33, "end": 50, "must": "torch.autograd.grad(", "caption": "compute_forces"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对“虚拟应变”求导",
+      "plain": "引入一个全零的对称应变张量 ε，让坐标和晶胞都随之形变，然后能量对 ε 求导即得维里；除以体积就是应力。这样一次反传可同时得到力和应力。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 118, "end": 160, "must": "symmetric_displacement = 0.5 * (", "caption": "get_symmetric_displacement"},
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 89, "end": 115, "must": "inputs=[positions, displacement]", "caption": "compute_forces_virials：一次反传得到力和维里"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/弱相互作用：D3 外挂 + 静电扩展",
+      "plain": "MACE-MP 训练数据是 PBE(+U)，本身几乎不含色散；官方的做法是把 DFT-D3(BJ) 作为独立计算器加在 MACE 能量上（40 Bohr 截断）。更进一步的 MACE-LES / PolarMACE 在网络里预测（隐式）电荷，再用 Ewald / k 空间求真正的长程静电。",
+      "math": "E_{\\text{tot}}=E_{\\text{MACE}}+E_{\\text{D3(BJ)}}\\ (+E_{\\text{elec}}^{\\text{LES/Polar}})",
+      "code": [
+        {"repo": "mace", "file": "mace/calculators/foundations_models.py", "start": 347, "end": 369, "must": "SumCalculator([mace_calc, d3_calc])", "caption": "mace_mp(dispersion=True)"},
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 945, "end": 952, "must": "GTOElectrostaticEnergy(", "caption": "PolarMACE：GTO 静电能"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多性质：Hessian、偶极、磁矩……",
+      "plain": "因为一切都可微，二阶导（Hessian，用于声子/振动频率）可以对力再做向量-雅可比积得到；专门的读出头可输出偶极、极化率、磁矩等等变量。",
+      "math": "H_{ij}^{\\alpha\\beta}=\\frac{\\partial^2E}{\\partial r_i^{\\alpha}\\partial r_j^{\\beta}}",
+      "code": [{"repo": "mace", "file": "mace/modules/utils.py", "start": 160, "end": 186, "must": "torch.vmap(get_vjp", "caption": "compute_hessians_vmap"}]
+    }
+  ],
+  "hyper": [
+    {"name": "r_max", "value": "5.0 Å（CLI 默认）；MP-0/MPA-0 用 6.0 Å", "note": "截断半径", "code": {"repo": "mace", "file": "mace/tools/arg_parser.py", "start": 150, "end": 152, "must": "--r_max"}},
+    {"name": "num_radial_basis", "value": "8", "note": "Bessel 基个数"},
+    {"name": "num_cutoff_basis (p)", "value": "5", "note": "多项式包络阶数"},
+    {"name": "max_ell", "value": "3", "note": "边上球谐的最高 l"},
+    {"name": "correlation ν", "value": "3", "note": "对称收缩阶数 → 每层 4 体"},
+    {"name": "num_interactions", "value": "2", "note": "消息传递层数"},
+    {"name": "radial_MLP", "value": "[64, 64, 64]", "note": "距离 → 张量积权重"},
+    {"name": "MLP_irreps", "value": "16x0e", "note": "最后读出 MLP 宽度"},
+    {"name": "num_channels × max_L", "value": "128×L0 / 128×L1 / 128×L2", "note": "MP-0 small / medium / large"}
+  ],
+  "speedNotes": [
+    "开销主要在两处：边上的 CG 张量积（∝ 边数 × 通道 × 路径数）和节点上的对称收缩（∝ 原子数 × 通道 × ν 阶组合数）。MACE 刻意把“多体”放在节点上做，所以比 NequIP 用更少的层达到同样精度。",
+    "隐藏层 L 从 0→1→2，参数与 FLOPs 迅速上升（MP-0 small/medium/large）；默认 float32 用于 MD、float64 用于几何优化。",
+    "cuEquivariance / OpenEquivariance 把张量积与对称收缩融合成 GPU 内核，是目前 MACE 提速的主要手段；LAMMPS ML-IAP 接口支持多 GPU。",
+    "力用 autograd 反传，总耗时约为单次前向的 2–3 倍；需要应力时一次反传同时给出。"
+  ],
+  "weakNotes": [
+    "单层“看得见”的范围是 r_c（5–6 Å），两层后能量最多依赖 ~12 Å 内的原子；超出部分的色散 r⁻⁶ 尾巴与静电 r⁻¹ 被截掉。",
+    "MACE-MP 系列在 PBE/PBE+U 数据上训练，PBE 本身几乎不描述 vdW，所以层状材料层间结合、分子晶体、物理吸附需要加 D3（mace_mp(dispersion=True)）。",
+    "MACE-OFF 在含 D3(BJ) 色散的 ωB97M 数据（SPICE）上训练，色散在截断内被隐式学到，但截断外的尾巴依然缺失。",
+    "带电体系、界面电荷转移、离子液体等需要真正长程静电时，应使用 MACE-LES 或 PolarMACE 扩展。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 平滑包络 → 二阶导连续，适合声子、热导率（Matbench Discovery κ_SRME：MACE-MP-0 0.68，MACE-MPA-0 0.41）。",
+    "原生 Hessian、应力、原子应力输出，弹性常数与状态方程可直接计算。",
+    "偶极/极化率读出头可用于 IR / Raman 光谱；MagneticMACE 可处理磁矩与自旋—晶格耦合。"
+  ],
+  "strengths": ["高体序带来极好的数据效率和精度", "只需 2 层，推理比深层等变网络快", "生态完善：MP/OFF/OMOL/MATPES 多个基础模型、微调、LAMMPS、cuEq 加速", "可扩展到偶极、极化率、磁性、长程静电"],
+  "weaknesses": ["球谐张量积仍比不变模型贵", "基础模型默认缺色散与长程静电", "消息传递使严格空间分解并行更复杂", "高 L / 高 ν 时内存占用大"],
+  "pretrained": ["MACE-MP-0 (small/medium/large, MPtrj)", "MACE-MPA-0 (MPtrj + sAlex)", "MACE-OMAT-0", "MACE-MATPES (PBE / r2SCAN)", "MACE-OFF23 (SPICE 有机分子)", "MACE-MH-1 (多头)", "MACE-POLAR-1 (静电)"],
+  "mbdKeys": ["mace-mp-0", "mace-mpa-0"],
+  "arenaKeys": ["MACE-MP(M)", "MACE-MPA", "MACE-OFF(M)"]
+}

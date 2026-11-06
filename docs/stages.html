@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>逐步横向对比 · MLFF 架构图解</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="data/index.js"></script>
+<script src="data/steps.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+  <h1>逐步横向对比</h1>
+  <p class="muted">选一个步骤，看所有模型在这一步分别是怎么做的。点击模型名可跳到该模型页面的对应步骤（含源码）。</p>
+  <div class="pill-select" id="stage-chips"></div>
+  <div class="callout" id="stage-intro"></div>
+  <div class="filters">
+    <input type="search" id="q" placeholder="在本步骤内搜索（如 Bessel、Ewald、autograd）…">
+    <span class="muted small" id="count"></span>
+  </div>
+  <div class="pill-select" id="fam-chips"></div>
+  <div id="list" style="margin-top:14px"></div>
+</main>
+<script>
+mountChrome("stages.html");
+const D = window.MLFF, S = window.MLFF_STEPS;
+const LOOK = {
+  input: "看点：是否需要总电荷 / 自旋 / 任务（泛函）标签；是否支持周期性晶胞；分子模型与材料模型的输入差异。",
+  graph: "看点：截断半径 r_c 取多大、是否限制最大邻居数、是否额外构造三体“线图”、是否干脆全连接。r_c 和邻居数直接决定速度与显存。",
+  geometry: "看点：径向基（高斯 / Bessel / Chebyshev / 样条）与包络函数；方向信息用 cosθ、球谐 Y_lm 还是笛卡尔张量——这是家族分野的关键。",
+  embedding: "看点：元素用 one-hot 还是学习的嵌入；电荷、自旋、数据集标签在哪里注入。",
+  interaction: "看点：消息函数长什么样、体序是多少、等变是如何保证的（CG 张量积 / SO(2) 卷积 / 笛卡尔运算 / 注意力 / 不保证）、堆几层。",
+  readout: "看点：只用最后一层还是每层累加；读出是线性还是 MLP；是否还读出电荷、磁矩等原子量。",
+  energy: "看点：元素参考能（E0 / 线性回归）与缩放平移；是否有 ZBL 等短程排斥先验。",
+  longrange: "看点：有没有长程项；电荷如何得到（预测、电荷平衡、隐变量）；静电用直接求和、Ewald 还是 PME；色散用 D3/D4 还是学习。",
+  forces: "看点：自动微分（保守）还是直接输出（非保守）；对坐标求导还是对边矢量求导（边力 → 便于并行与维里）。",
+  stress: "看点：对应变张量求导还是由边力计算维里；是否支持 NPT。",
+  output: "看点：Hessian / 声子、电荷、偶极、极化率、磁矩、不确定度等额外能力。",
+};
+let stage = D.stages.includes(param("stage")) ? param("stage") : "interaction";
+const famOn = new Set();
+const counts = {};
+for (const st of D.stages) counts[st] = Object.values(S).filter((xs) => xs.some((x) => x.stage === st)).length;
+
+function chips() {
+  document.getElementById("stage-chips").innerHTML = D.stages.map((s, i) =>
+    `<button class="chip ${s === stage ? "on" : ""}" data-s="${s}">${i + 1}. ${STAGE[s].name} <span class="small">(${counts[s]})</span></button>`).join("");
+  document.querySelectorAll("#stage-chips .chip").forEach((b) => b.addEventListener("click", () => {
+    stage = b.dataset.s;
+    history.replaceState(null, "", "?stage=" + stage);
+    chips(); render();
+  }));
+}
+document.getElementById("fam-chips").innerHTML = D.families.map((f) =>
+  `<button class="chip" data-f="${f}" style="border-color:${famColor(f)}">${esc(FAMILY[f].name)}</button>`).join("");
+document.querySelectorAll("#fam-chips .chip").forEach((b) => b.addEventListener("click", () => {
+  const f = b.dataset.f;
+  famOn.has(f) ? famOn.delete(f) : famOn.add(f);
+  b.classList.toggle("on");
+  b.style.background = famOn.has(f) ? famColor(f) : "";
+  render();
+}));
+document.getElementById("q").addEventListener("input", render);
+
+function render() {
+  document.getElementById("stage-intro").innerHTML = `<b>${esc(STAGE[stage].name)}</b>${esc(STAGE[stage].desc)}<br><span class="small">${esc(LOOK[stage])}</span>`;
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const order = D.models.slice().sort((a, b) => D.families.indexOf(a.family) - D.families.indexOf(b.family) || String(a.year).localeCompare(String(b.year)));
+  let n = 0;
+  const html = order.map((m) => {
+    if (famOn.size && !famOn.has(m.family)) return "";
+    const steps = (S[m.id] || []).map((x, i) => ({ ...x, i })).filter((x) => x.stage === stage);
+    if (!steps.length) return "";
+    if (q && !steps.some((x) => (x.title + x.plain + (x.math || "")).toLowerCase().includes(q)) && !m.name.toLowerCase().includes(q)) return "";
+    n++;
+    return `<div class="card step" style="border-left:4px solid ${famColor(m.family)}">
+      <div class="flex"><a href="${modelLink(m)}#step-${steps[0].i}"><b style="font-size:1.08rem">${esc(m.name)}</b></a>${famBadge(m.family)}<span class="muted small">${esc(m.year)}</span></div>
+      ${steps.map((x) => `<h3 style="margin-top:10px"><a href="${modelLink(m)}#step-${x.i}" style="color:inherit">${esc(x.title)}</a></h3><p>${esc(x.plain)}</p>${x.math ? `<div class="math" data-tex="${esc(x.math)}"></div>` : ""}`).join("")}
+    </div>`;
+  }).join("");
+  const list = document.getElementById("list");
+  list.innerHTML = html || '<p class="muted">没有模型在这一步有单独的实现说明（或被筛选掉了）。</p>';
+  document.getElementById("count").textContent = `${n} 个模型`;
+  renderAllTex(list);
+}
+chips();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+{
+  "id": "snap",
+  "name": "SNAP",
+  "fullName": "SNAP: Spectral Neighbor Analysis Potential（用 FitSNAP 拟合）",
+  "year": 2015,
+  "authors": "A. P. Thompson, L. P. Swiler, C. R. Trott, S. M. Foiles, G. J. Tucker",
+  "paper": {"title": "Spectral neighbor analysis method for automated generation of quantum-accurate interatomic potentials", "venue": "J. Comput. Phys. 285, 316–330 (2015)", "url": "https://doi.org/10.1016/j.jcp.2014.12.018"},
+  "repos": ["FitSNAP"],
+  "family": "linear-kernel",
+  "tags": ["双谱 bispectrum", "4D 超球谐", "线性 / 二次回归", "LAMMPS 原生", "严格局域", "可选 ACE / NN 拟合"],
+  "framework": "Python（NumPy/SciPy/scikit-learn 求解）+ LAMMPS C++ 描述符内核（compute snap）；可选 PyTorch / JAX 神经网络",
+  "license": "GPL-2.0（LICENSE 为 GNU GPL v2；pyproject 分类器误写 MIT）",
+  "oneLiner": "把中心原子周围的邻居密度投影到四维单位球面（3-球面）上的超球谐 U^j，再用 Clebsch–Gordan 系数把三组展开系数耦合成旋转不变的“双谱” B_{j1 j2 j}；原子能就是这些双谱的线性（SNAP）或二次（qSNAP）组合，系数用加权最小二乘一次解出。",
+  "analogy": "像给每个原子拍一张“360° 全景照片”：先把距离也折算成一个角度，让三维邻居全都落在一个四维球面上，再用一套标准“音阶”（超球谐）分解这张照片，取三组音阶搭配后的“和弦强度”（双谱）当指纹——无论怎么转动照片，指纹都不变。能量只是这些指纹的加权和，权重靠解一个大线性方程组得到。",
+  "arch": {
+    "geometry": "邻居相对位置 → 3-球面角 (θ0, θ, φ)，θ0 = rfac0·π·(r−rmin0)/(R_ii'−rmin0)；展开到 4D 超球谐 U^j_{m,m'}，2j ≤ twojmax",
+    "equivariance": "旋转/平移/置换严格不变（描述符本身是不变量，无等变中间特征）",
+    "lmax": "twojmax 默认 6（2j ≤ 6）；文档推荐 4/6/8 → 每元素 14/30/55 个双谱分量",
+    "bodyOrder": "线性 SNAP：最高 4 体（三个邻居密度 × 中心）；qSNAP（quadraticflag）：B 两两相乘 → 最高 7 体",
+    "layers": "无消息传递层（单次描述符 + 回归）；NN 选项为每原子 MLP（Softplus）",
+    "cutoff": "R_ii' = rcutfac·(radelem_i + radelem_i')；默认 rcutfac = 4.67637、radelem = 0.5 → 4.67637 Å",
+    "receptiveField": "= r_c（单个截断球，无消息传递）",
+    "message": "无消息传递；u^j = U^j(0) + Σ f_c(r)·w·U^j(θ0,θ,φ)，再用 SO(4) CG 系数三重耦合得 B_{j1j2j}（均在 LAMMPS compute snap 内完成）",
+    "readout": "E_i = β_0^{α_i} + β^{α_i}·B_i（线性）；qSNAP 再加 ½ B_iᵀ α B_i；NN 选项 E_i = MLP(B_i)",
+    "forces": "conservative",
+    "forcesDetail": "F_j = −Σ_i β·∂B_i/∂r_j；LAMMPS 解析给出描述符导数，力就是 β 与 dB/dr 的点积（NN 用 ∂E_i/∂B_i 链式法则）",
+    "stress": "LAMMPS 输出 6 行双谱维里，×1.6021765e6/V（eV/Å³→bar）后与 β 点积，按 xx,yy,zz,yz,xz,xy 拟合",
+    "longRange": "无；严格局域",
+    "dispersion": "无内置；可在 [REFERENCE] 段用 hybrid/overlay 叠加任意 LAMMPS 对势（示例为 ZBL）",
+    "chargeSpin": "SNAP 本身无；atom_style charge/spin 仅供参考势使用",
+    "otherOutputs": "逐原子描述符/能量（bikflag）、线性模型贝叶斯 UQ（ANL 等求解器输出协方差）、每原子标量 NN 拟合（FitTorchPAS）",
+    "strictlyLocal": true,
+    "complexity": "O(N·M)：每条邻居对算 U^j 与 dU/dr，每个原子做一次 CG 三重耦合；单原子代价随 twojmax 多项式快速增长；读出仅 O(N·K) 点积",
+    "accel": "LAMMPS 原生 pair_style snap（MPI 空间分解）；NN 经 ML-IAP（mliap model mliappy）部署；FitSNAP 用 mpi4py 并行算描述符、ScaLAPACK 分布式求解、PyTorch 训练可用 GPU"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "推理只需在 LAMMPS 里算一次双谱再做点积，没有神经网络和消息传递，是最快的一类势函数（twojmax 越大越慢）。"},
+    "expressiveness": {"v": 3, "why": "4 体不变量 + 线性回归，容量有限；qSNAP（最高 7 体二次项）与 NN 选项能提升，但不及高体序等变网络。"},
+    "longRange": {"v": 1, "why": "严格局域，无内置色散或静电，只能靠 [REFERENCE] 段叠加 LAMMPS 现成对势。"},
+    "scalability": {"v": 5, "why": "严格局域、无层间通信，LAMMPS 原生 pair_style snap 天然支持空间分解并行。"},
+    "physics": {"v": 4, "why": "保守力、严格旋转不变、广延；余弦开关使能量和力在 r_c 处连续；近程排斥靠叠加 ZBL 参考势而非内生。"},
+    "coverage": {"v": 2, "why": "官方只有能量/力/应力；额外提供线性模型的贝叶斯不确定度与每原子标量拟合。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞 → LAMMPS 盒子",
+      "plain": "FitSNAP 先用 scraper 把 DFT 数据（JSON/XYZ/VASP 等）读成坐标、元素、晶胞以及能量、力、应力。随后为每个构型在内存里启动一个 LAMMPS 实例，用 prism 区域建立三斜周期盒子，再一次性 create_atoms。之后所有描述符都由 LAMMPS 计算，Python 端只负责组装矩阵。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\qquad \\text{region prism}(a_x,b_y,c_z,b_x,c_x,c_y),\\ \\text{pbc}=(p,p,p)",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_base.py", "start": 170, "end": 181, "must": "region pybox prism", "caption": "_set_box_helper：用三斜 prism 建立周期盒子"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_base.py", "start": 183, "end": 200, "must": "self._lmp.create_atoms(", "caption": "_create_atoms_helper：按元素类型批量创建原子"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居：交给 LAMMPS（单个截断球，run 0 触发计算）",
+      "plain": "FitSNAP 不自己建图：它把邻居皮厚设成 1e-20、用 nsq 方式并允许每原子最多 10000 个邻居，让 LAMMPS 精确找出截断球内的全部邻居（含周期镜像）。然后执行 run 0（零步 MD），只为触发一次 compute snap。因为只有一个截断球、没有消息传递，原子 i 的能量只取决于 r_c 内的原子。",
+      "math": "\\mathcal N(i)=\\{\\,i':\\ r_{ii'}<R_{ii'}\\},\\qquad R_{ii'}=\\text{rcutfac}\\,(R_{\\alpha_i}+R_{\\alpha_{i'}})",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_base.py", "start": 165, "end": 168, "must": "neighbor 1.0e-20 nsq", "caption": "_set_neighbor_list：几乎零皮厚的精确邻居表"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_base.py", "start": 235, "end": 236, "must": "run 0", "caption": "_run_lammps：零步运行触发 compute"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何：把距离折算成第三个角，邻居落到 3-球面上；余弦开关函数",
+      "plain": "SNAP 的巧思是把邻居距离 r 也映射成一个角 θ0（最大角由 rfac0 控制，默认 0.99363·π），于是 (θ0, θ, φ) 恰好是四维单位球面上的一个点，可以用 4D 超球谐同时描述“多远”和“朝哪”。每个邻居再乘上元素权重 w 和开关函数 f_c（switchflag=1 默认开启），使贡献在截断处平滑地降为零。这些参数由 FitSNAP 以 LAMMPS 变量的形式传给 compute snap。",
+      "math": "\\theta_0=\\text{rfac0}\\,\\pi\\,\\frac{r_{ii'}-r_{\\min 0}}{R_{ii'}-r_{\\min 0}},\\qquad f_c(r)=\\tfrac12\\Big[\\cos\\Big(\\pi\\,\\frac{r-r_{\\min 0}}{R_{ii'}-r_{\\min 0}}\\Big)+1\\Big]",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 25, "end": 51, "must": "variable rfac0 equal", "caption": "_prepare_lammps：把 twojmax/rcutfac/rfac0/wj/radelem 写成 LAMMPS 变量，并加载参考势"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 18, "end": 24, "must": "self.rfac0 = self.get_value(", "caption": "[BISPECTRUM] 段默认参数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符：4D 超球谐展开 → 双谱 B_{j1 j2 j}（LAMMPS compute snap）",
+      "plain": "把邻居密度 ρ_i = δ(0) + Σ f_c·w·δ(r−r_ii') 投影到超球谐 U^j_{m,m'} 上，得到会随旋转而混合的展开系数 u^j。再用 SO(4) 的 Clebsch–Gordan 系数把三组系数 u^{j1}、u^{j2}、u^j 耦合起来，旋转带来的变化恰好抵消，得到严格不变的双谱 B_{j1 j2 j}。FitSNAP 以 2j 为整数，按 j1 ≥ j2、j ≥ j1、|j1−j2| ≤ j ≤ min(twojmax, j1+j2) 且同奇偶列出全部分量；数值本身由一条 compute snap 命令在 LAMMPS 中算出（FitSNAP 仓库里没有这部分内核）。",
+      "math": "u^{j}_{m,m'}=U^{j}_{m,m'}(0,0,0)+\\sum_{r_{ii'}<R_{ii'}}f_c(r_{ii'})\\,w_{i'}\\,U^{j}_{m,m'}(\\theta_0,\\theta,\\phi),\\qquad B_{j_1j_2j}=\\sum_{m_1,m_1'}\\sum_{m_2,m_2'}\\sum_{m,m'}\\big(u^{j}_{m,m'}\\big)^{*}H^{jmm'}_{j_1m_1m_1',\\,j_2m_2m_2'}\\,u^{j_1}_{m_1,m_1'}\\,u^{j_2}_{m_2,m_2'}",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 99, "end": 110, "must": "compute snap all snap ${rcutfac} ${rfac0} ${twojmax}", "caption": "_set_computes：拼出 compute snap 命令，计算全部交给 LAMMPS"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 80, "end": 91, "must": "self.blist.append([i, j1, j2, j])", "caption": "_generate_b_list：枚举 (j1, j2, j) 双谱指标"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "变体：qSNAP 二次项、显式多元素 ChemSNAP、或换成 ACE 描述符",
+      "plain": "quadraticflag=1 时，FitSNAP 用 combinations_with_replacement 再生成所有 B_k·B_k' 的上三角乘积，相当于在能量里加入二次项（Ta_Quadratic 示例），体序从 4 提到最高 7。chemflag=1 启用显式多元素 SNAP（InP 示例），按邻居元素组合细分描述符，数量乘以 n_types³。若计算器改用 LAMMPSPACE，则同一流程改调 compute pace 计算 ACE 描述符，后续的线性/NN 拟合完全复用。",
+      "math": "E_i=\\beta_0^{\\alpha_i}+\\boldsymbol\\beta^{\\alpha_i}\\cdot\\mathbf B_i+\\tfrac12\\,\\mathbf B_i^{\\mathsf T}\\boldsymbol\\alpha^{\\alpha_i}\\mathbf B_i\\qquad(\\{B_kB_{k'}\\}_{k\\le k'}\\ \\text{作为额外线性特征})",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 110, "end": 118, "must": "combinations_with_replacement(self.blist[atype], r=2)", "caption": "quadraticflag：追加二次描述符"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_pace.py", "start": 70, "end": 81, "must": "compute pace all pace coupling_coefficients.yace", "caption": "ACE 选项：改用 compute pace"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "组装线性方程：能量行 = 平均双谱 + 元素占比列，目标减去参考势",
+      "plain": "线性 SNAP 的总能是各原子贡献之和，所以 LAMMPS 只需返回按元素分块的“所有原子 B 之和”，FitSNAP 再除以原子数得到一行特征；bzeroflag=0（默认）时还在每个元素块前加一列“该元素原子占比”，对应常数项 β_0。目标值是 (E_DFT − E_ref)/N：E_ref 来自 [REFERENCE] 段叠加的参考势（官方示例为 ZBL 近程排斥），SNAP 只学剩下的部分。每行再乘组权重，构成加权最小二乘问题。",
+      "math": "\\frac{E^{\\text{DFT}}_s-E^{\\text{ref}}_s}{N_s}=\\sum_{\\alpha}\\Big[\\beta_0^{\\alpha}\\,\\frac{N_s^{\\alpha}}{N_s}+\\boldsymbol\\beta^{\\alpha}\\cdot\\frac{1}{N_s}\\sum_{i\\in\\alpha}\\mathbf B_i\\Big]",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 433, "end": 436, "must": "b_sum_temp = lmp_snap[irow:irow+bik_rows, :ncols_bispectrum] / num_atoms", "caption": "_collect_lammps：双谱总和 / 原子数"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 455, "end": 474, "must": "(energy - ref_energy) / num_atoms", "caption": "元素占比列（β_0）+ 扣除参考势能量"},
+        {"repo": "FitSNAP", "file": "examples/Ta_Linear_JCP2014/Ta-example.in", "start": 39, "end": 44, "must": "zbl 4.0 4.8", "caption": "Ta 示例：hybrid/overlay 叠加 ZBL 参考势"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "求解系数 β：SVD 最小二乘（默认）/ Ridge / ARD",
+      "plain": "所有构型的能量、力、应力行堆成大矩阵 A，按权重缩放后解 min‖W(Aβ−b)‖²。默认 SVD 求解器调用 scipy.linalg.lstsq（相对奇异值截断 1e-13）；RIDGE 加 L2 正则（默认 alpha=1e-8，不拟合截距）；ARD 用 scikit-learn 的自动相关判定做稀疏贝叶斯回归。因为模型对 β 是线性的，这一步是一次性确定解、无需迭代训练，所以 SNAP 拟合极快，便于大量超参扫描。",
+      "math": "\\boldsymbol\\beta^{*}=\\arg\\min_{\\boldsymbol\\beta}\\big\\lVert\\mathbf W(\\mathbf A\\boldsymbol\\beta-\\mathbf b)\\big\\rVert_2^2\\ (+\\lambda\\lVert\\boldsymbol\\beta\\rVert_2^2),\\qquad E_s=E^{\\text{ref}}_s+\\sum_{i}\\big(\\beta_0^{\\alpha_i}+\\boldsymbol\\beta^{\\alpha_i}\\cdot\\mathbf B_i\\big)",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/solvers/svd.py", "start": 42, "end": 54, "must": "lstsq(aw, bw, 1.0e-13)", "caption": "SVD：加权后 scipy lstsq"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/solvers/ridge.py", "start": 45, "end": 58, "must": "reg = Ridge(alpha = alval, fit_intercept = False)", "caption": "RIDGE：L2 正则"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/solvers/ard.py", "start": 39, "end": 48, "must": "ARDRegression(n_iter=1000", "caption": "ARD：稀疏贝叶斯回归"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "可选：神经网络 SNAP（PyTorch 求解器）",
+      "plain": "设置 nonlinear=1、solver=PYTORCH，并打开 bikflag（逐原子描述符）和 dgradflag（逐邻居导数）后，每个原子的双谱 B_i 被送进一个 MLP：第一层 Linear 用于标准化，隐藏层用 Softplus，输出原子能，再用 index_add 按构型求和。多元素时可共用一个网络或每元素一个网络（multi_element_option=1/2）。损失为能量与力的加权均方误差，按 epoch 梯度下降训练。",
+      "math": "E_s=\\sum_{i\\in s}\\mathrm{NN}_{\\alpha_i}(\\mathbf B_i),\\quad \\mathrm{NN}=L_n\\circ\\cdots\\circ\\mathrm{Softplus}\\circ L_1\\circ L_0^{\\text{std}};\\qquad \\mathcal L=\\frac1M\\sum_m\\frac1{N_m}\\Big\\{w^E_m(\\hat E_m-E_m)^2+\\frac{w^F_m}{3}\\sum_{k}^{3N_m}(\\hat F_{mk}-F_{mk})^2\\Big\\}",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/lib/neural_networks/pytorch.py", "start": 24, "end": 35, "must": "layers.append(torch.nn.Softplus())", "caption": "create_torch_network：标准化 Linear + Softplus MLP"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/lib/neural_networks/pytorch.py", "start": 119, "end": 141, "must": "predicted_energy_total.index_add_(0, indices, per_atom_energies.squeeze())", "caption": "FitTorch.forward：原子能 → 构型能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：β 与描述符导数 dB/dr 的点积（NN 时用链式法则）",
+      "plain": "β 是常数，所以力只需要描述符导数：compute snap 在 A 矩阵的力行里直接给出每个原子每个方向上的 −Σ_i ∂B_i/∂r_j，力就是这一行与 β 的点积，严格保守；训练时与 F_DFT − F_ref 对齐。NN 选项先用 autograd 求 ∂E_i/∂B_i，再与 LAMMPS 给出的逐邻居导数 dB_i/dr_j 逐元素相乘、按原子累加（代码注释：compute snap 已给出负导数，无需再乘 −1）——仍是解析链式法则，不对坐标反传。",
+      "math": "\\mathbf F_j=-\\sum_{i}\\boldsymbol\\beta^{\\alpha_i}\\cdot\\frac{\\partial\\mathbf B_i}{\\partial\\mathbf r_j}\\ \\ (\\text{线性}),\\qquad \\mathbf F_j=-\\sum_{i}\\frac{\\partial E_i}{\\partial\\mathbf B_i}\\cdot\\frac{\\partial\\mathbf B_i}{\\partial\\mathbf r_j}\\ \\ (\\text{NN})",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 492, "end": 507, "must": "db_atom_temp = lmp_snap[irow:irow + nrows_force, :ncols_bispectrum]", "caption": "力行 = 描述符导数；目标 = DFT 力 − 参考势力"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/lib/neural_networks/pytorch.py", "start": 163, "end": 199, "must": "dEdD = torch.autograd.grad(per_atom_energies,", "caption": "NN：dE/dB × dB/dr，按原子 j 收缩"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：双谱维里 × β / 体积",
+      "plain": "应力同样是 β 的线性函数：compute snap 额外输出 6 行“双谱维里”，FitSNAP 乘以 1.6021765e6 并除以体积（把 eV/Å³ 换成 LAMMPS metal 单位的 bar），再与 DFT 应力按 xx, yy, zz, yz, xz, xy 的顺序对齐。应力不需要额外模型或求导，拟合时只是多 6 行方程（权重 vweight）。",
+      "math": "\\sigma_{ab}=\\frac{c}{V}\\sum_{k}\\beta_k\\,W^{B}_{ab,k},\\quad W^{B}_{ab,k}=-\\sum_{j}r_j^{a}\\,\\frac{\\partial\\sum_iB^{i}_{k}}{\\partial r_j^{b}},\\quad c=1.6021765\\times10^{6},\\ ab\\in\\{xx,yy,zz,yz,xz,xy\\}",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/calculators/lammps_snap.py", "start": 525, "end": 541, "must": "vb_sum_temp = 1.6021765e6*lmp_snap[irow:irow + nrows_virial, :ncols_bispectrum] / lmp_volume", "caption": "维里行：单位换算、扣除参考势应力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "导出：LAMMPS pair_style snap / mliap 直接跑 MD",
+      "plain": "线性拟合后，FitSNAP 写出 .snapcoeff（每元素 β，含 β_0）、.snapparam（rcutfac、twojmax、rfac0、各开关）和 .mod：有参考势时写成 hybrid/overlay（如 ZBL）+ snap，否则只写 pair_style snap。NN 模型被包成 TorchWrapper：LAMMPS ML-IAP 传入描述符，网络返回原子能和 β_i = ∂E_i/∂B_i，力与应力再由 LAMMPS 用同一套 dB/dr 机制算出——相当于“每个原子一个局部 β”的 SNAP。",
+      "math": "\\text{snap: }E=E^{\\text{ref}}+\\sum_i\\big(\\beta_0^{\\alpha_i}+\\boldsymbol\\beta^{\\alpha_i}\\cdot\\mathbf B_i\\big),\\qquad \\text{ML-IAP: }\\boldsymbol\\beta_i=\\frac{\\partial E_i^{\\text{NN}}}{\\partial\\mathbf B_i}",
+      "code": [
+        {"repo": "FitSNAP", "file": "fitsnap3lib/io/outputs/snap.py", "start": 187, "end": 221, "must": "{snap_filename}.snapcoeff {snap_filename}.snapparam", "caption": "_to_potential_file：生成 LAMMPS pair_style 命令"},
+        {"repo": "FitSNAP", "file": "fitsnap3lib/lib/neural_networks/write.py", "start": 66, "end": 78, "must": "beta_nn = torch.autograd.grad(energy_nn.sum(), descriptors)[0]", "caption": "TorchWrapper.forward：NN 给 LAMMPS 返回 β_i 与原子能"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "twojmax", "value": "6（默认）；文档推荐 4/6/8 → 14/30/55 个分量", "note": "超球谐最高阶 2j，决定每元素双谱数", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 19, "end": 19, "must": "self.twojmax = self.get_value("}},
+    {"name": "rcutfac", "value": "4.67637（默认）", "note": "截断参数，R_ii' = rcutfac·(radelem_i + radelem_i')", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 20, "end": 20, "must": "self.rcutfac = self.get_value("}},
+    {"name": "rfac0 / rmin0", "value": "0.99363 / 0.0", "note": "距离 → 角 θ0 的映射参数", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 21, "end": 22, "must": "self.rfac0 = self.get_value("}},
+    {"name": "wj / radelem", "value": "1.0 / 0.5（每元素一个值）", "note": "邻居密度权重 / 元素截断半径因子", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 23, "end": 24, "must": "self.radelem = self.get_value("}},
+    {"name": "switchflag", "value": "1", "note": "开启余弦开关函数", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 64, "end": 64, "must": "self.switchflag = self.get_value("}},
+    {"name": "bzeroflag / quadraticflag", "value": "0 / 0（默认）", "note": "是否减去无邻居原子的 B0；是否加二次项（qSNAP）", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/calculator_sections/bispectrum.py", "start": 43, "end": 45, "must": "self.quadraticflag = self.get_value("}},
+    {"name": "solver", "value": "SVD（默认）", "note": "另有 RIDGE、ARD、LASSO、ANL(UQ)、ScaLAPACK、PYTORCH、JAX 等", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/solver_sections/solver.py", "start": 15, "end": 15, "must": "self.solver = self.get_value("}},
+    {"name": "RIDGE alpha", "value": "1.0E-8（默认）", "note": "L2 正则强度", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/solver_sections/ridge.py", "start": 13, "end": 13, "must": "self.alpha = self.get_value("}},
+    {"name": "Ta 线性示例", "value": "twojmax=6, rcutfac=4.67637, ZBL 参考势 (zbl 4.0 4.8)", "note": "examples/Ta_Linear_JCP2014", "code": {"repo": "FitSNAP", "file": "examples/Ta_Linear_JCP2014/Ta-example.in", "start": 1, "end": 13, "must": "twojmax = 6"}},
+    {"name": "Ta 二次 qSNAP 示例", "value": "twojmax=8, rcutfac=5.594, quadraticflag=1, bzeroflag=1", "note": "examples/Ta_Quadratic_JCP2018", "code": {"repo": "FitSNAP", "file": "examples/Ta_Quadratic_JCP2018/Ta-example.in", "start": 1, "end": 13, "must": "rcutfac = 5.594"}},
+    {"name": "PYTORCH layer_sizes", "value": "num_desc 512 512 1（默认）；Ta_PyTorch_NN 示例为 num_desc 64 64 1", "note": "每原子 MLP 宽度（Softplus）", "code": {"repo": "FitSNAP", "file": "fitsnap3lib/io/sections/solver_sections/pytorch.py", "start": 18, "end": 22, "must": "num_desc 512 512 1"}}
+  ],
+  "speedNotes": [
+    "推理 = LAMMPS 里算一次双谱 + 一次点积：没有神经网络、没有消息传递；FLOPs 主要花在每条邻居对的超球谐 U^j 及其导数，以及每个原子的 CG 三重耦合上。",
+    "代价随 twojmax 快速上升：每元素描述符从 14（2J=4）到 30（2J=6）再到 55（2J=8），耦合运算增长得更快；ChemSNAP 的描述符数还要乘 n_types³。",
+    "qSNAP 只在每个原子上多一次 K×K 二次型，力仍复用同一套 dB/dr，额外推理开销很小，却能显著提高体序。",
+    "拟合几乎“免费”：一次 SVD/岭回归即可；FitSNAP 用 mpi4py 分发描述符计算、共享内存存放 A 矩阵，超大问题可用 ScaLAPACK 分布式求解。",
+    "NN 选项需导出逐邻居导数（dgradflag），内存随 邻居数 × 描述符数 增长；文档指出小批量时 GPU 收益有限，且 ML-IAP 部署时 TorchWrapper 固定在 CPU 上运行。"
+  ],
+  "weakNotes": [
+    "严格局域：能量只取决于 r_c（默认 4.67637 Å，文档推荐 4–5 Å）内的原子，没有消息传递，也没有任何显式静电或色散项。",
+    "SNAP 是“势函数形式 + 拟合工具”，不是基础模型：训练泛函由用户数据决定；若 DFT 不含 vdW，层状材料层间结合、分子晶体、物理吸附都无法正确描述。",
+    "官方补救手段是 [REFERENCE] 段的 hybrid/overlay：把 LAMMPS 现成对势（示例中是 ZBL 近程排斥）叠加在 SNAP 上，SNAP 只拟合残差；色散或库仑项也只能这样由用户自行叠加。",
+    "无总电荷/自旋输入；带电缺陷、离子液体、电荷转移界面等需要真正长程静电的体系超出 SNAP 能力。"
+  ],
+  "downstreamNotes": [
+    "力是解析导数、严格保守，NVE 能量守恒；LAMMPS 原生实现使大规模 MD 成为 SNAP 的主要用途（Ta、W–Be、InP、Fe 等示例）。",
+    "余弦开关只保证能量和力在 r_c 处连续，二阶导在截断处不连续；声子/热导需 Hessian 时要留意截断附近的不光滑。",
+    "弹性常数与状态方程：训练直接拟合应力行（Ta 示例含 Elastic_* 与 Volume_* 组），线性模型的应力与能量严格自洽。",
+    "线性模型自带不确定度：ANL 等 UQ 求解器给出系数协方差，可用于误差棒和主动学习；但没有偶极、极化率、磁矩等官方输出。"
+  ],
+  "strengths": ["推理极快、严格局域，LAMMPS 原生并行，适合超大规模 MD", "拟合是一次线性最小二乘，无需迭代训练，便于超参扫描与 UQ", "旋转/置换严格不变、保守力，模型可解释", "同一框架可换 ACE 描述符、加二次项或接 PyTorch/JAX 神经网络"],
+  "weaknesses": ["线性模型容量有限，复杂多元素或反应体系精度不及深度模型", "描述符数随 twojmax 与元素数（ChemSNAP ×n³）快速膨胀", "无长程静电/色散，近程排斥也要靠参考势补充", "无通用基础模型，需针对体系自备 DFT 数据并依赖带 Python 接口的 LAMMPS"],
+  "pretrained": ["Ta 线性 SNAP（examples/Ta_Linear_JCP2014，含训练 JSON）", "Ta 二次 qSNAP（examples/Ta_Quadratic_JCP2018）", "W–Be SNAP（examples/WBe_PRB2019）", "InP 显式多元素 SNAP（examples/InP_JPCA2020）", "Fe SNAP（examples/Fe_Linear_NPJ2021）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

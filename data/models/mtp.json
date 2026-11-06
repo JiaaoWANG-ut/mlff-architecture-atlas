@@ -1,0 +1,189 @@
+{
+  "id": "mtp",
+  "name": "MTP",
+  "fullName": "MTP: Moment Tensor Potentials（矩张量势，MLIP-3 软件包）",
+  "year": 2016,
+  "authors": "A. V. Shapeev；MLIP: I. S. Novikov, K. Gubaev, E. V. Podryabinkin, A. V. Shapeev",
+  "paper": {"title": "Moment tensor potentials: A class of systematically improvable interatomic potentials", "venue": "Multiscale Modeling & Simulation 14, 1153–1173 (2016)", "url": "https://doi.org/10.1137/15M1054183"},
+  "repos": ["mlip-3"],
+  "family": "linear-kernel",
+  "tags": ["笛卡尔矩张量 (Cartesian moment tensors)", "线性基 + 可训练径向函数", "严格局域", "MaxVol 主动学习", "磁性 MTP", "C++ / LAMMPS"],
+  "framework": "C++（BLAS，可选 MPI）；LAMMPS 通过外部接口 interface-lammps-mlip-3",
+  "license": "BSD-2-Clause（部分源文件头仍保留旧的“仅限非商业研究”声明）",
+  "oneLiner": "把每个原子的邻居环境写成一组“矩张量” M_{μ,ν}=Σ_j f_μ(r_ij)·r̂_ij^{⊗ν}（可训练的距离权重 × 方向的 ν 次张量积），再把它们相乘、完全收缩成旋转不变的标量 B_α；原子能就是这些标量的线性组合，提高 level 就能系统性地逼近任意多体势。",
+  "analogy": "像描述一个人周围的人群：先数各个距离圈里有多少人（ν=0），再看人群整体偏向哪边（ν=1，像“重心”），再看人群是拉长还是扁平（ν=2，像“惯性张量”）……这些量会随你转身而改变，但把它们互相点乘、缩并后得到的数字（如“偏心程度的平方”）与朝向无关。MTP 把这样的不变量按 level 由粗到细列成一张表，再给每一项一个权重相加得到能量。",
+  "arch": {
+    "geometry": "相对位置 r_ij：距离 → Chebyshev×(R_cut−r)²；方向 → 笛卡尔张量幂 r̂^{⊗ν}（单项式 x^a y^b z^c / r^ν）",
+    "equivariance": "O(3) 不变：矩张量本身是笛卡尔等变张量，完全收缩后的 B_α 为旋转/反演不变标量；对邻居求和保证置换不变",
+    "lmax": "无球谐；笛卡尔张量秩 ν 由 lev_max 决定（16 级模板中 ν ≤ 6）",
+    "bodyOrder": "B_α 为 k 个矩张量的收缩 → (k+1) 体；lev_max 越大可含越多因子（完备多项式不变量基）",
+    "layers": "无消息传递：一次描述符计算 + 线性读出",
+    "cutoff": "max_dist：模板 5 Å（需按体系手动设定）；径向基下界 min_dist 模板 2 Å",
+    "receptiveField": "= R_cut（单个截断球，严格局域）",
+    "message": "无；M_{μ,ν}(n_i)=Σ_j f_μ(r_ij,z_i,z_j)·r̂_ij^{⊗ν} 仅在截断球内求和",
+    "readout": "线性：V_i = ξ_0(z_i) + Σ_α ξ_α B_α(n_i)（ξ_α 跨元素共享，元素差异在径向系数里）",
+    "forces": "conservative",
+    "forcesDetail": "手写解析反传：∂V/∂B=ξ → 沿 alpha_index_times 倒推 → 乘基本矩雅可比得 ∂V_i/∂r_ij；F_i += ∂V_i/∂r_ij，F_j −= ∂V_i/∂r_ij",
+    "stress": "解析维里 W_ab = −Σ_i Σ_j (∂V_i/∂r_ij)_a (r_ij)_b（单位 eV，即应力×体积）",
+    "longRange": "无（严格局域）",
+    "dispersion": "无内置色散；截断内的 vdW 只能从训练数据中隐式学到",
+    "chargeSpin": "无总电荷/自旋输入；磁性 MTP 可输入每原子共线（标量）磁矩 m_i",
+    "otherOutputs": "原子能、原子维里（LAMMPS 接口）、∂E/∂m_i（磁性 MTP）、MaxVol 外推等级 MV_grade",
+    "strictlyLocal": true,
+    "complexity": "每原子 O(M·n_basic·N_Q·M_mag²) 计算基本矩 + O(n_times) 收缩，对 N 线性；16 级单元素模板 n_basic=130、n_times=969、N_B=92",
+    "accel": "纯 CPU C++/BLAS；训练与 MaxVol 选点支持 MPI；LAMMPS 外部接口（MPI 空间分解）；仓库无 GPU 内核"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "纯线性模型：每个邻居只做 Chebyshev 递推与单项式乘法，收缩只与原子数成正比，无神经网络，与 SNAP/ACE/NEP 同属最快一档（CPU）。"},
+    "expressiveness": {"v": 4, "why": "矩张量收缩构成完备的多项式不变量基，体序与角分辨率随 lev_max 系统提高；但读出是线性的且 ξ_α 跨元素共享，容量不及深度等变网络。"},
+    "longRange": {"v": 1, "why": "严格局域，没有任何静电、色散或电荷模块。"},
+    "scalability": {"v": 4, "why": "严格局域、每原子独立计算，可经 LAMMPS 接口做 MPI 空间分解；但只有 CPU 实现，无 GPU 加速。"},
+    "physics": {"v": 4, "why": "保守力、能量为原子能之和、(R_cut−r)² 使能量与力在截断处连续、可选近程排斥项；但截断处二阶导不连续（仅 C¹）。"},
+    "coverage": {"v": 2, "why": "除能量/力/应力外有原子能、原子维里、外推等级 γ 和磁性 MTP 的 ∂E/∂m；无偶极、电荷、Hessian 等官方输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素类型、晶胞（可选磁矩）",
+      "plain": "MTP 的输入就是一个原子构型：N 个原子的笛卡尔坐标、元素类型和晶胞矩阵；磁性 MTP 还需要每个原子的（共线、标量）磁矩 m_i。在 LAMMPS 中，pair 风格把本地原子 + ghost 原子的坐标与邻居表直接交给 MLIP，MLIP 返回能量、力、应力（以 eV 计的维里），以及可选的原子能和原子维里。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,z_i,[m_i])\\}_{i=1}^{N},\\qquad \\mathbf L\\in\\mathbb R^{3\\times3}",
+      "code": [{"repo": "mlip-3", "file": "src/external/interface.cpp", "start": 53, "end": 68, "must": "MLIP_CalcCfgForLammps(", "caption": "LAMMPS 接口：输入晶格/坐标/类型/邻居表，输出力、能量、应力、原子能、原子维里"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻域 n_i：截断球内的所有邻居（含周期镜像）",
+      "plain": "对每个原子 i，收集距离小于 R_cut（.almtp 中的 max_dist，模板为 5 Å）的所有原子 j，记录相对位置 r_ij = r_j − r_i、距离和元素类型；周期边界先补 ghost 镜像原子再处理。MTP 的一切计算都只在这个“邻域”内进行，没有消息传递，所以原子能严格局域，总代价随原子数 N 线性增长。",
+      "math": "n_i=\\{(\\mathbf r_{ij},z_j):\\ \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i,\\ |\\mathbf r_{ij}|<R_{\\text{cut}}\\}",
+      "code": [{"repo": "mlip-3", "file": "src/configuration.cpp", "start": 117, "end": 150, "must": "if ((dist_ij < cut_off) && (i <= orig_atom_inds[j]))", "caption": "InitNbhs_ConstructNbhs：距离 < cut_off 的原子对写入双方邻域（vecs/dists/types）"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "径向基：Chebyshev 多项式 × (R_cut − r)²",
+      "plain": "距离 r 先线性映射到 [−1, 1] 得到 ξ，再用 Chebyshev 递推生成 N_Q 个多项式 T_β(ξ)（模板 radial_basis_size = 8），每个都乘以 (R_cut − r)²。这个平方因子让基函数及其一阶导数在截断处同时为零，原子进出截断球时能量和力都连续。带 _repuls 后缀的版本还会在 r < min_dist 时截住距离并加排斥项（见能量一步）。",
+      "math": "Q^{(\\beta)}(r)=T_\\beta(\\xi)\\,(R_{\\text{cut}}-r)^2,\\qquad \\xi=\\frac{2r-(R_{\\min}+R_{\\text{cut}})}{R_{\\text{cut}}-R_{\\min}},\\qquad T_{\\beta}=2\\xi\\,T_{\\beta-1}-T_{\\beta-2}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/basis.cpp", "start": 369, "end": 376, "must": "vals[0] = scaling * (1 * (val - max_val)*(val - max_val));", "caption": "RB_Chebyshev::Calc：T_β(ξ)·(r−R_cut)² 递推"},
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 79, "end": 92, "must": "p_RadialBasis = new RB_Chebyshev(ifs);", "caption": "MLMTPR::Load：按 radial_basis_type 选择径向基"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学相关的径向函数 f_μ(r, z_i, z_j)",
+      "plain": "MTP 没有“原子嵌入向量”，化学信息全部放在径向函数里：对每一对元素 (z_i, z_j) 和每个 μ（16 级模板用 4 个），f_μ 是 N_Q 个径向基的线性组合，系数 c 是可训练参数，个数 = N_Q × M_mag² × 元素数² × μ 数。磁性 MTP 再把中心原子与邻居磁矩的基函数 Φ(m_i)Φ(m_j) 乘进来。",
+      "math": "f_\\mu(r,z_i,z_j)=\\sum_{\\beta=0}^{N_Q-1}\\sum_{a,b=1}^{M}c^{(\\beta,a,b)}_{\\mu,z_i,z_j}\\,Q^{(\\beta)}(r)\\,\\Phi_a(m_i)\\,\\Phi_b(m_j)\\qquad(M=1,\\ \\Phi\\equiv1\\ \\text{if non-magnetic})",
+      "code": [
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 904, "end": 931, "must": "int idx = (type_central*C + type_outer)*K*R*M*M + (mu * R + xi)*M*M + ii*M + jj;", "caption": "按 (z_i, z_j, μ, β, 磁性基) 索引 regression_coeffs 求和得到 f_μ"},
+        {"repo": "mlip-3", "file": "src/mtpr.h", "start": 90, "end": 100, "must": "return p_RadialBasis->size*mbasis_size*mbasis_size*species_count*species_count*radial_func_count;", "caption": "径向系数个数；其后才是线性系数 ξ"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "矩张量 M_{μ,ν}：距离权重 × 方向的 ν 次张量积",
+      "plain": "这是 MTP 的核心描述符。对每个邻居，把 f_μ(r_ij) 乘以方向向量的 ν 次外积，再对所有邻居求和：ν=0 是加权配位数，ν=1 像“重心偏移”，ν=2 像惯性张量……论文写作 r_ij^{⊗ν}；代码中每个分量是 f_μ·x^a y^b z^c / r^{a+b+c}，即使用单位向量 r̂（相当于把 1/r^ν 吸收进 f_μ）。对称张量只存独立分量 (μ,a,b,c)（alpha_index_basic），同时顺手记下每个分量对 r_ij 的雅可比，供后面求力。",
+      "math": "M_{\\mu,\\nu}(n_i)=\\sum_{j\\in n_i}f_\\mu(r_{ij},z_i,z_j)\\,\\underbrace{\\hat{\\mathbf r}_{ij}\\otimes\\cdots\\otimes\\hat{\\mathbf r}_{ij}}_{\\nu},\\qquad \\big[M_{\\mu,\\nu}\\big]_{abc}=\\sum_{j}f_\\mu(r_{ij})\\,\\frac{x_{ij}^{a}y_{ij}^{b}z_{ij}^{c}}{r_{ij}^{\\,a+b+c}}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 873, "end": 889, "must": "coords_powers_[k][a] = coords_powers_[k - 1][a] * NeighbVect_j[a];", "caption": "每个邻居：径向基求值，预计算 r^k 与 x^a、y^b、z^c"},
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 935, "end": 950, "must": "moment_vals[i] += val * mult0;", "caption": "基本矩：f_μ/r^ν × x^a y^b z^c 累加到 moment_vals，并记录雅可比"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "收缩成标量基函数 B_α（level ≤ lev_max）",
+      "plain": "把若干矩张量相乘并把指标两两缩并（点乘、双点乘……），得到旋转不变的标量 B_α。代码用一张“乘法表” alpha_index_times：每一项把两个已有分量相乘、乘上整数重数（对称张量重复分量的个数）后累加到新分量，逐级递推出高阶收缩；alpha_moment_mapping 再挑出其中的标量作为基函数。哪些组合入选由 level 决定：lev M_{μ,ν} = 2 + 4μ + ν，乘积的 level 为各因子之和，只保留 ≤ lev_max 的。k 个矩相乘就是 (k+1) 体项，提高 lev_max 即系统性地提高体序和角分辨率。",
+      "math": "B_\\alpha(n_i)=\\mathrm{contr}\\big(M_{\\mu_1,\\nu_1}\\otimes\\cdots\\otimes M_{\\mu_k,\\nu_k}\\big),\\qquad \\sum_{t=1}^{k}\\big(2+4\\mu_t+\\nu_t\\big)\\le\\mathrm{lev}_{\\max},\\qquad m_{\\gamma}\\mathrel{+}=c\\,m_{\\alpha}m_{\\beta}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 985, "end": 992, "must": "moment_vals[alpha_index_times[i][3]] += val2 * val0 * val1;", "caption": "按 alpha_index_times 递推乘积与收缩"},
+        {"repo": "mlip-3", "file": "MTP_templates/readme.txt", "start": 1, "end": 3, "must": "levels 6 through 28", "caption": "官方模板：level 6–28（2、4 级已弃用）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "原子能 = 基函数的线性组合；总能 = 求和",
+      "plain": "每个原子的能量 V(n_i) 是一个按中心元素区分的常数 ξ_0(z_i)，加上所有标量基函数的线性组合 Σ ξ_α B_α；ξ_α 对所有元素共享。总能是原子能之和，因此天然广延。能量对 ξ 线性、对径向系数 c 非线性：训练器 LinOptimize 在固定 c 时解线性方程组求 ξ，NonLinOptimize 用 BFGS 优化全部系数。若选 RBChebyshev_repuls，r < min_dist 时还会加一个很硬的指数排斥项，防止原子“穿透”。",
+      "math": "E=\\sum_{i=1}^{N}V(n_i),\\qquad V(n_i)=\\xi_0(z_i)+\\sum_{\\alpha=1}^{N_B}\\xi_\\alpha\\,B_\\alpha(n_i)\\qquad\\big(+\\,10^4\\big[e^{-10(r_{ij}-1)}-e^{-10(R_{\\min}-1)}\\big]\\ \\text{if } r_{ij}<R_{\\min}\\big)",
+      "code": [
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 994, "end": 998, "must": "buff_site_energy_ += linear_coeffs(species_count + i) * moment_vals[alpha_moment_mapping[i]];", "caption": "原子能：ξ_0(z_i) + Σ ξ_α B_α"},
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 975, "end": 983, "must": "double multiplier = 10000;", "caption": "RBChebyshev_repuls：r < min_dist 时的指数排斥项"},
+        {"repo": "mlip-3", "file": "src/mtpr_trainer.cpp", "start": 175, "end": 182, "must": "AddToSLAE(cfg);", "caption": "LinOptimize：固定径向函数，组装线性方程组求 ξ"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：手写反向传播的解析梯度",
+      "plain": "力是能量的负梯度，但 MLIP 不依赖自动微分框架，而是手写三步反传：① ∂V/∂B_α 就是 ξ_α；② 沿乘法表倒序把梯度传回基本矩；③ 乘以前向时算好的“基本矩对 r_ij 的雅可比”，得到 ∂V_i/∂r_ij。由于 V_i 只依赖相对位置，中心原子得 +∂V_i/∂r_ij、邻居得 −∂V_i/∂r_ij，力严格保守且满足牛顿第三定律。",
+      "math": "\\frac{\\partial V_i}{\\partial \\mathbf r_{ij}}=\\sum_{\\gamma\\in\\text{basic}}\\frac{\\partial V_i}{\\partial m_\\gamma}\\frac{\\partial m_\\gamma}{\\partial \\mathbf r_{ij}},\\qquad \\mathbf F_i\\mathrel{+}=\\frac{\\partial V_i}{\\partial \\mathbf r_{ij}},\\quad \\mathbf F_j\\mathrel{-}=\\frac{\\partial V_i}{\\partial \\mathbf r_{ij}}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/mtpr.cpp", "start": 1004, "end": 1031, "must": "buff_site_energy_ders_[j][a] += site_energy_ders_wrt_moments_[i] * moment_jacobian_(i, j, a);", "caption": "三步反向传播：ξ → 乘法表倒推 → 乘雅可比"},
+        {"repo": "mlip-3", "file": "src/basic_mlip.cpp", "start": 297, "end": 312, "must": "cfg.force(nbh.inds[j]) -= buff_site_energy_ders_[j];", "caption": "AnyLocalMLIP::CalcEFS：累加原子能与力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：邻域内的解析维里",
+      "plain": "有了每个原子对的 ∂V_i/∂r_ij，维里就是它与 r_ij 外积之和（取负号），与力在同一循环里得到，几乎不增加开销。MLIP 中 stresses 以 eV 为单位，即应力 × 体积，除以晶胞体积得到应力；调试函数用有限差分校验 ∂E/∂L = −L^{−T}·stresses。",
+      "math": "W_{ab}=-\\sum_{i}\\sum_{j\\in n_i}\\Big(\\frac{\\partial V_i}{\\partial \\mathbf r_{ij}}\\Big)_a(\\mathbf r_{ij})_b,\\qquad \\frac{\\partial E}{\\partial \\mathbf L}=-\\mathbf L^{-T}\\mathbf W,\\qquad \\boldsymbol\\sigma=\\mathbf W/\\Omega",
+      "code": [
+        {"repo": "mlip-3", "file": "src/basic_mlip.cpp", "start": 316, "end": 319, "must": "cfg.stresses[a][b] -= buff_site_energy_ders_[j][a] * nbh.vecs[j][b];", "caption": "维里累加"},
+        {"repo": "mlip-3", "file": "src/basic_potentials.cpp", "start": 81, "end": 83, "must": "Matrix3 dEdL = -cfg.lattice.inverse().transpose() * cfg.stresses;", "caption": "有限差分自检：∂E/∂L = −L^{−T}·stresses"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "磁性 MTP：磁矩作为输入，并输出 ∂E/∂m",
+      "plain": "若 .almtp 中定义了 magnetic_basis_type 且构型带磁矩，MLIP 先对每个原子的（共线、标量）磁矩 m_i 计算一组磁性基函数 Φ_a(m_i) 及其导数，再乘进径向函数（见化学径向函数一步）。于是原子能同时依赖位置和磁矩，反传时顺带得到 ∂E/∂m_i（en_der_wrt_magmom）；在 LAMMPS 中还会把 ghost 原子上的该导数通信回原始原子。",
+      "math": "V_i=V\\big(\\{\\mathbf r_{ij},z_j,m_j\\}_{j\\in n_i},z_i,m_i\\big),\\qquad \\frac{\\partial E}{\\partial m_k}=\\sum_i\\frac{\\partial V_i}{\\partial m_k}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/basic_mlip.cpp", "start": 16, "end": 32, "must": "p_MagneticBasis->Calc(cfg.magmom(i)[0]);", "caption": "InitMagMomBasis：每个原子磁矩的基函数值与导数"},
+        {"repo": "mlip-3", "file": "src/basic_mlip.cpp", "start": 310, "end": 314, "must": "cfg.en_der_wrt_magmom(nbh.my_ind)[0] += buff_se_ders_wrt_magmom_central_;", "caption": "累加 ∂E/∂m（邻居与中心原子）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "主动学习：MaxVol 外推等级 γ",
+      "plain": "MTP 最有特色的是内建的“可信度”指标。从训练数据中选出 n 行（n = 全部参数个数）最“线性无关”的方程组成方阵 A（每行是能量——或原子能/力/应力——对全部参数的梯度，相当于把模型线性化）；新构型的行 b 乘以 A⁻¹，最大绝对值元素就是外推等级 γ（MV_grade）。γ 超过 threshold（默认 1.001）的构型会被换入活动集；在 MD/弛豫中，γ 超过 threshold_save 的构型被保存，超过 threshold_break（默认 11）则直接中止，随后 select_add → DFT → 重训，循环往复。",
+      "math": "\\gamma=\\max_{k}\\big|(\\mathbf b\\,\\mathbf A^{-1})_k\\big|,\\qquad \\mathbf b=\\frac{\\partial E}{\\partial\\boldsymbol\\theta}\\in\\mathbb R^{1\\times n},\\qquad \\gamma>\\gamma_{\\text{th}}\\Rightarrow\\text{select}",
+      "code": [
+        {"repo": "mlip-3", "file": "src/maxvol.cpp", "start": 262, "end": 274, "must": "BLAS_M3_equal_M1_mult_M2T(&B(0, 0), &invA(0, 0), &BinvA(0, 0), m, n, n);", "caption": "CalcSwapGrade：B·A⁻¹，取最大绝对值元素为等级"},
+        {"repo": "mlip-3", "file": "src/cfg_selection.cpp", "start": 489, "end": 506, "must": "if (max_grade > threshold_select)", "caption": "Select：等级超过阈值则换入活动集"},
+        {"repo": "mlip-3", "file": "src/cfg_sampling.cpp", "start": 198, "end": 216, "must": "Breaking threshold exceeded", "caption": "外推过大时中断 MD/弛豫"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "radial_basis_type", "value": "RBChebyshev", "note": "T_β(ξ)·(R_cut−r)²；可选 RBChebyshev_repuls（带近程排斥）", "code": {"repo": "mlip-3", "file": "MTP_templates/16.almtp", "start": 6, "end": 10, "must": "radial_basis_type = RBChebyshev"}},
+    {"name": "max_dist (R_cut)", "value": "5 Å（模板值，需按体系修改）", "note": "截断半径", "code": {"repo": "mlip-3", "file": "MTP_templates/readme.txt", "start": 11, "end": 12, "must": "max_dist = 5 <<< maximal (cutoff) distance"}},
+    {"name": "min_dist (R_min)", "value": "2 Å（模板值）", "note": "径向基下界；训练时默认用训练集中实际最小原子间距更新（--no_mindist_update=false）", "code": {"repo": "mlip-3", "file": "MTP_templates/readme.txt", "start": 11, "end": 11, "must": "min_dist = 2 <<< minimal reasonably possible distance"}},
+    {"name": "radial_basis_size (N_Q)", "value": "8（常用 8、6、10、4、12）", "note": "每个径向函数的 Chebyshev 项数", "code": {"repo": "mlip-3", "file": "MTP_templates/readme.txt", "start": 13, "end": 13, "must": "typical values are (in order of frequency of use): 8,6,10,4,12"}},
+    {"name": "radial_funcs_count (μ 个数)", "value": "4（16 级模板）", "note": "不同径向函数 f_μ 的个数", "code": {"repo": "mlip-3", "file": "MTP_templates/16.almtp", "start": 10, "end": 10, "must": "radial_funcs_count = 4"}},
+    {"name": "lev_max", "value": "模板 6–28（偶数级）；2、4 级已弃用", "note": "lev M_{μ,ν}=2+4μ+ν，决定基函数集合与体序", "code": {"repo": "mlip-3", "file": "MTP_templates/readme.txt", "start": 1, "end": 2, "must": "levels 6 through 28"}},
+    {"name": "alpha_scalar_moments (N_B)", "value": "92（16 级、单元素模板）", "note": "标量基函数 B_α 个数（另加每元素常数 ξ_0）", "code": {"repo": "mlip-3", "file": "MTP_templates/16.almtp", "start": 16, "end": 16, "must": "alpha_scalar_moments = 92"}},
+    {"name": "energy / force / stress weight", "value": "1 / 0.01 / 0.001", "note": "mlp train 损失权重", "code": {"repo": "mlip-3", "file": "src/mlp/mlp_commands.cpp", "start": 558, "end": 560, "must": "Default=0.01"}},
+    {"name": "iteration_limit / tolerance", "value": "1000 / 1e-8", "note": "BFGS 训练迭代上限与停止判据", "code": {"repo": "mlip-3", "file": "src/mlp/mlp_commands.cpp", "start": 568, "end": 569, "must": "--iteration_limit=<int>: maximal number of iterations. Default=1000"}},
+    {"name": "threshold (γ_select) / init_value", "value": "1.001 / 1e-6", "note": "MaxVol 选点阈值与活动集初始化值", "code": {"repo": "mlip-3", "file": "src/cfg_selection.h", "start": 120, "end": 121, "must": "double threshold_select = 1.001;"}},
+    {"name": "threshold_break", "value": "11（默认）；示例脚本用 threshold_save=2、threshold_break=10", "note": "MD/弛豫中外推等级超过即中止", "code": {"repo": "mlip-3", "file": "src/cfg_sampling.h", "start": 27, "end": 27, "must": "double threshold_break = 11.0;"}}
+  ],
+  "speedNotes": [
+    "开销主要在“基本矩”：每个邻居要对每个 alpha_index_basic 分量（16 级单元素模板 130 个）做 N_Q=8 项径向求和与单项式乘法，代价 ∝ 原子数 × 邻居数 × 分量数 × N_Q（磁性版再乘 M_mag²）。",
+    "收缩（alpha_index_times，16 级模板 969 项）只与原子数成正比、与邻居数无关；level 越高，分量数、乘法表和基函数数迅速增长，推理与训练都变慢。",
+    "能量对 ξ 线性，力与应力用手写三步反传在同一循环里得到，不需要自动微分框架，内存占用很小。",
+    "纯 C++/BLAS 的 CPU 实现：训练与 MaxVol 选点可用 MPI 并行，MD 通过 LAMMPS 接口做空间分解；仓库中没有 GPU 内核。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖 max_dist（模板 5 Å）内的邻居，没有消息传递，感受野就是 R_cut。",
+    "没有任何静电、色散项，也没有电荷或总电荷/自旋输入；截断外的 vdW r⁻⁶ 尾巴与静电 r⁻¹ 完全丢失。",
+    "MTP 没有预训练模型，训练数据由用户用 DFT 自行生成（MLIP 带有 VASP 接口），泛函由用户决定；若用 PBE 等不含色散的泛函，层状 vdW 材料、分子晶体、物理吸附会被低估。",
+    "带电缺陷、离子液体、界面电荷转移等需要长程静电的体系无法正确描述，仓库中也没有官方的长程修正模块。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 解析应力，可直接用于 MD、几何优化（mlp relax 驱动）和弹性常数/状态方程计算。",
+    "(R_cut−r)² 只保证能量与力连续，二阶导在截断处不连续；没有原生 Hessian，声子需用有限差分计算。",
+    "最具特色的是 on-the-fly 主动学习：MD/弛豫中实时计算外推等级 γ，超过 threshold_save 保存、超过 threshold_break 中止，再 select_add → DFT → 重训，适合在训练过程中自动扩充数据。",
+    "磁性 MTP 以共线磁矩为输入并给出 ∂E/∂m，可用于磁性材料中磁矩与晶格的耦合模拟。",
+    "没有偶极、极化率或电荷输出，不能直接用于 IR/Raman 光谱或介电性质。"
+  ],
+  "strengths": ["线性模型 + 笛卡尔矩张量，推理速度属于最快一档", "提高 lev_max 即可系统性地增加体序与角分辨率（完备多项式基）", "内建 MaxVol 外推等级与主动学习工作流", "严格局域 + LAMMPS 接口，适合大体系 MPI 并行", "支持磁性 MTP（∂E/∂m）"],
+  "weaknesses": ["无长程静电与色散，截断外物理完全缺失", "多元素时径向系数随元素数平方增长，ξ_α 跨元素共享，大化学空间下精度受限", "径向系数非线性，训练需 BFGS，结果依赖初始化", "无预训练基础模型，需针对每个体系从头训练", "只有 CPU 实现，无 GPU 加速"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

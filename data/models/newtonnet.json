@@ -1,0 +1,213 @@
+{
+  "id": "newtonnet",
+  "name": "NewtonNet",
+  "fullName": "NewtonNet: Newtonian Message Passing Network",
+  "year": 2022,
+  "authors": "M. Haghighatlari, J. Li, X. Guan 等, T. Head-Gordon（UC Berkeley THGLab）",
+  "paper": {"title": "NewtonNet: a Newtonian message passing network for deep learning of interatomic potentials and forces", "venue": "Digital Discovery 2022", "url": "https://doi.org/10.1039/D2DD00008C"},
+  "repos": ["NewtonNet"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔向量等变", "牛顿第三定律式力消息", "保守力 + 解析 Hessian", "可选 LES 长程静电", "有机分子/反应（ANI、T1x）"],
+  "framework": "PyTorch + PyTorch Geometric（scatter）+ LES",
+  "license": "学术许可(非商用；license.txt 为 UC Berkeley 条款，pyproject.toml 另标 MIT)",
+  "oneLiner": "把牛顿力学“搬进”消息传递：每条边按牛顿第三定律产生一对等大反向、沿键方向 r̂_ij 的“力”向量，原子把它们累加成等变的力特征 f_i，再用 f_i 的二次型（类似“受力→弹性能”）更新能量型标量；最终能量对坐标求导给出保守力，还能解析求 Hessian。",
+  "analogy": "把原子想成用弹簧连着的小球：每根弹簧沿连线对两端施加大小相等、方向相反的力（牛顿第三定律）。每个小球把所有弹簧力加成“合力”，还参考邻居的合力；最后用“合力有多大”估计自己储存了多少能量——弹簧受力越大，储存的弹性能越多（E≈F²/2k）。网络要学的就是“每根弹簧该用多大的力”。",
+  "arch": {
+    "geometry": "边向量 r_i−r_j → 归一化距离 d=r/r_c（20 个 Bessel × 9 阶多项式包络）+ 单位方向 r̂_ij（笛卡尔 3 维，无球谐）",
+    "equivariance": "E(3) 等变：标量 a_i 不变、向量 f_i（3×128）随旋转协变；能量不变、力等变",
+    "lmax": "相当于 l≤1（标量 + 笛卡尔矢量），无高阶张量",
+    "bodyOrder": "m_ij 为两体；f_i·W f_i 展开含 r̂_ij·r̂_ik → 第 1 层即有三体（键角），多层叠加更高",
+    "layers": "3（n_interactions 默认 3）",
+    "cutoff": "5.0 Å（构造函数与示例配置默认）",
+    "receptiveField": "3 × r_c ≈ 15 Å",
+    "message": "m_ij=W(e_ij)⊙φ(a_i)⊙φ(a_j)（对称）；向量消息 φ_F(m_ij) r̂_ij（反对称“牛顿力”）+ φ_f(m_ij)⊙f_j",
+    "readout": "a_i → MLP(128→128→128→1, SiLU) → 逐元素 scale/shift → 按结构求和（可加 LES 长程能）",
+    "forces": "conservative",
+    "forcesDetail": "F=−∂E/∂r，torch.autograd.grad 与 virial 同一次反传；另有可选 direct_force 头（潜在力向量投影），ASE 计算器始终用梯度力",
+    "stress": "单位阵形变 D 设为可求导，pos、cell 乘 sym(D)；σ=(∂E/∂D)/det(C)，virial=−∂E/∂D",
+    "longRange": "可选 LES：MLP 预测潜电荷 q_i，EnergyAggregator 加 Ewald 能（周期 k 空间 / 非周期实空间直接求和）",
+    "dispersion": "无（无 D3/D4 接口）",
+    "chargeSpin": "无总电荷/自旋输入；只有学到的潜原子电荷",
+    "otherOutputs": "解析 Hessian（torch.vmap 二阶导）、virial、潜电荷、Born 有效电荷（经 LES）、direct_force",
+    "strictlyLocal": false,
+    "complexity": "网络 O(N·M·C²)（每层每边两个 C×C MLP，向量通道 3C）；但模型内建图为每结构 O(N²) 全原子对",
+    "accel": "无专用内核 / torch.compile / LAMMPS / 多 GPU；仅 ASE 计算器（自动用 CUDA，默认 float32，可 float16），可多帧批量"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "没有球谐张量积，每条边只有两个 128 维 MLP 与逐元素乘，属 PaiNN/SchNet 档；但模型内全对 O(N²) 建图在大体系上会成为瓶颈。"},
+    "expressiveness": {"v": 3, "why": "只有标量 + l=1 笛卡尔向量，靠 f·Wf 引入键角（三体），与 PaiNN 类似，低于 MACE/NequIP 等高阶等变模型。"},
+    "longRange": {"v": 3, "why": "短程部分感受野约 3×5 Å；输出头内置可选的 LES 潜电荷 Ewald 静电，但无色散、无总电荷/自旋输入。"},
+    "scalability": {"v": 1, "why": "整图计算、O(N²) 全对建图、仅最小镜像，没有 LAMMPS / 空间分解 / 多 GPU 接口。"},
+    "physics": {"v": 4, "why": "保守力、9 阶多项式包络使径向特征在 r_c 处平滑归零、原子能求和保证广延；但无 ZBL 近程排斥，周期体系仅最小镜像。"},
+    "coverage": {"v": 4, "why": "能量/力之外官方实现了应力/virial、解析 Hessian、潜电荷、Born 有效电荷和 direct force；无偶极/极化率/磁矩头。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：元素、坐标、晶胞（非周期方向清零）",
+      "plain": "ASE 计算器把每个构型转成原子序数 z、包裹进晶胞的坐标 pos 和 3×3 晶胞；非周期方向的晶胞向量被置 0，晶胞全为 0 时就当孤立分子处理。若要输出力/应力/Hessian，坐标和一个初值为单位阵的“形变矩阵” D 会被设为 requires_grad，坐标与晶胞都乘上 sym(D) 后再建图——这样后面一次反传就能同时得到力和应力。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\ \\mathbf C\\ (\\text{非周期方向}=0);\\qquad \\mathbf r_i\\to\\mathbf r_i\\,\\mathrm{sym}(\\mathbf D),\\ \\mathbf C\\to\\mathbf C\\,\\mathrm{sym}(\\mathbf D),\\ \\mathbf D=\\mathbf I",
+      "code": [
+        {"file": "newtonnet/utils/ase_interface.py", "start": 131, "end": 142, "must": "cell[~pbc] = 0.0", "caption": "format_data：坐标 wrap、非周期方向晶胞清零、多帧拼成 batch"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 145, "end": 155, "must": "pos.requires_grad = True", "caption": "EmbeddingNet.forward：坐标与形变矩阵 D 可求导，pos/cell 乘 sym(D)"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：全原子对 + 最小镜像 + 5 Å 截断",
+      "plain": "模型内部的 RadiusGraph 先对每个结构用 meshgrid 列出所有 i≠j 原子对并算位移 r_i−r_j；周期体系用分数坐标取整做最小镜像修正，然后只保留距离小于 r_c 的边。写法简单且处处可微，但内存和时间随原子数 N² 增长；而且每对原子只保留最近的一个镜像，晶胞小于 2r_c 时会漏掉其它周期镜像。",
+      "math": "\\mathbf d_{ij}=\\mathbf r_i-\\mathbf r_j-\\mathbf C\\,\\mathrm{round}\\big(\\mathbf C^{-\\top}(\\mathbf r_i-\\mathbf r_j)\\big),\\qquad \\mathcal N(i)=\\{\\,j\\neq i:\\ \\lVert\\mathbf d_{ij}\\rVert<r_c\\,\\}",
+      "code": [
+        {"file": "newtonnet/layers/representations.py", "start": 70, "end": 100, "must": "torch.round(scaled_dist)", "caption": "RadiusGraph.forward：全对距离 → 最小镜像 → 截断过滤"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：d=r/r_c → 20 个 Bessel 基 × 9 阶多项式包络；方向 r̂_ij",
+      "plain": "每条边拆成“多远”和“朝哪”。距离先除以 r_c 得到 d∈(0,1)，用 20 个 sin(nπd)/d 的 Bessel 函数展开，再乘一个 p=9 的多项式包络，使径向特征及其导数在 r_c 处平滑归零（邻居进出截断球时力不跳变）。方向就是单位向量 r̂_ij=(r_i−r_j)/r_ij——NewtonNet 不用球谐函数，所有等变性都来自这个三维笛卡尔向量。",
+      "math": "d=\\frac{r_{ij}}{r_c},\\quad \\hat{\\mathbf r}_{ij}=\\frac{\\mathbf d_{ij}}{r_{ij}};\\qquad e_{ij,n}=u(d)\\,\\frac{\\sin(n\\pi d)}{d},\\ n=1..20,\\quad u(d)=1-\\tfrac{(p+1)(p+2)}{2}d^{p}+p(p+2)d^{p+1}-\\tfrac{p(p+1)}{2}d^{p+2},\\ p=9",
+      "code": [
+        {"file": "newtonnet/layers/representations.py", "start": 34, "end": 43, "must": "self.envelope(dist_edge) * self.embedding(dist_edge)", "caption": "EdgeEmbedding.forward：建图 → 距离/方向 → 包络 × Bessel"},
+        {"file": "newtonnet/layers/representations.py", "start": 128, "end": 133, "must": "dir = disp / dist", "caption": "ScaledNorm：单位方向与 d=r/r_c"},
+        {"file": "newtonnet/layers/representations.py", "start": 165, "end": 171, "must": "dist.pow(self.p + 2)", "caption": "PolynomialCutoff（p=9）"},
+        {"file": "newtonnet/layers/representations.py", "start": 217, "end": 235, "must": "torch.sin(self.frequencies * dist) / dist", "caption": "RadialBesselLayer：频率 nπ，n=1..n_basis"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始化：元素嵌入 a_i（标量）+ 全零“力”向量 f_i",
+      "plain": "每个原子的标量特征 a_i 由元素查表（nn.Embedding，128 维）得到，可看作“能量型”状态；同时给每个原子一个 3×128 的向量特征 f_i，初值全为 0——一开始原子“不受力”，力向量完全由后续消息构造，因此天然随坐标一起旋转。代码里被注释掉的返回值还带有 disp_node，说明早期版本另有独立的“位移”向量通道；当前 2.1.0 版只保留 f_i 一个向量通道。",
+      "math": "\\mathbf a_i^{(0)}=\\mathrm{Emb}(Z_i)\\in\\mathbb R^{128},\\qquad \\vec{\\mathbf f}_i^{(0)}=\\mathbf 0\\in\\mathbb R^{3\\times128}",
+      "code": [
+        {"file": "newtonnet/models/newtonnet.py", "start": 129, "end": 143, "must": "torch.zeros(z.size(0), 3, self.n_features", "caption": "元素嵌入 + 零初始化的力向量通道"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 159, "end": 162, "must": "disp_node", "caption": "注释中的旧接口仍保留 disp_node（位移通道）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：对称的标量消息 m_ij（“相互作用强度”）",
+      "plain": "对每条边，把径向特征 e_ij 线性映射到 128 维，再与两端原子的 MLP 特征逐元素相乘，得到消息 m_ij。由于距离和这个乘积都对 i、j 对称，m_ij=m_ji，可理解为“这对原子之间作用有多强”。所有邻居的消息求和后直接加到 a_i 上（残差更新）。",
+      "math": "m_{ij}=\\big(W_e\\,\\mathbf e_{ij}\\big)\\odot\\phi_a(\\mathbf a_i)\\odot\\phi_a(\\mathbf a_j)=m_{ji},\\qquad \\mathbf a_i\\leftarrow\\mathbf a_i+\\sum_{j\\in\\mathcal N(i)}m_{ij}",
+      "code": [
+        {"file": "newtonnet/models/newtonnet.py", "start": 180, "end": 186, "must": "self.message_edgepart = nn.Linear(n_basis, n_features, bias=False)", "caption": "φ_a：Linear-SiLU-Linear；W_e：无偏置线性层"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 207, "end": 215, "must": "message_nodepart[edge_index[0]] * message_nodepart[edge_index[1]]", "caption": "InteractionNet.forward：标量消息与求和更新"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：牛顿第三定律式“力”消息，更新向量特征 f_i",
+      "plain": "NewtonNet 的核心：m_ij 经无偏置 MLP 得到逐通道的“力大小”，乘上键方向 r̂_ij 就是成对力 F_ij。因为 m_ij 对称而 r̂_ij=−r̂_ji，自动有 F_ij=−F_ji——作用力与反作用力等大反向。另一项把邻居已有的力向量 f_j 经 m_ij 门控后传过来，让方向信息跨层传播。全程只有“标量×向量”，所以严格旋转等变。",
+      "math": "\\vec{\\mathbf F}_{ij}=\\phi_F(m_{ij})\\,\\hat{\\mathbf r}_{ij}=-\\vec{\\mathbf F}_{ji},\\qquad \\vec{\\mathbf f}_i\\leftarrow\\vec{\\mathbf f}_i+\\sum_{j\\in\\mathcal N(i)}\\Big[\\vec{\\mathbf F}_{ij}+\\phi_f(m_{ij})\\odot\\vec{\\mathbf f}_j\\Big]",
+      "code": [
+        {"file": "newtonnet/layers/representations.py", "start": 85, "end": 85, "must": "dist = pos[edge_index[0]] - pos[edge_index[1]]", "caption": "方向约定 r_i−r_j：交换 i、j 即变号（反对称）"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 188, "end": 197, "must": "self.equiv_message2 = nn.Sequential(", "caption": "φ_F、φ_f：无偏置两层 MLP"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 217, "end": 227, "must": "equiv_message1_equivpart = dir_edge.unsqueeze(2)", "caption": "力消息 φ_F(m)·r̂ 与邻居力传播 φ_f(m)⊙f_j → scatter 求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ③：由“力”更新能量型标量（f·W f）",
+      "plain": "累积好的力向量再反过来修正标量：对 x、y、z 三个分量求 f_i⊙(W f_i) 之和——本质是两个向量的点积，旋转下不变，相当于用“受力多大、方向是否一致”修正原子的能量状态（类似弹性能 ∝ F²）。展开后含 r̂_ij·r̂_ik，即键角信息，所以第一层就带三体关联。可选 LayerNorm（默认关闭）；①–③ 共重复 3 层。",
+      "math": "\\mathbf a_i\\leftarrow\\mathbf a_i+\\sum_{\\alpha\\in\\{x,y,z\\}}\\vec{\\mathbf f}_{i\\alpha}\\odot\\big(W_u\\,\\vec{\\mathbf f}_{i\\alpha}\\big)\\qquad\\big(\\text{第 1 层}=\\textstyle\\sum_{j,k}\\phi_F(m_{ij})\\odot W_u\\phi_F(m_{ik})\\;\\hat{\\mathbf r}_{ij}\\cdot\\hat{\\mathbf r}_{ik}\\big)",
+      "code": [
+        {"file": "newtonnet/models/newtonnet.py", "start": 229, "end": 237, "must": "torch.sum(force_node * self.equiv_update(force_node), dim=1)", "caption": "能量更新：f·W f（+ 可选 LayerNorm）"},
+        {"file": "newtonnet/models/newtonnet.py", "start": 89, "end": 94, "must": "for interaction_layer in self.interaction_layers:", "caption": "NewtonNet.forward：3 个交互层依次更新 (a, f)"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "读出与总能：原子能 MLP → 逐元素 scale/shift → 求和",
+      "plain": "最后一层的标量 a_i 经三层 MLP（128→128→128→1，SiLU）得到原子能，再乘逐元素 scale、加逐元素 shift：shift 由训练集“元素组成—能量”最小二乘拟合出每种元素的参考能，scale 取拟合残差的每原子均方根。随后按结构求和（若开启潜电荷再加 E_lr）。原子能求和保证广延性，元素参考能让网络只需学“结合能”部分。",
+      "math": "E=\\sum_{i}\\Big[s_{Z_i}\\,\\mathrm{MLP}_E(\\mathbf a_i)+\\mu_{Z_i}\\Big]\\ (+E_{\\text{lr}}),\\qquad \\boldsymbol\\mu=\\arg\\min_{\\boldsymbol\\mu}\\big\\lVert\\mathbf N\\boldsymbol\\mu-\\mathbf E^{\\text{ref}}\\big\\rVert^2",
+      "code": [
+        {"file": "newtonnet/models/output.py", "start": 88, "end": 100, "must": "nn.Linear(n_features, 1)", "caption": "EnergyOutput：原子能 MLP"},
+        {"file": "newtonnet/layers/scalers.py", "start": 47, "end": 59, "must": "output = output * self.scale(outputs.z)", "caption": "ScaleShift：按元素缩放与平移"},
+        {"file": "newtonnet/data/loader.py", "start": 210, "end": 219, "must": "torch.linalg.lstsq(formula, energy, driver='gelsd')", "caption": "MolecularStatistics：最小二乘元素参考能与残差尺度"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "可选长程：LES 潜电荷 + Ewald 静电",
+      "plain": "若 output_properties 中 'charge' 排在 'energy' 之前（示例配置正是如此），ChargeOutput 会用 MLP 从标量特征预测每个原子的“潜电荷” q_i，EnergyAggregator 再调用 LES 库算出这些电荷的静电能 E_lr 并加到短程能上。LES 逐结构判断：晶胞行列式≈0（分子）时用实空间直接求和，否则对高斯展宽电荷做倒空间 Ewald 求和（σ=1 Å，k 截断 2π/dl，dl=2）。潜电荷没有 DFT 电荷标签，只通过能量/力间接学习；没有色散项。",
+      "math": "q_i=s^{q}_{Z_i}\\mathrm{MLP}_q(\\mathbf a_i)+\\mu^{q}_{Z_i},\\qquad E_{\\text{lr}}=\\frac{1}{2\\varepsilon_0V}\\sum_{0<|\\mathbf k|\\le 2\\pi/\\mathrm{dl}}\\frac{e^{-\\sigma^2k^2/2}}{k^2}\\Big|\\sum_i q_i e^{i\\mathbf k\\cdot\\mathbf r_i}\\Big|^2-E_{\\text{self}}",
+      "code": [
+        {"file": "newtonnet/models/output.py", "start": 190, "end": 202, "must": "charge = self.layers(outputs.atom_node)", "caption": "ChargeOutput：潜电荷 MLP"},
+        {"file": "newtonnet/models/output.py", "start": 233, "end": 247, "must": "return energy_sr + energy_lr", "caption": "EnergyAggregator：短程能求和 + LES 长程能"},
+        {"repo": "les", "file": "src/les/module/ewald.py", "start": 65, "end": 84, "must": "torch.linalg.det(box_now) < 1e-6", "caption": "LES：非周期用实空间直接求和，周期用倒空间求和"},
+        {"repo": "les", "file": "src/les/module/ewald.py", "start": 346, "end": 353, "must": "kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq", "caption": "倒空间核 exp(−σ²k²/2)/k² × |S(k)|²"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分（另有可选潜在力头）",
+      "plain": "生产用的力是 gradient_force：对总能做一次 torch.autograd.grad，同时对坐标和形变矩阵 D 求导（顺带得到 virial），F=−∂E/∂r，因此力严格保守。训练时 create_graph=True，使力损失能再反传；示例损失为每原子能量 MSE×1 加力 MSE×50。另有可选的 direct_force 头：用标量 MLP 加权把潜在力向量 f_i 投影成 3 维力，可配 'cos' 变换只约束方向；示例配置未启用，ASE 计算器也始终用梯度力。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i};\\qquad \\mathbf F^{\\text{dir}}_i=\\sum_{k=1}^{128}\\big[\\mathrm{MLP}_F(\\mathbf a_i)\\big]_k\\,\\vec{\\mathbf f}_{i,k},\\quad \\mathcal L_{\\cos}=\\ell\\big(\\cos(\\mathbf F^{\\text{dir}}_i,\\mathbf F^{\\text{ref}}_i),\\,1\\big)",
+      "code": [
+        {"file": "newtonnet/models/output.py", "start": 61, "end": 73, "must": "outputs.pos_grad, outputs.displacement_grad = grad(", "caption": "_save_grad：一次 autograd 同时对 pos 与 D 求导"},
+        {"file": "newtonnet/models/output.py", "start": 109, "end": 113, "must": "force = -outputs.pos_grad", "caption": "GradientForceOutput：F = −∂E/∂r"},
+        {"file": "newtonnet/models/output.py", "start": 129, "end": 132, "must": "self.layers(outputs.atom_node).unsqueeze(1) * outputs.force_node", "caption": "DirectForceOutput：潜在力向量投影（可选）"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力 / virial：对形变矩阵 D 求导",
+      "plain": "坐标和晶胞在建图前都乘了 sym(D)（D 初值为单位阵），所以同一次反传得到的 ∂E/∂D 就是维里；除以晶胞体积 det(C) 即应力，virial 输出取负号。ASE 接口再把 3×3 应力转成 Voigt 6 分量。由于周期邻居只取最小镜像，小晶胞上的应力同样受此限制。",
+      "math": "\\boldsymbol\\sigma=\\frac{1}{\\det\\mathbf C}\\,\\frac{\\partial E}{\\partial\\mathbf D}\\Big|_{\\mathbf D=\\mathbf I},\\qquad \\mathbf W=-\\frac{\\partial E}{\\partial\\mathbf D}\\Big|_{\\mathbf D=\\mathbf I}",
+      "code": [
+        {"file": "newtonnet/models/newtonnet.py", "start": 146, "end": 155, "must": "symmetric_displacement = (displacement + displacement.transpose(-1, -2)) / 2", "caption": "形变矩阵 D=I 对称化后作用于坐标与晶胞"},
+        {"file": "newtonnet/models/output.py", "start": 161, "end": 180, "must": "stress = virial / volume", "caption": "VirialOutput / StressOutput"},
+        {"file": "newtonnet/utils/ase_interface.py", "start": 78, "end": 80, "must": "stress[:, [0, 1, 2, 1, 0, 0], [0, 1, 2, 2, 2, 1]]", "caption": "ASE：3×3 → Voigt"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "二阶性质：解析 Hessian、Born 有效电荷",
+      "plain": "Hessian 输出对梯度力再求一次导：用 torch.vmap 对 3N 个单位向量批量做向量-雅可比积，得到完整的 3N×3N 二阶导矩阵；ASE 计算器检测到二阶性质时会自动给一阶导打开 create_graph。这样可直接得到振动频率，并为需要 Hessian 的过渡态搜索提供解析 Hessian。若训练了潜电荷，还可经 LES 计算 Born 有效电荷张量，用于红外等介电响应。",
+      "math": "H_{i\\alpha,j\\beta}=\\frac{\\partial^2E}{\\partial r_{i\\alpha}\\,\\partial r_{j\\beta}}=-\\frac{\\partial F_{i\\alpha}}{\\partial r_{j\\beta}},\\qquad Z^{*}_{i,\\alpha\\beta}=\\frac{\\partial P_\\alpha}{\\partial r_{i\\beta}}",
+      "code": [
+        {"file": "newtonnet/models/output.py", "start": 141, "end": 152, "must": "torch.vmap(", "caption": "HessianOutput：vmap 批量二阶导"},
+        {"file": "newtonnet/utils/ase_interface.py", "start": 122, "end": 129, "must": "layer.create_graph = True", "caption": "需要二阶导时保留一阶导计算图"},
+        {"file": "newtonnet/models/output.py", "start": 214, "end": 223, "must": "compute_bec=True", "caption": "BornEffectiveChargeOutput：LES 计算 BEC"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "5.0 Å", "note": "截断半径（构造函数默认，示例配置相同）", "code": {"file": "newtonnet/models/newtonnet.py", "start": 26, "end": 35, "must": "cutoff: float = 5.0"}},
+    {"name": "n_basis", "value": "20", "note": "Bessel 径向基个数"},
+    {"name": "包络阶数 p", "value": "9", "note": "PolynomialCutoff 多项式阶数", "code": {"file": "newtonnet/layers/representations.py", "start": 13, "end": 18, "must": "PolynomialCutoff(p=9)"}},
+    {"name": "n_features", "value": "128", "note": "标量通道 128，向量通道 3×128"},
+    {"name": "n_interactions", "value": "3", "note": "消息传递层数"},
+    {"name": "activation", "value": "swish（nn.SiLU）", "note": "所有 MLP 的激活函数", "code": {"file": "newtonnet/layers/activations.py", "start": 5, "end": 7, "must": "activation = nn.SiLU()"}},
+    {"name": "output_properties（示例配置）", "value": "['charge', 'energy', 'gradient_force']", "note": "charge 在前 → 能量自动加 LES 长程项", "code": {"file": "scripts/config.yml", "start": 30, "end": 36, "must": "output_properties: ['charge', 'energy', 'gradient_force']"}},
+    {"name": "损失权重", "value": "能量（每原子 MSE）1.0；gradient_force（MSE）50.0", "note": "示例配置", "code": {"file": "scripts/config.yml", "start": 45, "end": 52, "must": "weight: 50.0"}},
+    {"name": "direct_force 损失", "value": "示例未启用；可选 transform 'cos' / 'norm'", "note": "'cos' 只约束潜在力方向", "code": {"file": "newtonnet/train/loss.py", "start": 83, "end": 92, "must": "self.cos = nn.CosineSimilarity(dim=-1)"}},
+    {"name": "优化", "value": "Adam lr 1e-3；plateau（patience 15，factor 0.7，min_lr 1e-5）；clip_grad 1.0；1000 epochs", "note": "示例配置", "code": {"file": "scripts/config.yml", "start": 53, "end": 62, "must": "clip_grad: 1.0"}},
+    {"name": "精度", "value": "训练示例 double（float64）；ASE 计算器默认 float32", "note": "可选 float16", "code": {"file": "newtonnet/utils/ase_interface.py", "start": 23, "end": 30, "must": "precision: str = 'float32'"}},
+    {"name": "LES σ / dl", "value": "1.0 / 2.0", "note": "高斯电荷宽度与 k 空间截断 2π/dl（Les() 默认）", "code": {"repo": "les", "file": "src/les/les.py", "start": 81, "end": 83, "must": "les_arguments.get('sigma', 1.0)"}}
+  ],
+  "speedNotes": [
+    "主要 FLOPs 在边上：每层每条边要过两个 128×128 的两层 MLP（φ_F、φ_f），再与 3×128 的向量做逐元素乘，外加节点 MLP；没有 Clebsch–Gordan 张量积，属 PaiNN/SchNet 量级。",
+    "模型内部的 RadiusGraph 用 meshgrid 生成全部 N(N−1) 个原子对再按距离过滤，时间与显存都是 O(N²)：小分子无压力，上千原子以上的体系会被建图拖慢。",
+    "力与应力共享一次 autograd 反传（对 pos 与 D 同时求导）；Hessian 要对 3N 个方向做 vmap 向量-雅可比积并保留计算图，计算量与显存随原子数明显上升。",
+    "训练示例用 float64，ASE 计算器默认 float32、可选 float16；没有自定义 CUDA 内核、torch.compile 或 LAMMPS 接口。",
+    "开启 LES 时，legacy Ewald 模块逐结构循环计算（周期体系还要做 k 空间求和），批量训练有额外开销。"
+  ],
+  "weakNotes": [
+    "r_c=5 Å、3 层消息传递 → 能量最多依赖约 15 Å 内的原子；超出部分的色散与静电尾巴不在短程网络里。",
+    "没有 D3/D4 色散接口，仓库也未注明训练泛函；预训练权重名为 ani1 / ani1x / t1x（有机分子与反应数据），层状材料、分子晶体、物理吸附需自行训练并补色散。",
+    "可选 LES 用学到的潜电荷做 Ewald / 实空间静电，可补离子、极性体系的长程静电（示例配置默认开启）；但潜电荷无 DFT 电荷监督，也没有总电荷/自旋输入，不同电荷态、开壳层需分开训练。",
+    "周期体系只用最小镜像：晶胞任一方向小于 2r_c（约 10 Å）时会漏掉其它镜像和自身镜像，致密小晶胞必须先扩胞。"
+  ],
+  "downstreamNotes": [
+    "解析 Hessian（ASE 'hessian' 属性）可直接用于振动频率/简正模式，也可作为需要 Hessian 的过渡态优化的输入；t1x 检查点面向反应数据。",
+    "力严格保守 + 9 阶多项式包络平滑截断，NVE 分子动力学能量守恒；scripts/simulate.py 提供 ASE MD 示例。",
+    "virial/应力支持晶胞优化与 NPT，但受最小镜像与 O(N²) 建图限制，更适合分子与中小周期体系。",
+    "Born 有效电荷（经 LES）可用于红外强度等介电响应；潜电荷可作电荷分布的定性参考。",
+    "训练脚本支持载入预训练模型并分别冻结 embedding / interaction / 输出头 / scaler，便于在新的反应体系上微调。"
+  ],
+  "strengths": ["牛顿第三定律式反对称力消息，物理直观且严格等变", "无球谐/张量积，结构轻量、易实现", "原生解析 Hessian、应力与 Born 有效电荷，适合反应与振动研究", "可选 LES 长程静电，并支持预训练模型分层冻结微调"],
+  "weaknesses": ["模型内建图 O(N²) 且仅最小镜像，不适合大体系或小晶胞", "只有标量 + l=1 向量，角分辨率低于高阶等变模型", "无 LAMMPS / 多 GPU / 专用内核，只能经 ASE 调用", "无色散、无总电荷/自旋输入；预训练权重只覆盖有机分子与反应"],
+  "pretrained": ["NewtonNet ANI-1（'ani1'）", "NewtonNet ANI-1x（'ani1x'）", "NewtonNet T1x（'t1x'，反应数据）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

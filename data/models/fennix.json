@@ -1,0 +1,209 @@
+{
+  "id": "fennix",
+  "name": "FeNNix",
+  "fullName": "FeNNix: Force-field-enhanced Neural Network potentials（FeNNol 库：CRATE 嵌入 + 物理能量项）",
+  "year": 2024,
+  "authors": "T. Plé, O. Adjoua, L. Lagardère, J.-P. Piquemal",
+  "paper": {"title": "FeNNol: An efficient and flexible library for building force-field-enhanced neural network potentials", "venue": "J. Chem. Phys. 161, 042502 (2024)", "url": "https://doi.org/10.1063/5.0217688"},
+  "repos": ["FeNNol"],
+  "family": "invariant-mpnn",
+  "tags": ["JAX/Flax 模块化库", "CRATE：径向+键角+消息传递", "力场增强：ZBL/电荷/Coulomb/D3", "总电荷输入", "PIMD / adQTB 核量子效应", "可选 lmax>0 等变通道"],
+  "framework": "JAX/Flax（部分模块可选 e3nn-jax）",
+  "license": "LGPL-3.0",
+  "oneLiner": "FeNNix 是用 FeNNol 库“搭积木”组装的神经网络势：主体是 CRATE 嵌入（把径向、键角、消息传递等多种环境信息拼接后用 MLP 混合），再把 ZBL 近程排斥、受总电荷约束的原子电荷 + 库仑、D3 色散等经典力场项作为可微模块一起相加，最后用 jax.grad 得到保守力。",
+  "analogy": "像一份“拼盘式”体检表：CRATE 让每个原子同时填写“周围谁离我多远”（径向）、“两个邻居和我夹多大角”（键角）、“邻居们上一轮的状态”（消息传递），拼成一张总表交给 MLP 打分；而物理上早已知道的规律——原子核贴太近会强烈排斥、带电原子远距离相互作用、范德华色散——直接用经典公式算好附在后面，神经网络只需学剩下的部分。",
+  "arch": {
+    "geometry": "边向量 → 距离（spooky/高斯等径向基 × 余弦或多项式开关）；短截断角度子图上的键角 θ_jik（可学习 Fourier 基）；lmax>0 时另加实球谐 Y_lm",
+    "equivariance": "默认 E(3) 不变（lmax=0，只用距离与角度）；lmax>0 时额外维护等变球谐通道，但只把 l=0 标量部分拼回嵌入",
+    "lmax": "默认 0（纯不变）；角度用 cos(n·θ+φ)，n 初值 0…nmax_angle=4 且可学习；可选 lmax>0",
+    "bodyOrder": "每层显式 2 体（径向×邻居特征）+ 3 体（键角三元组）；多层消息传递后有效体序更高",
+    "layers": "nlayers 默认 2（examples/training/crate.yaml 用 3）",
+    "cutoff": "由模型 cutoff 设定（示例 5.1 Å；角度子图 3.5 Å 且去掉 H）；FeNNix-Bio1 实际取值不在本仓库",
+    "receptiveField": "约 nlayers × r_c（消息传递）；Coulomb / D3 / LODE 可用各自更长的图或 Ewald，不受此限",
+    "message": "压缩特征 s_j^dst ⊗ 径向基 → 对中心原子求和 L_i；键角：(D_ij⊙D_ik)⊗cos(nθ+φ) 求和；可选 LODE 核 1/(r²+a)^ν 长程求和",
+    "readout": "每层拼接 [s_i, L_i, 角度项, (等变标量), (LODE)] → MLP → 激活 → 遗忘门残差；最后 NEURAL_NET MLP 输出原子能",
+    "forces": "conservative",
+    "forcesDetail": "jax.grad(Σ 能量项, 坐标) → F = −∂E/∂R；NN 项与 ZBL/Coulomb/D3 等物理项一起自动求导",
+    "stress": "每个体系引入初值为单位阵的 3×3 缩放矩阵，坐标与晶胞同乘后对其求梯度得维里；ASE 中 σ = virial / V",
+    "longRange": "COULOMB 模块（裸/阻尼/Yukawa；PBC 下 Ewald：实空间 erfc + 倒空间 k 求和）；QEQ_D4 电荷平衡；CRATE 可选 LODE 长程特征",
+    "dispersion": "DISPERSION_D3 模块（BJ 阻尼形式，CN 插值 C6，C8 = 3·C6·r4r2_i·r4r2_j；默认 s6=1, s8=1, a1=0.4, a2=5.0）；另有 VDW_OQDO",
+    "chargeSpin": "总电荷 total_charge 为输入（ASE 取初始电荷之和）；CHARGE_HYPOTHESIS / CHARGE_CORRECTION 约束电荷和；CRATE 可选 charge_embedding；无自旋输入",
+    "otherOutputs": "原子能、原子电荷、偶极（fennol_md 可据此算 IR 光谱）、POLARIZATION 极化、ELECTRIC_FIELD 外场响应",
+    "strictlyLocal": false,
+    "complexity": "成对项 O(N·M·d_dst·n_rb) + 键角三元组 O(N·M_a²·d_angle·n_ang)（角度子图更短、可去 H）+ 物理项（Ewald 倒空间 ∝ N·N_k）",
+    "accel": "整个模型 jax.jit 编译；GPU 邻居表（gpu_preprocessing）；原生 fennol_md（Langevin、PIMD、adQTB、barostat）；ASE 计算器；Deep-HP(Tinker-HP) 接口（可选依赖）；reduce_memory 选项"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "默认只用标量特征（距离+键角），没有 CG 张量积，且整体 jax.jit 编译；但显式键角三元组和可选物理项（Ewald、D3）会增加开销，比 ANI/NEP 类描述符模型慢。"},
+    "expressiveness": {"v": 3, "why": "显式 3 体键角 + 多层消息传递，明显强于纯径向模型；但默认是不变表示，没有高阶等变张量积（lmax>0 为可选）。"},
+    "longRange": {"v": 4, "why": "库内有受总电荷约束的电荷模块、Coulomb（含 Ewald）、D3 色散与 LODE 长程特征，可直接作为能量项；具体模型启用哪些取决于配置。"},
+    "scalability": {"v": 2, "why": "多层消息传递 + 长程项不易做空间分解；主要在单个设备上整图 JIT 计算，大体系依赖 GPU 邻居表与 fennol_md / Deep-HP 接口。"},
+    "physics": {"v": 5, "why": "能量经 jax.grad 求导（保守）、截断处平滑开关、原子能求和保证广延性，并有 ZBL 近程排斥与总电荷守恒等物理约束。"},
+    "coverage": {"v": 4, "why": "除能量/力/应力外，还可输出原子电荷、偶极（IR 光谱）、极化与外电场响应等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：元素、坐标、晶胞与总电荷",
+      "plain": "输入是 N 个原子的元素序号 Z_i 与坐标 r_i，周期体系再给晶胞矩阵。与多数材料力场不同，FeNNol 把体系总电荷 total_charge 作为正式输入（ASE 计算器直接取各原子初始电荷之和），后面的电荷模块会据此约束原子电荷之和，带电分子/离子因此可以直接计算。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ Q_{\\text{tot}}\\in\\mathbb Z",
+      "code": [{"repo": "FeNNol", "file": "src/fennol/ase.py", "start": 81, "end": 86, "must": "get_initial_charges().sum()", "caption": "FENNIXCalculator.calculate：预处理并写入总电荷"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断内原子对 + 更短的“角度子图”",
+      "plain": "预处理 GraphGenerator（CPU 或 GPU）按“截断 + skin”找出所有原子对，记录 edge_src/edge_dst 与周期平移，并按预留的最大对数填充，使 JIT 编译的数组形状固定。CRATE 还用 GRAPH_FILTER 从主图筛出更短截断的子图（示例 3.5 Å、去掉 H），再由 GRAPH_ANGULAR_EXTENSION 枚举同一中心原子的边对作为键角三元组；键角由单位向量点积给出，arccos 前乘 0.95 可避开 θ=0/π 处导数发散。",
+      "math": "\\mathcal N(i)=\\{j:\\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\},\\qquad \\mathcal N_a(i)=\\{j\\in\\mathcal N(i):r_{ij}<r_a\\},\\qquad \\theta_{jik}=\\arccos\\big(0.95\\,\\hat{\\mathbf r}_{ij}\\cdot\\hat{\\mathbf r}_{ik}\\big)",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/preprocessing.py", "start": 262, "end": 287, "must": "mask = d12 < cutoff_skin**2", "caption": "GraphGenerator：按 (截断+skin)² 过滤原子对并填充到固定长度"},
+        {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 43, "end": 61, "must": "module_name: GRAPH_ANGULAR_EXTENSION", "caption": "示例配置：主图多项式开关 + 3.5 Å 角度子图（remove_hydrogens）"},
+        {"repo": "FeNNol", "file": "src/fennol/models/preprocessing.py", "start": 1365, "end": 1377, "must": "angles = jnp.arccos(0.95 * cos_angles)", "caption": "GraphAngleProcessor：由单位向量点积求键角"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何：可微距离、平滑开关与径向基",
+      "plain": "GraphProcessor 在可微的 JAX 代码里由坐标（加周期平移×晶胞）重算边向量与距离——力要对它求导；再乘开关函数 f_c(r)，让所有贡献在截断处平滑归零（默认余弦开关，示例用指数 p 可训练的多项式开关）。CRATE 再把距离展开成径向基，示例用 “spooky” 基（SpookyNet 式的指数 Bernstein 型基，γ 可训练），角度子图另配 8 个高斯基。",
+      "math": "f_c(r)=\\Big(\\tfrac12\\cos\\tfrac{\\pi r}{r_c}+\\tfrac12\\Big)^{p}\\ \\text{or}\\ 1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c};\\qquad b_k(r)=\\binom{K-1}{k}e^{-\\gamma r}\\big(e^{-\\gamma r}\\big)^{k}\\big(1-e^{-\\gamma r}\\big)^{K-1-k}",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/preprocessing.py", "start": 779, "end": 802, "must": "distances = safe_sqrt(d2)", "caption": "GraphProcessor：可微边向量、距离与开关函数"},
+        {"repo": "FeNNol", "file": "src/fennol/models/misc/misc.py", "start": 681, "end": 697, "must": "switch = (0.5 * jnp.cos(x * (jnp.pi / end)) + 0.5) ** p", "caption": "SwitchFunction：余弦 / 多项式开关"},
+        {"repo": "FeNNol", "file": "src/fennol/models/misc/encodings.py", "start": 487, "end": 512, "must": "b = e**k * (1 - e) ** (dim - k)", "caption": "RadialBasis(basis=\"spooky\")"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "编码：电子结构元素嵌入（可选电荷嵌入）+ Fourier 角度基",
+      "plain": "元素经 SpeciesEncoding 编码，示例用 electronic_structure：把 Z、各电子壳层占据和价层结构按参考值归一化后拼成固定向量，让化学上相近的元素天然相近；再经线性层（SpeciesInit，可选 LayerNorm）得到初始特征 x⁽⁰⁾。若开启 charge_embedding，则把“价电子总数 − 总电荷”按网络给出的正权重分给各原子，再用正弦位置编码加入特征。键角 θ 展开为 Fourier 基 cos(n_m θ+φ_m)，频率与相位都是可学习参数（初值 0…4 与 0）。",
+      "math": "x_i^{(0)}=\\mathrm{LN}\\big(W\\,\\mathrm{enc}(Z_i)\\big);\\qquad N_i=a_i\\,\\frac{\\sum_k n^{\\text{val}}_k-Q_{\\text{tot}}}{\\sum_k a_k},\\ x_i^{(0)}=\\mathrm{LN}\\big(W\\,\\mathrm{enc}(Z_i)+\\mathrm{PE}(N_i)\\big);\\qquad \\chi_m(\\theta)=\\cos(n_m\\theta+\\varphi_m),\\ m=0..4",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 177, "end": 217, "must": "charge_embedding = positional_encoding(Ni, self.dim)", "caption": "CRATE：元素编码 + 可选电荷嵌入 / SpeciesInit"},
+        {"repo": "FeNNol", "file": "src/fennol/models/misc/encodings.py", "start": 94, "end": 106, "must": "conv_tensor = np.concatenate([Z, e_struct, v_struct], axis=1)", "caption": "electronic_structure 编码：Z、壳层与价层占据（归一化）"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 384, "end": 399, "must": "xa = jnp.cos(nangles * angles + phi)", "caption": "可学习频率/相位的 Fourier 角度基"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：成对消息 + 键角三元组",
+      "plain": "每层先把 x_i 线性投影成“自己用的” s_i 和“发给邻居的”压缩特征 s^dst（默认 64/32 维）。成对部分：邻居的 s^dst_j 与径向基 b(r_ij)·f_c 做外积，再对邻居求和得到 L_i——第一层相当于带化学信息的径向描述符，之后各层就是消息传递。角度部分：把 s^dst_j 与角度径向基经三阶张量 W_a 收缩成 D_ij，同一中心原子的两条边相乘，再与 Fourier 角度基做外积并求和，显式给出 3 体信息。",
+      "math": "[s_i,\\,s^{\\text{dst}}_i]=W^{(t)}x_i^{(t)},\\qquad L_i=\\sum_{j\\in\\mathcal N(i)}s^{\\text{dst}}_j\\otimes b(r_{ij})f_c(r_{ij}),\\qquad A_i=\\sum_{(j,k)}\\big(D_{ij}\\odot D_{ik}\\big)\\otimes\\big[\\chi_m(\\theta_{jik})\\big]_{m=0}^{4},\\ D_{ij}=W_a\\cdot\\big(s^{\\text{dst}}_j\\otimes b^{a}(r_{ij})f^{a}_c(r_{ij})\\big)",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 514, "end": 532, "must": "si_mp = si_dst[edge_dst]", "caption": "每层：投影出 s_i / s^dst，消息取邻居的 s^dst_j"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 567, "end": 575, "must": "Li = jax.ops.segment_sum(Lij, edge_src, species.shape[0])", "caption": "成对嵌入：s^dst_j ⊗ 径向基，按中心原子求和"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 594, "end": 626, "must": "Da = Da[angle_dst] * Da[angle_src]", "caption": "键角嵌入：D_ij⊙D_ik ⊗ Fourier 角度基，按中心原子求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：拼接 → MLP 混合 → 遗忘门更新",
+      "plain": "把本层各类信息 [s_i, L_i, A_i, …] 直接拼接成长向量，经 MLP（默认无隐藏层）和混合激活（默认 tssr3，示例 swish）得到更新量 Δx_i；再用可学习的逐通道“保留率” σ(ρ) 做遗忘门残差（可选 LayerNorm）。若 lmax>0，还会维护一组球谐等变特征：邻居球谐按边权重聚合成密度，再与自身做张量积，把 l=0 分量拼进 Δx_i。",
+      "math": "\\Delta x_i=\\phi\\Big(\\mathrm{MLP}\\big([s_i,\\,L_i,\\,A_i,\\,V_i^{(l=0)},\\,x_i^{\\text{lr}}]\\big)\\Big),\\qquad x_i^{(t+1)}=\\mathrm{LN}\\big(\\sigma(\\rho)\\odot x_i^{(t)}+\\Delta x_i\\big)",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 773, "end": 802, "must": "dxi = jnp.concatenate(components, axis=-1)", "caption": "拼接各组件 → MLP（或按块的 BlockIndexNet）→ 激活"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 820, "end": 831, "must": "xi = layer_norm(R[None, :] * xi + dxi)", "caption": "遗忘门（retention）残差更新"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 666, "end": 700, "must": "dVi = FilteredTensorProduct(", "caption": "可选 lmax>0：等变密度聚合 + 张量积，取 l=0 分量"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程 ①：受总电荷约束的原子电荷 + 库仑静电",
+      "plain": "静电分两步。先由嵌入预测电荷：CHARGE_HYPOTHESIS 给出 10 组“电荷假设”，每组都按网络预测的正权重 w_i 把差额 (Q_tot − Σq̃) 分摊回去，严格满足总电荷（也可用 CHARGE_CORRECTION 以 D3 硬度为权重修正，或用 QEQ_D4 做真正的电荷平衡）。再由 COULOMB 模块算 q_i q_j / r：无周期时在其所用图上带开关直接求和（可选 TS/D3/OQDO 等短程阻尼），有晶胞时用 Ewald——实空间 erfc + 倒空间 k 求和。",
+      "math": "q_i=\\tilde q_i+w_i\\,\\frac{Q_{\\text{tot}}-\\sum_k\\tilde q_k}{\\sum_k w_k};\\qquad E_{\\text{C}}=\\tfrac12\\sum_i q_i\\Big[\\sum_{j}q_j\\frac{\\mathrm{erfc}(\\beta r_{ij})}{r_{ij}}f_c(r_{ij})+\\phi_i^{\\text{rec}}\\Big],\\quad \\phi_i^{\\text{rec}}=\\frac{1}{\\pi V}\\sum_{\\mathbf m\\neq0}\\frac{e^{-\\pi^2m^2/\\beta^2}}{m^2}\\mathrm{Re}\\big[S(\\mathbf m)e^{-2\\pi i\\,\\mathbf m\\cdot\\mathbf s_i}\\big]-\\frac{2\\beta}{\\sqrt\\pi}q_i",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/charge_embeddings.py", "start": 38, "end": 58, "must": "dq = Qtot[:, None] - qtot", "caption": "CHARGE_HYPOTHESIS：多组电荷按权重分摊以满足总电荷"},
+        {"repo": "FeNNol", "file": "src/fennol/models/physics/electrostatics.py", "start": 160, "end": 192, "must": "erec, _ = ewald_reciprocal(", "caption": "COULOMB：Ewald 倒空间 + 实空间 erfc（无 PBC 时为 1/r）"},
+        {"repo": "FeNNol", "file": "src/fennol/models/physics/electrostatics.py", "start": 50, "end": 66, "must": "Sm = (q[:, None] * jnp.exp(ks)).sum(axis=0)[None, :]", "caption": "ewald_reciprocal：结构因子与倒空间电势"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程 ②：D3 色散 + LODE 长程描述符",
+      "plain": "DISPERSION_D3 实现 D3 形式的色散：先用 sigmoid 计数函数得到配位数 CN，用高斯权重在参考 C6 表中插值，C8 由 C6 与 r4r2 得到，再用 BJ 阻尼 1/(r⁶+R0⁶) 求和；s6、s8、a1、a2 默认 1.0/1.0/0.4/5.0，可设为可训练。CRATE 还可开启 LODE：在长程图上用“截断处值与导数都为零”的 1/(r²+a)^ν 核对邻居特征求和，作为额外长程特征拼进嵌入。",
+      "math": "E_{\\text{D3}}=-\\tfrac12\\sum_i\\sum_j\\Big(\\frac{s_6C_6^{ij}}{r_{ij}^6+R_0^6}+\\frac{s_8C_8^{ij}}{r_{ij}^8+R_0^8}\\Big)f_c(r_{ij}),\\ R_0=a_1\\sqrt{C_8^{ij}/C_6^{ij}}+a_2;\\qquad e^{\\text{lr}}_{ij}=\\frac{1}{(r^2+a)^{\\nu}}-\\frac{1}{(r_c^2+a)^{\\nu}}+\\frac{2\\nu\\,r_c(r-r_c)}{(r_c^2+a)^{\\nu+1}},\\ \\nu=\\tfrac{l+1}{2}",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/physics/dispersion.py", "start": 196, "end": 232, "must": "cnij = jax.nn.sigmoid(KCN * (rcij / rij - 1.0))", "caption": "配位数 → 高斯权重插值 C6；C8 = C6·3·r4r2_i·r4r2_j"},
+        {"repo": "FeNNol", "file": "src/fennol/models/physics/dispersion.py", "start": 265, "end": 273, "must": "t6 = s6 / (rij**6 + r0**6)", "caption": "BJ 阻尼的 C6/C8 色散能"},
+        {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 258, "end": 275, "must": "1.0 / (r**2 + a) ** ls_lr", "caption": "LODE：截断处值与导数为零的长程核"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "能量：NN 原子能 + ZBL 排斥 + 各物理项相加",
+      "plain": "最后一层嵌入交给 NEURAL_NET（示例 [256,192,160,1]、swish）得到原子能。FENNIX 按配置中的 energy_terms 列表把各模块输出（如 NN 能量、repulsion、coulomb、dispersion）逐项相加：逐原子项先按体系 segment_sum，逐体系项直接相加。ZBL 模块用屏蔽核库仑势描述原子核贴近时的强排斥，参数初值取标准 ZBL，可在训练中带正则地微调。",
+      "math": "E=\\sum_{\\tau\\in\\text{energy\\_terms}}\\sum_i E_i^{\\tau},\\qquad E_i^{\\text{NN}}=\\mathrm{MLP}\\big(x_i^{(T)}\\big),\\qquad E_i^{\\text{ZBL}}=\\sum_{j}\\frac{Z_iZ_j}{r_{ij}}\\sum_{k=1}^{4}c_k\\,e^{-\\alpha_k r_{ij}(Z_i^{p}+Z_j^{p})/d}\\,f_c(r_{ij}),\\ \\sum_k c_k=\\tfrac12",
+      "code": [
+        {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 94, "end": 99, "must": "neurons: [256,192,160, 1]", "caption": "示例：NEURAL_NET 读出原子能"},
+        {"repo": "FeNNol", "file": "src/fennol/models/fennix.py", "start": 218, "end": 258, "must": "for term in self.energy_terms:", "caption": "total_energy：逐项相加 energy_terms"},
+        {"repo": "FeNNol", "file": "src/fennol/models/physics/repulsion.py", "start": 125, "end": 137, "must": "ereppair = Zij * phi / rijs * switch", "caption": "REPULSION_ZBL：屏蔽核排斥"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：jax.grad 对坐标求导",
+      "plain": "FeNNol 把整个模型（预处理中的可微部分 + 所有能量项）写成纯函数，用 jax.grad 对坐标求导，力 = −梯度，整个函数再经 jax.jit 编译。ZBL、Coulomb、D3 都在同一计算图里，它们的力一并自动得到，力场严格保守。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}",
+      "code": [{"repo": "FeNNol", "file": "src/fennol/models/fennix.py", "start": 260, "end": 272, "must": "jax.grad(_etot, argnums=1, has_aux=True)", "caption": "energy_and_forces"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对缩放矩阵求导",
+      "plain": "为每个体系引入初值为单位阵的 3×3 缩放矩阵 S，坐标和晶胞都右乘 S，再用 jax.grad 同时对坐标和 S 求导：前者给出力，后者就是维里张量；ASE 计算器再除以体积得到应力。依赖晶胞的 Ewald 倒空间项也自动包含在内。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i\\mathbf S,\\ \\mathbf C\\to\\mathbf C\\mathbf S,\\qquad \\mathbf W=\\frac{\\partial E}{\\partial\\mathbf S}\\Big|_{\\mathbf S=\\mathbf 1},\\qquad \\boldsymbol\\sigma=\\frac{\\mathbf W}{V}",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/models/fennix.py", "start": 320, "end": 347, "must": "(dedx, vir), out = jax.grad(_etot, argnums=(1, 2), has_aux=True)(", "caption": "energy_and_forces_and_virial"},
+        {"repo": "FeNNol", "file": "src/fennol/ase.py", "start": 87, "end": 93, "must": "full_3x3_to_voigt_6_stress(stress)", "caption": "ASE：σ = virial / V"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "下游：fennol_md 中的核量子效应（PIMD / adQTB）",
+      "plain": "FeNNol 自带用 JAX 写的 MD 引擎 fennol_md。路径积分 MD 把每个原子复制成 P 个“珠子”组成环形聚合物，在简正模坐标中解析地自由传播，并把各珠子的力投影到简正模上；(自适应)量子热浴 QTB/adQTB 则用带量子噪声的 Langevin 恒温器，以接近经典 MD 的代价近似核量子效应，adQTB 会在线调整参数以抑制零点能泄漏。若模型输出电荷/偶极，还能在 MD 中直接累积偶极时间序列算 IR 光谱。",
+      "math": "\\mathbf r^{(i)}=\\sqrt P\\sum_{n}U_{in}\\,\\tilde{\\mathbf r}_n,\\qquad \\tilde{\\mathbf F}_n=\\frac{1}{\\sqrt P}\\sum_{i=1}^{P}U_{in}\\,\\mathbf F^{(i)}",
+      "code": [
+        {"repo": "FeNNol", "file": "src/fennol/md/integrate.py", "start": 300, "end": 321, "must": "eigx = x0[1:] * axx + v0[1:] * axv", "caption": "环形聚合物简正模的解析自由传播 + BAOAB 式积分"},
+        {"repo": "FeNNol", "file": "src/fennol/md/integrate.py", "start": 339, "end": 349, "must": "### PROJECT FORCES ONTO POLYMER NORMAL MODES", "caption": "把珠子力投影到简正模"},
+        {"repo": "FeNNol", "file": "src/fennol/md/thermostats.py", "start": 236, "end": 263, "must": "thermostat, postprocess, qtb_state = initialize_qtb(", "caption": "QTB / adQTB 恒温器初始化"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "5.1 Å（示例配置；FeNNix-Bio1 实际值不在本仓库）", "note": "主图截断", "code": {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 40, "end": 40, "must": "cutoff: 5.1"}},
+    {"name": "角度子图", "value": "3.5 Å，remove_hydrogens: True（示例）", "note": "键角三元组只在短截断内枚举", "code": {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 49, "end": 54, "must": "remove_hydrogens: True"}},
+    {"name": "dim", "value": "256（默认）；示例 512", "note": "原子嵌入维度", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 29, "end": 29, "must": "dim: int = 256"}},
+    {"name": "nlayers", "value": "2（默认）；示例 3", "note": "交互层数", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 31, "end": 31, "must": "nlayers: int = 2"}},
+    {"name": "dim_src / dim_dst", "value": "64 / 32（默认）；示例 32 / 16", "note": "自身 / 发给邻居的压缩特征维度", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 36, "end": 38, "must": "dim_src: int = 64"}},
+    {"name": "angle_style / dim_angle / nmax_angle", "value": "fourier / 8 / 4（默认）；示例 dim_angle 32", "note": "角度基类型与维度", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 41, "end": 45, "must": "angle_style: str = \"fourier\""}},
+    {"name": "lmax / nchannels_l", "value": "0 / 16（默认，纯不变）", "note": "可选等变球谐通道", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/crate.py", "start": 57, "end": 59, "must": "lmax: int = 0"}},
+    {"name": "radial_basis", "value": "spooky, dim 10, 可训练；角度径向基 gaussian, dim 8, start 0.8（示例）", "note": "径向展开", "code": {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 72, "end": 80, "must": "basis: spooky"}},
+    {"name": "switch", "value": "cosine（默认，p=1）；示例 polynomial p=3 可训练", "note": "截断平滑函数", "code": {"repo": "FeNNol", "file": "src/fennol/models/misc/misc.py", "start": 638, "end": 643, "must": "switch_type: str = \"cosine\""}},
+    {"name": "读出 MLP", "value": "[256, 192, 160, 1]，swish（示例）", "note": "原子能读出网络", "code": {"repo": "FeNNol", "file": "examples/training/crate.yaml", "start": 94, "end": 99, "must": "neurons: [256,192,160, 1]"}},
+    {"name": "ncharges", "value": "10", "note": "CHARGE_HYPOTHESIS 的电荷假设组数", "code": {"repo": "FeNNol", "file": "src/fennol/models/embeddings/charge_embeddings.py", "start": 24, "end": 24, "must": "ncharges: int = 10"}},
+    {"name": "D3 参数", "value": "s6=1.0, s8=1.0, a1=0.4, a2=5.0（默认，可设可训练）", "note": "DISPERSION_D3 阻尼参数", "code": {"repo": "FeNNol", "file": "src/fennol/models/physics/dispersion.py", "start": 164, "end": 168, "must": "a1: float = 0.4"}}
+  ],
+  "speedNotes": [
+    "默认 CRATE 只处理标量特征：成对部分是“邻居特征 ⊗ 径向基”后 segment_sum，本质是稠密矩阵运算，没有 Clebsch–Gordan 张量积，GPU 上效率高。",
+    "键角三元组数 ∝ N·M_a²，是主要额外开销；因此只在更短的角度子图上枚举（示例 3.5 Å 并去掉 H），并先用 W_a 把通道压缩到 dim_angle。",
+    "整个模型（可微预处理 + 所有能量项）被 jax.jit 编译成一个函数；邻居表可在 GPU 上构建并预留余量以减少重编译；reduce_memory 选项用循环换显存。",
+    "物理项成本：ZBL / D3 为逐对 O(N·M)；周期体系 Ewald 倒空间 ∝ N×k 点数，长程图截断越大越慢。",
+    "fennol_md 会提示默认 matmul 精度含 float16 运算、可能放大能量/压力误差，可调高精度换准确性。"
+  ],
+  "weakNotes": [
+    "NN 部分的感受野约为 nlayers × r_c（示例 3 × 5.1 Å）；截断外的物理只能靠显式物理模块（Coulomb、D3）或 LODE 长程特征补上。",
+    "与只在 PBE 上训练的材料基础模型不同，FeNNol 把 D3 色散与受总电荷约束的电荷 + 库仑做成模型内能量项，适合离子、带电分子与分子间弱相互作用；但 FeNNix-Bio1 实际启用了哪些项、参考数据用的泛函，本仓库中都没有，需查 FeNNol-PMC。",
+    "总电荷是显式输入，带电配体、离子可直接计算；但没有自旋多重度输入，无法区分开壳层/自旋态。",
+    "周期体系静电用 Ewald 求和；无 PBC 时 Coulomb 只在其所用图的截断内（带开关）求和，超大团簇的远程尾巴会被截掉。",
+    "CHARGE_HYPOTHESIS 属于嵌入模块，10 组电荷只保证总和正确，不一定是物理意义上的原子电荷；需要可解释电荷/偶极时应专门训练电荷输出。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 平滑开关 + jax.grad，适合长时间 NVE/NVT；examples/md/watersmall 中附有不同数值精度下的能量守恒测试（ANI-2x 模型）。",
+    "fennol_md 原生支持 PIMD 与 (ad)QTB，可在水、生物分子体系中纳入核量子效应（零点能、同位素效应）。",
+    "模型输出电荷/偶极时，可在 MD 中直接计算 IR 光谱；POLARIZATION、ELECTRIC_FIELD 模块可描述极化与外场响应。",
+    "支持维里/应力与 barostat（md/barostats.py），可做 NPT 模拟；另有 Deep-HP 接口对接 Tinker-HP。",
+    "开关函数、ZBL 与电荷模块都内置炼金术参数（alch_group、λ、soft-core），面向配体解耦等自由能计算。"
+  ],
+  "strengths": ["高度模块化：同一框架可组合 CRATE、ANI、MACE、Allegro、PaiNN 等嵌入与各种物理项", "ZBL、受约束电荷、Ewald 库仑、D3 与 NN 一起端到端可微", "总电荷输入 + 炼金术参数，面向生物分子与药物设计", "自带高效 JAX MD 引擎，原生 PIMD / adQTB 核量子效应"],
+  "weaknesses": ["FeNNix-Bio1 的具体配置与训练数据不在本仓库", "默认不变表示，角分辨率依赖显式三元组，不及高阶等变模型", "消息传递 + 长程项，难以做空间分解式大规模并行", "无自旋输入；物理项需按体系选择与调参"],
+  "pretrained": ["FeNNix-Bio1（如 fennix-bio1S.fnx，FeNNol-PMC）", "ANI-1x / ANI-1ccx / ANI-2x（移植为 FeNNol 格式，非 FeNNix 架构）", "MACE-OFF23 / MACE-MP（移植为 FeNNol 格式）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架构对比 · MLFF 架构图解</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+  <h1>架构对比</h1>
+  <p class="muted">勾选最多 6 个模型并排对比完整架构参数与能力评分；下方是全部模型的可排序总表。</p>
+  <div class="filters"><input type="search" id="q" placeholder="筛选模型…"><button class="btn ghost" id="clear" style="padding:4px 12px">清空选择</button><span class="muted small" id="sel-count"></span></div>
+  <div class="pill-select" id="pick"></div>
+
+  <h2>并排对比</h2>
+  <div class="grid g2"><div class="card"><div class="chart-box"><canvas id="radar"></canvas></div><p class="small muted">评分 1–5 为编辑判断（依据见各模型页）；基础设施与长程模块没有评分。</p></div>
+    <div class="card" id="side-summary"></div></div>
+  <div class="table-wrap free" style="margin-top:14px"><table id="side"></table></div>
+
+  <h2 id="matrix">全部模型总表</h2>
+  <p class="muted small">点击表头排序。r<sub>c</sub> 与层数 T 取代表性发布配置；名义感受野 ≈ T × r<sub>c</sub>（严格局域模型 = r<sub>c</sub>）。“长程 / 色散 / 电荷自旋”的归类规则见 <a href="analysis.html#weak">深度分析</a>。F1、κ<sub>SRME</sub> 取 Matbench Discovery 中该架构最好的模型；MD 用时取该架构在 NVIDIA H200 上最快的一条记录（17 个体系总用时）。</p>
+  <div class="table-wrap"><table id="all"></table></div>
+</main>
+<script>
+mountChrome("compare.html");
+const D = window.MLFF, B = window.MLFF_BENCH;
+const MAX = 6;
+const PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"];
+let sel = (param("ids") || "mace,allegro,orb,chgnet,uma").split(",").filter((x) => modelById(x)).slice(0, MAX);
+const best = {};
+for (const r of B.mbd) {
+  if (!r.modelId) continue;
+  const b = best[r.modelId] || (best[r.modelId] = {});
+  const f1 = r.discovery?.F1, k = r.phonons?.["κ_SRME"];
+  if (f1 != null && (b.f1 == null || f1 > b.f1)) { b.f1 = f1; b.f1Key = r.name; }
+  if (k != null && (b.k == null || k < b.k)) { b.k = k; b.kKey = r.name; }
+  for (const c of r.costs || []) {
+    if (c.task === "md" && /H200$/.test(c.hardware || "") && (b.md == null || c.sec < b.md)) { b.md = c.sec; b.mdKey = r.name; }
+  }
+}
+let chart;
+function pick() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  document.getElementById("pick").innerHTML = D.models.filter((m) => !q || m.name.toLowerCase().includes(q) || m.id.includes(q)).map((m) =>
+    `<button class="chip ${sel.includes(m.id) ? "on" : ""}" data-id="${m.id}" style="border-color:${famColor(m.family)};${sel.includes(m.id) ? `background:${famColor(m.family)}` : ""}">${esc(m.name)}</button>`).join("");
+  document.querySelectorAll("#pick .chip").forEach((b) => b.addEventListener("click", () => {
+    const id = b.dataset.id;
+    if (sel.includes(id)) sel = sel.filter((x) => x !== id);
+    else if (sel.length < MAX) sel.push(id);
+    else { alert(`最多选择 ${MAX} 个模型`); return; }
+    history.replaceState(null, "", "?ids=" + sel.join(","));
+    pick(); side();
+  }));
+  document.getElementById("sel-count").textContent = `已选 ${sel.length}/${MAX}`;
+}
+document.getElementById("q").addEventListener("input", pick);
+document.getElementById("clear").addEventListener("click", () => { sel = []; pick(); side(); });
+
+function side() {
+  const ms = sel.map(modelById);
+  const t = document.getElementById("side");
+  if (!ms.length) { t.innerHTML = '<tr><td class="muted">请在上方选择模型。</td></tr>'; document.getElementById("side-summary").innerHTML = ""; if (chart) chart.destroy(); return; }
+  const cur = (m) => D.curated[m.id];
+  const rows = [
+    ["家族", (m) => famBadge(m.family)],
+    ["年份", (m) => esc(m.year)],
+    ["一句话", (m) => esc(m.oneLiner)],
+    ...Object.keys(ARCH_LABEL).map((k) => [ARCH_LABEL[k], (m) => k === "forces" ? esc(FORCES_LABEL[m.arch[k]]) : k === "strictlyLocal" ? (m.arch[k] ? "是" : "否") : esc(m.arch[k])]),
+    ["长程静电（归类）", (m) => cur(m) ? `<span class="cell-${cur(m).lr}">${CAT_LABEL.lr[cur(m).lr]}</span>` : "—"],
+    ["色散（归类）", (m) => cur(m) ? `<span class="cell-${cur(m).disp}">${CAT_LABEL.disp[cur(m).disp]}</span>` : "—"],
+    ["总电荷 / 自旋（归类）", (m) => cur(m) ? CAT_LABEL.qs[cur(m).qs] : "—"],
+    ["名义感受野", (m) => cur(m) ? (cur(m).rf != null ? `${cur(m).rf} Å` : "全局 / 未知") + `<br><span class="small muted">${esc(cur(m).cfg)}</span>` : "—"],
+    ["MBD 最佳 F1", (m) => best[m.id]?.f1 != null ? `${fmt(best[m.id].f1)} <span class="small muted">${esc(best[m.id].f1Key)}</span>` : "—"],
+    ["MBD 最佳 κ_SRME", (m) => best[m.id]?.k != null ? `${fmt(best[m.id].k)} <span class="small muted">${esc(best[m.id].kKey)}</span>` : "—"],
+    ...SCORE_KEYS.map((k) => [`评分 · ${SCORE_LABEL[k]}`, (m) => m.scores ? `${dots(m.scores[k].v)}<div class="small">${esc(m.scores[k].why)}</div>` : "—"]),
+  ];
+  t.innerHTML = `<thead><tr><th style="width:150px">项目</th>${ms.map((m) => `<th><a href="${modelLink(m)}">${esc(m.name)}</a></th>`).join("")}</tr></thead><tbody>${
+    rows.map(([lab, f]) => `<tr><th style="position:static">${lab}</th>${ms.map((m) => `<td class="small">${f(m)}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  document.getElementById("side-summary").innerHTML = `<h3>选中的模型</h3>` + ms.map((m, i) =>
+    `<p><b style="color:${PALETTE[i]}">■</b> <a href="${modelLink(m)}"><b>${esc(m.name)}</b></a> ${famBadge(m.family)}<br><span class="small">${esc(m.oneLiner)}</span></p>`).join("");
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById("radar"), {
+    type: "radar",
+    data: {
+      labels: SCORE_KEYS.map((k) => SCORE_LABEL[k]),
+      datasets: ms.filter((m) => m.scores).map((m) => {
+        const i = ms.indexOf(m);
+        return { label: m.name, data: SCORE_KEYS.map((k) => m.scores[k].v), borderColor: PALETTE[i], backgroundColor: PALETTE[i] + "22", pointBackgroundColor: PALETTE[i] };
+      }),
+    },
+    options: { maintainAspectRatio: false, scales: { r: { min: 0, max: 5, ticks: { stepSize: 1 } } } },
+  });
+}
+
+function all() {
+  const t = document.getElementById("all");
+  const cols = [
+    ["模型", "", (m) => `<a href="${modelLink(m)}">${esc(m.name)}</a>`, (m) => m.name],
+    ["家族", "", (m) => `<span style="color:${famColor(m.family)}">●</span> ${esc(FAMILY[m.family].name)}`, (m) => D.families.indexOf(m.family)],
+    ["年份", "num", (m) => esc(m.year), (m) => parseInt(m.year)],
+    ["力", "", (m) => esc({ conservative: "保守", direct: "直接", both: "两者", "n/a": "—" }[m.arch.forces]), (m) => m.arch.forces],
+    ["严格局域", "", (m) => (m.arch.strictlyLocal ? "是" : "否"), (m) => (m.arch.strictlyLocal ? 1 : 0)],
+    ["r_c (Å)", "num", (m) => fmt(D.curated[m.id]?.rc), (m) => D.curated[m.id]?.rc],
+    ["层数 T", "num", (m) => fmt(D.curated[m.id]?.T), (m) => D.curated[m.id]?.T],
+    ["感受野 (Å)", "num", (m) => fmt(D.curated[m.id]?.rf), (m) => D.curated[m.id]?.rf],
+    ["长程静电", "", (m) => cat(m, "lr"), (m) => ["none", "optional", "builtin", "core"].indexOf(D.curated[m.id]?.lr)],
+    ["色散", "", (m) => cat(m, "disp"), (m) => ["none", "addon", "optional", "builtin", "core"].indexOf(D.curated[m.id]?.disp)],
+    ["电荷/自旋", "", (m) => cat(m, "qs"), (m) => ["none", "optional", "builtin"].indexOf(D.curated[m.id]?.qs)],
+    ["额外输出", "", (m) => esc((D.curated[m.id]?.props || []).map((p) => PROP_LABEL[p]).join("、")), (m) => (D.curated[m.id]?.props || []).length],
+    ["MBD F1↑", "num", (m) => fmt(best[m.id]?.f1), (m) => best[m.id]?.f1],
+    ["κ_SRME↓", "num", (m) => fmt(best[m.id]?.k), (m) => best[m.id]?.k],
+    ["MD 用时 H200 (h)↓", "num", (m) => (best[m.id]?.md != null ? fmt(best[m.id].md / 3600) : "—"), (m) => (best[m.id]?.md != null ? best[m.id].md / 3600 : null)],
+  ];
+  t.innerHTML = `<thead><tr>${cols.map(([h, ty]) => `<th class="sortable" ${ty ? 'data-type="num"' : ""}>${h}</th>`).join("")}</tr></thead><tbody>${
+    D.models.map((m) => `<tr>${cols.map(([, ty, f, v]) => { const x = v(m); return `<td class="${ty === "num" ? "num" : ""}" data-v="${x == null ? "" : esc(x)}">${f(m)}</td>`; }).join("")}</tr>`).join("")}</tbody>`;
+  makeSortable(t);
+}
+function cat(m, k) {
+  const c = D.curated[m.id];
+  if (!c) return "—";
+  return `<span class="cell-${c[k]}" style="padding:1px 6px;border-radius:4px">${CAT_LABEL[k][c[k]]}</span>`;
+}
+pick(); side(); all();
+</script>
+</body>
+</html>

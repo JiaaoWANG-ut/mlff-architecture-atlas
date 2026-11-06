@@ -1,0 +1,197 @@
+{
+  "id": "hienet",
+  "name": "HIENet",
+  "fullName": "HIENet: Hybrid Invariant-Equivariant Network（混合不变–等变材料基础模型）",
+  "year": 2025,
+  "authors": "K. Yan, M. Bohde, A. Kryvenko, Z. Xiang, …, X. Qian, S. Ji",
+  "paper": {"title": "A Materials Foundation Model via Hybrid Invariant-Equivariant Architectures", "venue": "arXiv:2503.05771（预印本，2025）", "url": "https://arxiv.org/abs/2503.05771"},
+  "repos": ["AIRS"],
+  "family": "spherical-equivariant",
+  "tags": ["混合不变-等变", "Comformer 不变注意力层", "NequIP/SevenNet 式球谐卷积 l≤3", "保守力与应力", "MPtrj 基础模型"],
+  "framework": "PyTorch + e3nn + PyTorch Geometric / torch_scatter（代码基于 SevenNet）",
+  "license": "GPL-3.0（代码与权重；继承自 SevenNet）",
+  "oneLiner": "先用 1 层只看距离的“不变”注意力层（iComFormer 式，384 维标量）把元素与距离信息充分混合，再接 4 层 NequIP/SevenNet 式的 e3nn 球谐张量积等变卷积（l≤3）补上方向/角度信息，最后只取标量求原子能；力和应力由能量自动微分得到。",
+  "analogy": "像先开一次“只谈远近”的碰头会：每个原子只问邻居“你是谁、离我多远”，又快又便宜地把化学环境聊清楚（不变层）；然后派带指南针的测量队连跑 4 趟，按方向记录邻居分布（等变层），把立体角度结构补齐。先粗后细，接力完成。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（8 个可训练频率 Bessel 基 × p=6 多项式包络）+ 方向（实球谐 Y_l^m，l≤3）；不变层只用距离嵌入",
+    "equivariance": "不变层 E(3) 不变；等变层为 e3nn irreps 旋转等变。is_parity=False（全取偶宇称），只严格保证 SO(3)，不强制镜像对称",
+    "lmax": "边球谐 l≤3；隐藏特征 L=0→2→3→3，最后一层只保留 512×0e 标量",
+    "bodyOrder": "不变层为两体（i–j 距离 + 节点特征）消息；等变层每层经 Y(r̂_ij)⊗h_j 引入一个邻居，4 层 + 门控非线性后有效体序随深度增长，无显式高阶收缩",
+    "layers": "1 层不变 Comformer 注意力（384 通道）+ 4 层 NequIP 式等变卷积",
+    "cutoff": "5.0 Å（多项式包络 p=6）",
+    "receptiveField": "5 层消息传递 × 5 Å ≈ 25 Å",
+    "message": "不变层：m_ij = MLP([v_i,v_j,e_ij]) ⊙ σ(LN(q_i⊙k'_ij/√C))，求和后 GRU 式门控更新；等变层：Σ_j TP_uvu(h_j, Y(r̂_ij); W(e_ij)) / 35.99",
+    "readout": "最后一层 512×0e → 线性 256×0e → 线性 1（中间无激活）→ 按元素 scale·x+shift → 求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R；torch.autograd.grad 对坐标与应变张量一次反传，同时得到力和应力",
+    "stress": "对称应变 ε 同时作用于坐标与晶胞，σ = −(1/V)∂E/∂ε（Voigt 6 分量）；ASE 计算器再取负并重排为 ASE 顺序",
+    "longRange": "无；只有 5 层消息传递的半局域感受野（≈25 Å）",
+    "dispersion": "无内置色散，仓库也未提供 D3 接口；训练数据 MPtrj 为 PBE/PBE+U",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "原子能 energies（ASE get_potential_energies）；无 Hessian、偶极、磁矩等官方输出",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·C²) 的不变注意力（每条边两个 3C→C 的 MLP，C=384）+ 4 层 O(N·M·C·P_TP) 球谐张量积（l≤3，128×1e/64×2e/32×3e）",
+    "accel": "纯 e3nn/PyTorch（无 cuEquivariance 融合内核）；模块为 compile_mode('script')，可加载 TorchScript；ASE HIENetCalculator 单结构推理；仓库未附 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "4 层 l≤3、宽通道（512×0e+128×1e+64×2e+32×3e）的逐边张量积，再加 384 维的逐边注意力 MLP，属于 NequIP/SevenNet 一类的深层等变网络，且没有融合内核加速。"},
+    "expressiveness": {"v": 4, "why": "l≤3 等变特征 + 5 层消息传递 + 注意力式不变层，角分辨率与容量都高；但没有 MACE/ACE 式的显式高体序对称收缩。"},
+    "longRange": {"v": 2, "why": "无色散、无静电、无电荷输入，只有 5 层 × 5 Å ≈ 25 Å 的消息传递感受野。"},
+    "scalability": {"v": 1, "why": "只有 ASE 单结构整图推理（set_is_batch_data(False)），仓库内没有 LAMMPS、空间分解或多 GPU MD 接口。"},
+    "physics": {"v": 3, "why": "力/应力由能量自动微分（保守），等变层有 p=6 多项式包络，能量为原子能之和；但不变注意力层的消息在 r→r_c 时不归零，能量在截断处可能不连续，且无 ZBL、不强制镜像对称。"},
+    "coverage": {"v": 2, "why": "官方输出能量、力、应力和每原子能量，没有 Hessian、偶极、电荷、磁矩等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞",
+      "plain": "ASE 的 Atoms 被转换成图数据：原子坐标 R、原子序数（再映射为 89 种元素的类型索引）、晶胞矩阵与体积。坐标被设为 requires_grad——后面的力与应力全部来自“能量对坐标/应变求导”，网络本身不直接预测力。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ V=\\mathbf c_1\\cdot(\\mathbf c_2\\times\\mathbf c_3)",
+      "code": [{"repo": "AIRS", "file": "OpenMat/HIENet/hienet/util.py", "start": 248, "end": 257, "must": "atom_graph[KEY.POS].requires_grad_(True)", "caption": "unlabeled_atoms_to_input：建图并打开坐标梯度"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：5 Å 内的所有原子对（含周期镜像）",
+      "plain": "用 ASE 的 primitive_neighbor_list 找出距离小于 r_c = 5 Å 的原子对，记录边 (i, j) 和跨越周期边界的整数平移 S（去掉零向量自环，但保留与自身周期镜像的边）。模型内部再用 r_ij = r_j − r_i + S·C 重算边向量，使边向量对坐标和晶胞都可微。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/train/dataload.py", "start": 32, "end": 54, "must": "primitive_neighbor_list(", "caption": "unlabeled_atoms_to_graph：ASE 邻居表 + 去除平凡自环"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/edge_embedding.py", "start": 75, "end": 89, "must": "edge_vec = pos[idx_dst] - pos[idx_src]", "caption": "EdgePreprocess：在模型内由坐标与晶胞重算边向量"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → Bessel × 多项式包络；方向 → 球谐 l≤3",
+      "plain": "每条边拆成“多远”和“朝哪”。距离用 8 个 Bessel 函数 sin(ω_n r)/r 展开（频率初值 nπ/r_c，可训练），再乘以 p=6 的多项式包络，使径向特征在 5 Å 处平滑降到 0；方向用 l≤3 的实球谐 Y_l^m 编码，作为等变层的“方向滤波器”。不变层只用到前者（距离嵌入）。",
+      "math": "e_{ij,n}=\\frac{2}{r_c}\\frac{\\sin(\\omega_n r_{ij})}{r_{ij}}\\,f_{\\text{cut}}(r_{ij}),\\ \\omega_n^{(0)}=\\frac{n\\pi}{r_c};\\quad f_{\\text{cut}}=1-28x^{6}+48x^{7}-21x^{8},\\ x=\\frac{r}{r_c};\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l\\le3",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/edge_embedding.py", "start": 366, "end": 374, "must": "self.cutoff_function(r).unsqueeze(-1)", "caption": "EdgeEmbedding.forward：径向基 × 截断函数 + 球谐"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/edge_embedding.py", "start": 106, "end": 115, "must": "torch.sin(self.coeffs * ur) / ur", "caption": "BesselBasis（频率可训练）"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/edge_embedding.py", "start": 130, "end": 144, "must": "self.coeff_p0 * torch.pow(r, self.p)", "caption": "PolynomialCutoff（train.yaml 中 p=6）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：one-hot(Z) → 384 维标量",
+      "plain": "元素类型先变成 one-hot（发布模型覆盖 89 种元素），再经一个无偏置的 e3nn 线性层映射成 384 个标量通道（384×0e），作为不变层的输入；训练时这里还带 dropout。",
+      "math": "h_i^{(0)}=W_{\\text{emb}}\\,\\mathrm{onehot}(Z_i)\\in\\mathbb R^{384}",
+      "code": [{"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 289, "end": 311, "must": "'onehot_to_feature_x': IrrepsDropoutLinear(", "caption": "one-hot → 384×0e 线性嵌入"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：不变注意力层（iComFormer 式，只看距离）",
+      "plain": "第一次消息传递完全是标量运算：中心原子给出 query，邻居给出 key/value，与距离嵌入 e_ij 拼接后各过一个 MLP；q 与更新后的 k 逐通道相乘，经 LayerNorm + sigmoid 变成 0–1 的“注意力门”，乘到 value 消息上再对邻居求和（不是 softmax）。之后用类似 GRU 的重置门/更新门混合新旧特征。这一层便宜、能充分混合化学与距离信息，但没有角度；发布模型 use_edge_conv=False，代码里可选的“边–晶格夹角”边卷积未启用。",
+      "math": "\\alpha_{ij}=\\frac{q_i\\odot\\phi_k([k_i,k_j,\\tilde e_{ij}])}{\\sqrt C},\\ m_{ij}=\\phi_v([v_i,v_j,\\tilde e_{ij}])\\odot\\sigma(\\mathrm{LN}(\\alpha_{ij}));\\qquad h_i'=(1-u_i)(\\rho_i\\odot h_i)+u_i\\big[(1-u_i)h_i+u_i\\,\\mathrm{softplus}(\\mathrm{LN}(W\\textstyle\\sum_j m_{ij}))\\big],\\ \\rho_i=\\sigma(W_\\rho h_i),\\ u_i=\\sigma(W_u h_i)",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/iComfLayers.py", "start": 141, "end": 151, "must": "alpha = (query_i * key_j) / math.sqrt(self.out_channels)", "caption": "message：拼接 MLP + sigmoid 注意力门"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/iComfLayers.py", "start": 112, "end": 135, "must": "update_gate * self.softplus(self.bn(out))", "caption": "forward：求和聚合后 GRU 式门控更新"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 325, "end": 343, "must": "ComformerNodeConvLayer(", "caption": "1 层不变层（384→384，heads=1）；use_edge_conv=False 时不加边卷积"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：等变卷积 —— 球谐张量积（NequIP/SevenNet 式）",
+      "plain": "从第二次消息传递起切换到 e3nn 等变特征。每条边上，把邻居特征 h_j 与方向球谐 Y(r̂_ij) 做 Clebsch–Gordan 张量积（'uvu' 模式：每个通道各自与 Y 相乘），每条路径的权重由距离嵌入经 MLP [8→64→64→路径数] 逐边生成；邻居消息求和后除以固定的平均邻居数 35.99。这样标量能“长出”矢量（1e）、二阶（2e）、三阶（3e）特征，从而编码角度。",
+      "math": "\\mathbf m_i=\\frac{1}{35.99}\\sum_{j\\in\\mathcal N(i)}\\big(W_1h_j\\big)\\otimes_{\\mathbf w(e_{ij})}Y(\\hat{\\mathbf r}_{ij}),\\qquad \\mathbf w(e_{ij})=\\mathrm{MLP}^{\\mathrm{SiLU}}_{[8,64,64]}(e_{ij})",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/convolution.py", "start": 46, "end": 74, "must": "instructions.append((i, j, k, 'uvu', True))", "caption": "构造 uvu 张量积路径（丢弃 l > lmax）与径向权重 MLP"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/convolution.py", "start": 76, "end": 94, "must": "message = self.convolution(x[edge_src], data[self.key_filter], weight)", "caption": "逐边张量积 → scatter 求和 → 除以平均邻居数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ③：残差 + 门控非线性，4 个等变块逐层改变 irreps",
+      "plain": "每个等变块是 NequIP 的标准结构：线性 → 张量积卷积 → 线性，再加一条线性自连接（残差），最后用 e3nn Gate 做非线性：标量直接过 SiLU，l>0 的特征乘以由额外标量经 SiLU 得到的“门”，从而保持等变。4 个块的特征依次是 384×0e → 512×0e+128×1e+64×2e → 再加 32×3e → 同上 → 最后一块只输出 512×0e 标量，为读出能量做准备。",
+      "math": "h_i^{(t+1)}=\\mathrm{Gate}\\big(W_2\\,\\mathbf m_i^{(t)}+W_{\\text{sc}}h_i^{(t)}\\big),\\quad \\mathrm{Gate}(s,g,V)=\\big[\\mathrm{SiLU}(s),\\ \\mathrm{SiLU}(g)\\,V\\big];\\qquad 384{\\times}0e\\to\\cdots\\to512{\\times}0e",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 67, "end": 109, "must": "block[f'{t}_convolution'] = IrrepsConvolution(", "caption": "NequIP_interaction_block：自连接 + 线性 + 卷积 + 线性 + 门"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 349, "end": 384, "must": "layers.update(NequIP_interaction_block(", "caption": "按 irreps_manual 堆叠 4 个等变块"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/equivariant_gate.py", "start": 45, "end": 69, "must": "self.gate = Gate(", "caption": "EquivariantGate：标量 SiLU，高阶特征乘标量门"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：只用最后一层的标量",
+      "plain": "最后一个等变块只输出 512 个旋转不变的标量通道。读出是两层线性映射 512 → 256 → 1（中间没有激活函数，训练时有 dropout），得到每个原子的“缩放前原子能”。与 MACE 每层都读出不同，HIENet 只在最后一层读出。",
+      "math": "\\tilde E_i=W_{2}\\,W_{1}\\,h_i^{(5)},\\qquad W_1:512{\\times}0e\\to256{\\times}0e,\\ W_2:256{\\times}0e\\to1{\\times}0e",
+      "code": [{"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 428, "end": 450, "must": "'reduce_hidden_to_energy': IrrepsLinear(", "caption": "readout_as_fcn=False：两层线性读出"}]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：按元素缩放/平移的原子能之和",
+      "plain": "原子能按元素做 scale·x + shift：scale 取训练集力的 RMS（0.799，各元素相同），shift 取按元素拟合的参考能（elemwise_reference_energies），两者都不参与训练。再对所有原子求和得到总能——原子能相加保证了广延性。",
+      "math": "E=\\sum_{i=1}^{N}\\big[s_{Z_i}\\,\\tilde E_i+\\mu_{Z_i}\\big],\\qquad s_Z=0.799,\\ \\mu_Z=E^{\\text{ref}}_Z",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/scale.py", "start": 67, "end": 73, "must": "].view(-1, 1) + self.shift[indicies].view(-1, 1)", "caption": "SpeciesWiseRescale：逐元素 scale/shift"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/model_build.py", "start": 469, "end": 487, "must": "'reduce_total_enegy': AtomReduce(", "caption": "缩放后求和为总能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "ForceStressOutput 对总能做一次 torch.autograd.grad，同时对坐标和应变张量求导。力是能量的负梯度，因此严格保守（NVE 中能量守恒、声子与弹性计算自洽）；代价是一次与前向同量级的反向传播。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [{"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/force_output.py", "start": 104, "end": 117, "must": "torch.autograd.grad(", "caption": "一次反传：对 [坐标, 应变] 求梯度，取负得力"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对虚拟对称应变求导",
+      "plain": "EdgePreprocess 先放一个全零、可求导的应变张量 ε，取对称部分同时作用到坐标和晶胞上，于是边向量随 ε 一起形变。上一步的同一次反传就给出 ∂E/∂ε，除以体积并取负得到内部（VASP 符号）应力；ASE 计算器再取负并重排为 ASE 的 Voigt 顺序。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon_s),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon_s),\\ \\boldsymbol\\varepsilon_s=\\tfrac12(\\boldsymbol\\varepsilon+\\boldsymbol\\varepsilon^{\\top});\\qquad \\boldsymbol\\sigma=-\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/edge_embedding.py", "start": 46, "end": 61, "must": "sym_strain = 0.5 * (strain + strain.transpose(-1, -2))", "caption": "EdgePreprocess：对称应变作用于坐标与晶胞"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/nn/force_output.py", "start": 119, "end": 133, "must": "stress = sgrad / volume.view(-1, 1, 1)", "caption": "σ = −(1/V)∂E/∂ε，转为 Voigt 6 分量"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "输出：ASE 计算器",
+      "plain": "HIENetCalculator 默认加载随仓库发布的 HIENet-V3.pth（名称 'HIENet-0'），也可加载 TorchScript 文件；每次计算返回能量（= free_energy）、力、应力和每原子能量。没有 Hessian、偶极、电荷等额外输出；分子动力学与结构优化都经由 ASE 进行。",
+      "math": "\\{E,\\ \\mathbf F_i,\\ \\boldsymbol\\sigma,\\ E_i\\}\\leftarrow\\texttt{HIENetCalculator}(\\text{Atoms})",
+      "code": [
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/hienet_calculator.py", "start": 68, "end": 92, "must": "checkpoint = HIENET_0", "caption": "加载预训练 checkpoint 或 TorchScript"},
+        {"repo": "AIRS", "file": "OpenMat/HIENet/hienet/hienet_calculator.py", "start": 108, "end": 138, "must": "output = self.model(data)", "caption": "calculate：返回 energy / forces / stress / energies"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "5.0 Å", "note": "截断半径（Matbench Discovery yml 的 graph_construction_radius 亦为 5.0）", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 3, "end": 5, "must": "cutoff: 5.0"}},
+    {"name": "num_invariant_conv / inv_features", "value": "1 层，384 → 384", "note": "不变 Comformer 注意力层", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 6, "end": 9, "must": "num_invariant_conv: 1"}},
+    {"name": "irreps_manual", "value": "384x0e → 512x0e+128x1e+64x2e → 512x0e+128x1e+64x2e+32x3e（×2）→ 512x0e", "note": "4 个等变块的特征 irreps", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 10, "end": 15, "must": "512x0e+128x1e+64x2e+32x3e"}},
+    {"name": "lmax / sh / is_parity", "value": "3；1x0e + 1x1e + 1x2e + 1x3e；False", "note": "边球谐最高阶；不区分宇称", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 4, "end": 16, "must": "1x0e + 1x1e + 1x2e + 1x3e"}},
+    {"name": "radial_basis", "value": "Bessel × 8（频率可训练）", "note": "距离展开", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 19, "end": 21, "must": "bessel_basis_num: 8"}},
+    {"name": "cutoff_function", "value": "poly_cut，p = 6", "note": "多项式包络 1−28x⁶+48x⁷−21x⁸", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 22, "end": 24, "must": "poly_cut_p_value: 6"}},
+    {"name": "weight_nn_hidden_neurons", "value": "[64, 64]（SiLU）", "note": "距离 → 张量积路径权重的 MLP", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 17, "end": 17, "must": "weight_nn_hidden_neurons: [64, 64]"}},
+    {"name": "conv_denominator", "value": "35.989574", "note": "卷积求和后除以的平均邻居数（固定）", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 28, "end": 28, "must": "conv_denominator: 35.989574"}},
+    {"name": "act_gate / act_scalar", "value": "偶：SiLU；奇：tanh", "note": "门控非线性", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 26, "end": 27, "must": "act_gate: {'e': 'silu', 'o': 'tanh'}"}},
+    {"name": "scale / shift", "value": "0.799（力 RMS）/ 按元素参考能", "note": "逐元素 SpeciesWiseRescale，不训练", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 88, "end": 89, "must": "scale: 0.799"}},
+    {"name": "训练设置", "value": "MPtrj，200 epoch，batch 48，AdamW lr 0.01，Huber δ=0.01，E:F:S 权重 1:1:0.01", "note": "与 Matbench Discovery yml 一致", "code": {"repo": "AIRS", "file": "OpenMat/HIENet/train.yaml", "start": 40, "end": 70, "must": "stress_loss_weight: 0.01"}},
+    {"name": "参数量", "value": "7,510,280", "note": "Matbench Discovery yml（model_params）；训练成本 8×A100 各 361 h"}
+  ],
+  "speedNotes": [
+    "FLOPs 主要花在 4 个等变块的逐边张量积上：边球谐到 l=3，隐藏特征含 128×1e/64×2e/32×3e，每条边每条路径的权重还要由 [8→64→64→路径数] 的 MLP 现场生成，开销 ∝ 边数 × 通道 × 路径数。",
+    "不变层并不“免费”：每条边要跑两个 3×384→384 的 MLP（key_update 与 msg_update），代价 ∝ 边数 × C²；但它只有 1 层，且不涉及 CG 系数。",
+    "代码是纯 e3nn/PyTorch（dtype 'single' 即 float32），没有 cuEquivariance/OpenEquivariance 融合内核；模块标注 compile_mode('script')，计算器可直接加载 TorchScript。",
+    "力和应力在同一次 autograd 反传中得到（对坐标与应变一起求导），不需要额外前向。",
+    "模型约 751 万参数；Matbench Discovery yml 记录的训练成本为 8 张 A100 各 361 小时（MPtrj，200 epoch）。"
+  ],
+  "weakNotes": [
+    "截断 5 Å，1 层不变 + 4 层等变共 5 次消息传递，能量最多依赖约 25 Å 内的原子；更远的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失。",
+    "训练集是 MPtrj（Materials Project 的 PBE/PBE+U 弛豫轨迹），PBE 几乎不含 vdW；仓库没有 D3 选项，层状材料层间结合、分子晶体、物理吸附会欠束缚，需要用户自行叠加外部 D3 计算器。",
+    "没有电荷、自旋或电场输入，也没有显式静电：带电缺陷、离子液体、电极/电解质界面、电荷转移体系超出模型能力。",
+    "从代码看，不变注意力层的消息 MLP([v_i, v_j, e_ij]) 在 r→r_c 时并不归零（e_ij→0，但节点特征与偏置仍在），邻居进出 5 Å 球时能量可能出现小跳变，对能量尺度很小的弱相互作用尤其敏感。",
+    "is_parity=False 只保证旋转不变、不强制镜像对称；对手性结构，镜像对的能量理论上可能不同。"
+  ],
+  "downstreamNotes": [
+    "力和应力都是能量的精确导数，可直接做声子/热导：Matbench Discovery κ_SRME 为 0.6423（kappa_103）。",
+    "结构优化与稳定性筛选是主要用途：Matbench Discovery（unique prototypes）F1 0.777、DAF 4.932、MAE 0.041 eV/atom，弛豫结构 RMSD 0.0796。",
+    "应力可用于变胞优化、状态方程和有限应变法求弹性常数；仓库没有 Hessian 接口，声子需用有限位移。",
+    "MD 只能通过 ASE 计算器（单结构、单设备）运行，没有 LAMMPS 接口；不变层在截断处的不光滑可能影响长时间 NVE 的能量守恒。",
+    "没有偶极/极化率/磁矩/电荷输出，红外/拉曼光谱、磁性与电化学性质需另行建模。"
+  ],
+  "strengths": ["混合设计：1 层便宜的不变注意力先混合化学与距离信息，再用等变层补角度", "力与应力保守（一次 autograd 反传同时得到）", "l≤3 宽通道等变特征，MPtrj 上 Matbench Discovery 成绩较好（F1 0.777）", "基于 SevenNet 代码基，ASE 接口简单，仓库直接附带预训练权重"],
+  "weaknesses": ["4 层 l≤3 球谐张量积，推理偏慢且无融合内核加速", "无色散、静电与电荷/自旋输入", "不变层消息在截断处不归零，势能面可能不完全光滑", "只有 ASE 单结构推理，无 LAMMPS/多 GPU MD", "GPL-3.0 传染性许可证，闭源集成受限"],
+  "pretrained": ["HIENet-V3（MPtrj 训练；checkpoints/HIENet-V3.pth，即 HIENetCalculator 默认的 'HIENet-0'）", "lmax3_01-24-2025.ckpt（checkpoints/ 目录下另一检查点）"],
+  "mbdKeys": ["hienet"],
+  "arenaKeys": []
+}

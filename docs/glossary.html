@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>术语表 · MLFF 架构图解</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="data/index.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+<h1>术语表</h1>
+<p class="muted">本站反复出现的概念，尽量用一句大白话 + 一个公式讲清楚。可以直接搜索。</p>
+<div class="filters">
+  <input type="search" id="q" placeholder="搜索术语，例如 等变、Ewald、F1…">
+  <span class="muted small" id="count"></span>
+</div>
+<div class="pill-select" id="cats"></div>
+<div id="list"></div>
+</main>
+<script>
+mountChrome("glossary.html");
+const CATS = {
+  basic: "基本概念", sym: "几何与对称性", net: "网络结构", phys: "力、应力与高阶性质",
+  lr: "长程与弱相互作用", data: "数据集与泛函", metric: "基准指标", eng: "工程与部署",
+};
+/* t: term, en: English, c: category, d: explanation (trusted static HTML), tex: optional formula */
+const G = [
+  { t: "势能面（PES）", en: "potential energy surface", c: "basic", d: "给定所有原子的位置和元素，体系有一个确定的能量 E(R)。这个“位置 → 能量”的函数就是势能面；力是它的负梯度。DFT 能精确但昂贵地算出它，机器学习力场的任务就是用便宜的函数去拟合它。", tex: "E=E(\\mathbf r_1,\\dots,\\mathbf r_N;\\,Z_1,\\dots,Z_N)" },
+  { t: "机器学习力场 / 原子间势", en: "MLFF, MLIP", c: "basic", d: "用神经网络或线性模型拟合 DFT 能量、力、应力的原子间势函数。速度比 DFT 快几个数量级，精度接近训练数据。" },
+  { t: "基础模型 / 通用势", en: "foundation model, universal potential", c: "basic", d: "在覆盖大半个周期表的大数据集（MPtrj、OMat24、OMol25 等）上训练、开箱即用于任意化学体系的大模型，例如 MACE-MP-0、CHGNet、Orb、UMA。通常还可以在小数据上微调。" },
+  { t: "局域分解", en: "locality / atomic energy decomposition", c: "basic", d: "几乎所有 MLFF 的出发点：总能量 = 每个原子能量之和，而每个原子的能量只取决于它周围截断半径内的原子。这样计算量随原子数线性增长，也能推广到训练时没见过的更大体系。代价是截断之外的物理（长程静电、色散尾巴）被丢掉。", tex: "E=\\sum_{i=1}^{N}E_i\\big(\\{\\mathbf r_{ij},Z_j\\}_{r_{ij}<r_c}\\big)" },
+  { t: "截断半径与包络函数", en: "cutoff radius, envelope", c: "basic", d: "只考虑距离小于 r<sub>c</sub>（通常 4–7 Å）的邻居。为避免原子跨过截断时能量突变（力出现跳变），每条边乘一个在 r<sub>c</sub> 处平滑降到 0 的包络函数，常见余弦型或多项式型。", tex: "f_c(r)=\\tfrac12\\Big[\\cos\\!\\Big(\\frac{\\pi r}{r_c}\\Big)+1\\Big],\\quad r<r_c" },
+  { t: "邻居表与周期性", en: "neighbor list, PBC", c: "basic", d: "晶体是无限周期的：找邻居时要把晶胞的周期镜像也算进来，每条边记录相对位移 r<sub>ij</sub> = r<sub>j</sub> + n·L − r<sub>i</sub>。建邻居表在 CPU/Python 上很慢，GPU 上建表是提速的关键之一。" },
+  { t: "原子参考能", en: "atomic reference energy, E0", c: "basic", d: "每种元素一个常数偏移（孤立原子能或线性回归得到的平均能），从总能量中先扣除，网络只学剩下的“结合部分”。不同 DFT 设置的参考能不同，这也是多数据集联合训练要处理的问题。", tex: "E=\\sum_i\\big(E^{0}_{Z_i}+\\sigma\\,\\tilde E_i+\\mu\\big)" },
+
+  { t: "不变与等变", en: "invariance, equivariance", c: "sym", d: "把整个体系转一下：能量不变（不变量），力和偶极跟着一起转（等变量）。“等变网络”让隐藏特征也按确定的规则跟着转，这样网络天然满足物理对称性，不需要从数据里学。", tex: "E(R\\mathbf x)=E(\\mathbf x),\\qquad \\mathbf F(R\\mathbf x)=R\\,\\mathbf F(\\mathbf x)" },
+  { t: "O(3)、SO(3)、E(3) 与宇称", en: "O(3), SO(3), E(3), parity", c: "sym", d: "SO(3) 是所有转动；O(3) 再加上镜像反演（宇称）；E(3) 再加上平移。只保证 SO(3) 的网络分不清手性镜像的特征是否应该变号。MBD 中只含 SO(3) 的 SevenNet-0 / HIENet 在对称性保持上明显低于含宇称的版本（见分析页 C3）。" },
+  { t: "球谐函数", en: "spherical harmonics", c: "sym", d: "球面上的“傅里叶基”。把一个方向 r̂ 展开成 l = 0（各向同性）、l = 1（像矢量）、l = 2（像四极矩）……的分量；第 l 阶有 2l+1 个分量，旋转时彼此线性混合（Wigner D 矩阵）。", tex: "Y_l^m(\\hat{\\mathbf r}),\\quad Y_l^m(R\\hat{\\mathbf r})=\\sum_{m'}D^{l}_{mm'}(R)\\,Y_l^{m'}(\\hat{\\mathbf r})" },
+  { t: "角动量阶 l_max", en: "maximum degree l_max", c: "sym", d: "特征里保留的最高球谐阶数。l<sub>max</sub> 越高，方向分辨率越细、表达力越强，但计算量增长很快：朴素 CG 张量积约 ∝ l<sub>max</sub><sup>6</sup>，SO(2) 卷积技巧约 ∝ l<sub>max</sub><sup>3</sup>。MACE / NequIP 常用 2–3，EquiformerV2 / eSCN 的 OC20 大模型用到 4–6。" },
+  { t: "Clebsch–Gordan 张量积", en: "CG tensor product", c: "sym", d: "把两个等变特征（角动量 l<sub>1</sub>、l<sub>2</sub>）“相乘”并得到角动量 l<sub>3</sub> 的新特征，且结果仍严格等变。系数 C 由群论确定，是球谐等变网络的核心运算，也是最贵的部分。", tex: "(u\\otimes v)_{l_3m_3}=\\sum_{m_1,m_2}C^{l_3m_3}_{l_1m_1,\\,l_2m_2}\\,u_{l_1m_1}\\,v_{l_2m_2},\\qquad |l_1-l_2|\\le l_3\\le l_1+l_2" },
+  { t: "SO(2) 卷积（eSCN 技巧）", en: "SO(2) convolution", c: "sym", d: "先把每条边旋转到与 z 轴对齐，此时 CG 张量积会退化成只混合相同 |m| 的分量的小矩阵乘法，再转回来。结果完全等价，但代价从 ∝ L<sup>6</sup> 降到 ∝ L<sup>3</sup>，使 l<sub>max</sub> ≥ 6 在计算上可行。eSCN、EquiformerV2、eSEN、UMA 都基于它。" },
+  { t: "S² 网格非线性", en: "S² grid activation", c: "sym", d: "把球谐系数投影到球面上的一组采样点，在每个点上做普通的逐点非线性（如 SiLU），再投影回系数。表达力强，但只在网格分辨率内近似等变；在严格对称性测试中可以看出来（分析页 C3）。" },
+  { t: "笛卡尔张量等变", en: "Cartesian tensors", c: "sym", d: "直接用标量、矢量、3×3 矩阵等笛卡尔张量做特征，用点积、叉积、矩阵乘、迹等操作保持等变，避免球谐和 CG 系数。PaiNN、TensorNet、CACE、TACE、HotPP 属于这一类。张量阶为 L 时分量数为 3<sup>L</sup>。" },
+  { t: "用数据增强学对称性", en: "learned equivariance, data augmentation", c: "sym", d: "不在网络结构里强制等变，而是训练时把结构随机旋转，让网络自己学会“转了以后答案该怎么变”。网络可以全用 GPU 友好的普通 MLP / 注意力（Orb、PET），速度快；代价是对称性只是近似的。" },
+
+  { t: "描述符 / 对称函数", en: "descriptor, symmetry function", c: "net", d: "用手工设计的函数把原子周围环境变成一个固定长度、已满足旋转平移置换不变的数字向量，再交给小神经网络。Behler–Parrinello 的径向 / 角向对称函数、DeePMD 的嵌入矩阵、NEP 的切比雪夫 + 勒让德展开、SOAP 都属于这一思路。", tex: "G_i^{\\text{rad}}=\\sum_{j}e^{-\\eta(r_{ij}-r_s)^2}f_c(r_{ij})" },
+  { t: "体序 / 多体展开", en: "body order, many-body expansion", c: "net", d: "把原子能拆成两体、三体、四体……贡献之和。“体序”指模型显式包含到几体相互作用。ACE / MACE 通过对称张量积一次就构造出高体序特征；普通消息传递每层只加一体，靠堆层间接提高体序。", tex: "E_i=\\sum_{j}V_2(r_{ij})+\\sum_{j<k}V_3(\\mathbf r_{ij},\\mathbf r_{ik})+\\sum_{j<k<l}V_4(\\cdots)+\\cdots" },
+  { t: "ACE（原子簇展开）", en: "atomic cluster expansion", c: "net", d: "系统、完备的多体基函数：先把邻居投影到“径向 × 球谐”的单粒子基上得到 A，再把 A 相乘得到任意体序的不变量 B，能量是 B 的线性（或浅层非线性）组合。PACE、ACEpotentials.jl 直接用它；MACE 把它嵌进了消息传递。", tex: "A_{i,nlm}=\\sum_{j}R_{nl}(r_{ij})\\,Y_l^m(\\hat{\\mathbf r}_{ij}),\\qquad B_{i,\\boldsymbol\\nu}=\\sum_{\\boldsymbol m}C_{\\boldsymbol\\nu\\boldsymbol m}\\prod_{t}A_{i,n_tl_tm_t}" },
+  { t: "消息传递", en: "message passing (MPNN)", c: "net", d: "把结构看成图：原子是节点，截断内的原子对是边。每一层，每个原子从邻居收集“消息”（取决于邻居特征和相对位置），汇总后更新自己的特征。堆 T 层后，一个原子能“间接看到” T 跳以外的原子。", tex: "\\mathbf h_i^{t+1}=U\\Big(\\mathbf h_i^{t},\\ \\sum_{j\\in\\mathcal N(i)}M\\big(\\mathbf h_i^{t},\\mathbf h_j^{t},\\mathbf r_{ij}\\big)\\Big)" },
+  { t: "感受野", en: "receptive field", c: "net", d: "一个原子的能量最远能依赖多远的原子。严格局域模型 = r<sub>c</sub>；T 层消息传递约为 T·r<sub>c</sub>。它不等于“长程”：在感受野之外仍严格为零，而且相距超过 r<sub>c</sub> 的两块之间根本没有边（分析页 B3）。", tex: "r_{\\text{field}}\\approx T\\cdot r_c" },
+  { t: "线图 / 三体消息", en: "line graph, three-body", c: "net", d: "把“边”当作新图的节点、共享一个原子的两条边相连，从而显式处理键角（三体）信息。M3GNet、CHGNet、ALIGNN、DimeNet、GemNet 使用这一思路。三元组数 ∝ 邻居数²，所以通常用更小的三体截断。" },
+  { t: "注意力 / Transformer", en: "attention", c: "net", d: "让每条消息带一个可学习的权重（“该多听哪个邻居”）。EquiformerV2、PET、Orb 等使用。增加表达力，也增加每条边的计算量。" },
+  { t: "过度挤压", en: "over-squashing", c: "net", d: "消息传递中，远处原子的信息必须经过多次“传话”，与指数增长的其他邻居信息一起被压进固定宽度的特征里，因此远程细节很难保留。这是“靠堆层获得长程”效果有限的原因之一。" },
+
+  { t: "保守力 vs 直接力", en: "conservative vs direct forces", c: "phys", d: "保守力：力 = 能量对坐标的负梯度（自动微分得到），能量守恒、力常数对称，是物理上正确的做法，但需要一次反向传播（约 1–2 倍额外开销）。直接力：网络另开一个输出头直接预测力，更快，但力不再是任何能量的梯度——MD 中能量漂移，声子 / 热导等二阶性质明显变差（分析页 C1）。", tex: "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}\\quad\\Longleftrightarrow\\quad \\oint\\mathbf F\\cdot d\\mathbf r=0" },
+  { t: "应力 / 维里", en: "stress, virial", c: "phys", d: "能量对晶胞形变（应变）的导数除以体积。变胞弛豫、NPT 分子动力学、弹性常数都需要它。保守模型通常对一个虚拟的应变张量求导得到。", tex: "\\sigma_{\\alpha\\beta}=\\frac{1}{V}\\frac{\\partial E}{\\partial\\varepsilon_{\\alpha\\beta}}\\Big|_{\\varepsilon=0}" },
+  { t: "Hessian / 力常数 / 声子", en: "Hessian, force constants, phonons", c: "phys", d: "能量对坐标的二阶导数矩阵。对角化（除以质量）给出振动频率，即声子；三阶力常数决定声子散射，进而决定晶格热导率 κ。对保守模型可以再求一次导得到；直接力模型只能用有限差分，且结果不对称。", tex: "H_{i\\alpha,j\\beta}=\\frac{\\partial^2E}{\\partial r_{i\\alpha}\\,\\partial r_{j\\beta}},\\qquad \\det\\!\\Big(\\frac{H}{\\sqrt{m_im_j}}-\\omega^2\\Big)=0" },
+  { t: "晶格热导率 κ", en: "lattice thermal conductivity", c: "phys", d: "由声子群速度、热容和寿命决定；寿命来自三阶力常数（声子–声子散射）。对力场的二阶、三阶导数非常敏感，因此是检验“力是否自洽”的严苛指标。" },
+
+  { t: "色散 / 范德华力", en: "dispersion, van der Waals", c: "lr", d: "电子涨落引起的瞬时偶极之间的吸引，∝ −C<sub>6</sub>/r<sup>6</sup>。单个很弱，但对层状材料、分子晶体、吸附、生物分子至关重要。常用的 PBE 泛函几乎不包含它。" },
+  { t: "DFT-D3 / D4", en: "Grimme dispersion correction", c: "lr", d: "经验色散修正：按每个原子的配位数插值得到 C<sub>6</sub>、C<sub>8</sub> 系数，加阻尼函数后成对求和，可直接加到任何 MLFF 上（D4 还依赖原子电荷）。参数要与“训练数据所用的泛函”配套。", tex: "E_{\\text{disp}}=-\\sum_{i<j}\\sum_{n=6,8}s_n\\,\\frac{C_n^{ij}}{r_{ij}^{\\,n}}\\,f_{\\text{damp},n}(r_{ij})" },
+  { t: "VV10 / 非局域关联", en: "VV10 nonlocal correlation", c: "lr", d: "直接写进泛函里的色散描述（ωB97M-V、SCAN+rVV10 等使用）。用这类泛函生成的数据（如 OMol25）本身就含色散，模型不需要再加 D3。" },
+  { t: "Ewald 求和 / PME", en: "Ewald summation, particle-mesh Ewald", c: "lr", d: "周期体系中 1/r 库仑和只条件收敛，不能简单截断。Ewald 把它拆成实空间里快速衰减的短程部分 + 倒空间（傅里叶）里的光滑长程部分 + 自能修正。PME 用 FFT 把代价降到 N log N。", tex: "E_{\\text{elec}}=\\tfrac12\\sum_{i\\neq j}\\frac{q_iq_j}{r_{ij}}\\;=\\;E_{\\text{real}}+E_{\\text{recip}}+E_{\\text{self}}" },
+  { t: "电荷平衡（QEq）/ 4G-HDNNP", en: "charge equilibration", c: "lr", d: "网络预测每个原子的电负性 χ<sub>i</sub>，然后在“总电荷 = Q”的约束下最小化静电能，求出全体系自洽的原子电荷。这样电荷可以跨越很远的距离重新分布（远程电荷转移），是真正的非局域。", tex: "\\min_{\\{q_i\\}}\\ \\sum_i\\Big(\\chi_iq_i+\\tfrac12J_iq_i^2\\Big)+E_{\\text{elec}}(\\{q_i\\})\\quad\\text{s.t.}\\ \\sum_iq_i=Q" },
+  { t: "隐电荷（LES）", en: "latent Ewald summation", c: "lr", d: "从局域特征预测一个“隐变量电荷”，再做 Ewald 求和得到长程能；只用能量 / 力训练，不需要电荷标签。可以挂在 MACE、CACE、NequIP 等任意局域模型上。" },
+  { t: "总电荷 / 自旋嵌入", en: "charge & spin embedding", c: "lr", d: "把体系总电荷 Q、自旋多重度 S 作为输入嵌入到每个原子的特征中（UMA、eSEN-OMol、SpookyNet、AIMNet2 等）。它让模型区分不同的电荷态 / 自旋态，但<b>不改变相互作用的空间范围</b>，不是长程机制。" },
+  { t: "ZBL 排斥", en: "Ziegler–Biersack–Littmark potential", c: "lr", d: "原子核极近时的经验屏蔽库仑排斥。训练数据几乎没有 &lt; 1 Å 的构型，加 ZBL 可以防止高温 / 高压 / 辐照模拟中原子“穿过”彼此（分析页 C4）。", tex: "V_{\\text{ZBL}}(r)=\\frac{Z_iZ_je^2}{4\\pi\\varepsilon_0\\,r}\\,\\phi\\!\\Big(\\frac{r}{a}\\Big)" },
+
+  { t: "PBE / PBE+U", en: "GGA functional", c: "data", d: "材料计算最常用的广义梯度近似泛函；+U 为过渡金属 d / f 电子加 Hubbard 修正。Materials Project、Alexandria、OMat24 都以它为主。几乎不含色散。" },
+  { t: "r²SCAN", en: "meta-GGA functional", c: "data", d: "更高一级的 meta-GGA 泛函，对结构、能量更准，并包含部分中程范德华作用（但不含长程尾巴）。MatPES 同时提供 PBE 与 r²SCAN 数据。" },
+  { t: "ωB97M-V / ωB97X / RPBE", en: "other functionals", c: "data", d: "ωB97M-V：分子化学常用的范围分离杂化 meta-GGA，含 VV10 色散（OMol25）；ωB97X：ANI 数据集所用，不含色散；RPBE：OC20 催化数据所用的 GGA，不含色散。" },
+  { t: "MPtrj", en: "Materials Project trajectories", c: "data", d: "从 Materials Project 的结构弛豫轨迹中抽取的约 158 万个结构（约 14.6 万种材料），PBE / PBE+U，含能量、力、应力、磁矩。CHGNet 的训练集，也是 MBD“合规”赛道的标准训练集。" },
+  { t: "Alexandria / sAlex", en: "Alexandria database", c: "data", d: "大规模 PBE 晶体数据库；sAlex 是 Meta 为避免与 MBD 测试集泄漏而筛选的子集，常与 MPtrj、OMat24 一起使用。" },
+  { t: "OMat24", en: "Open Materials 2024", c: "data", d: "Meta 发布的 1 亿以上个 PBE(+U) 无机材料单点计算，刻意包含大量非平衡结构（随机扰动、高温 AIMD），用于提高力场在远离平衡时的稳健性。" },
+  { t: "OAM", en: "OMat24 + sAlex + MPtrj", c: "data", d: "MBD 对“OMat24 + sAlex + MPtrj”训练组合的简称。同一架构从 MPtrj 换到 OAM，F1 通常提高 0.07–0.19（分析页 C2）。" },
+  { t: "OC20 / ODAC23 / OMC25 / OMol25", en: "Open Catalyst & Meta datasets", c: "data", d: "OC20：吸附物–表面催化体系（RPBE）；ODAC23：MOF 中的直接空气碳捕获（PBE+D3）；OMC25：分子晶体（PBE+D3）；OMol25：1 亿以上个分子 DFT 计算（ωB97M-V）。UMA 用任务标签同时学习它们。" },
+  { t: "SPICE / ANI / MatPES", en: "molecular & materials datasets", c: "data", d: "SPICE：药物样分子与小分子团簇（ωB97M-D3(BJ)），MACE-OFF 的训练集；ANI-1x/2x：有机分子构象（ωB97X）；MatPES：从 MD 中采样的约 40 万个无机结构，同时提供 PBE 与 r²SCAN 标签。" },
+
+  { t: "F1 / DAF", en: "Matbench Discovery classification", c: "metric", d: "MBD 用模型预测的形成能判断 WBM 测试集中的晶体是否热力学稳定（距凸包能 ≤ 0）。F1 是精确率与召回率的调和平均；DAF（发现加速因子）= 模型挑出的结构中真正稳定的比例 ÷ 随机挑选时的稳定比例。", tex: "F_1=\\frac{2\\,P\\,R}{P+R},\\qquad \\text{DAF}=\\frac{P}{N_{\\text{stable}}/N_{\\text{total}}}" },
+  { t: "κ_SRME", en: "symmetric relative mean error of κ", c: "metric", d: "MBD 对 103 个晶体计算晶格热导率，与 DFT 比较的对称相对误差（按声子模式加权），对所有晶体取平均。0 = 完全一致，2 = 完全不一致；出现虚频、弛豫破坏对称性或计算失败的材料直接记为 2。下式摘自 MBD 源码文档字符串（单个材料）：", tex: "\\mathrm{SRME}=\\frac{2\\sum_i w_i\\,\\big|\\kappa^{\\text{pred}}_i-\\kappa^{\\text{DFT}}_i\\big|}{\\kappa^{\\text{pred}}_{\\text{tot}}+\\kappa^{\\text{DFT}}_{\\text{tot}}}" },
+  { t: "RMSD 与对称匹配（symprec）", en: "relaxation metrics", c: "metric", d: "RMSD：模型弛豫后的结构与 DFT 弛豫结构的均方根偏差。对称匹配：用 spglib 在给定容差 symprec 下识别弛豫后结构的空间群，看是否与 DFT 一致；容差越严（如 10<sup>−5</sup>）越能暴露“近似等变”造成的微小对称性破缺。" },
+  { t: "RDF / ADF / VDOS", en: "MD structural metrics", c: "metric", d: "径向分布函数（原子对距离的统计）、键角分布、振动态密度。MBD 把模型 MD 轨迹的这些量与 DFT-MD 对比，衡量“跑出来的液体 / 非晶结构对不对”。" },
+  { t: "力翻转 / 曲折度 / 能量跳变", en: "diatomic curve metrics", c: "metric", d: "在同核双原子从极近到解离的能量曲线上统计：力的符号翻转次数（理想 ≈ 1，只在平衡键长处翻转一次）、曲折度（能量总变差 ÷（最短距离到最低点 + 最低点到最远距离的能量差），只有一个势阱时 = 1）、能量跳变（能量变化方向翻转处的能量差之和，eV，衡量非物理振荡的幅度）。主要考验短程先验与光滑性。" },
+  { t: "MLIP Arena 稳定性 / 燃烧", en: "MLIP Arena tasks", c: "metric", d: "升温：NVT 10 ps 内 300 → 3000 K；加压：NPT 同时升温和加压到 500 GPa；统计轨迹能否跑完。燃烧：384 原子的 H<sub>2</sub>/O<sub>2</sub> 体系升温反应，统计生成水的比例与每秒步数。" },
+
+  { t: "幽灵原子与空间分解", en: "ghost atoms, domain decomposition", c: "eng", d: "大体系 MD 把空间切成块分给多个 GPU，每块要额外携带边界外一层原子（幽灵原子）。严格局域模型只需厚 r<sub>c</sub> 的一层；T 层消息传递需要 T·r<sub>c</sub> 或逐层通信，因此扩展性更差（分析页 A5）。", tex: "\\frac{N_{\\text{ghost}}}{N_{\\text{own}}}=\\frac{(\\ell+2Tr_c)^3-\\ell^3}{\\ell^3}" },
+  { t: "自动微分", en: "automatic differentiation", c: "eng", d: "深度学习框架自动对计算图求导。保守力 F = −∂E/∂r、应力、Hessian 都靠它得到，代价约是一次前向的 1–3 倍（Hessian 更多）。" },
+  { t: "融合内核 / 编译", en: "fused kernels, compilation", c: "eng", d: "cuEquivariance、OpenEquivariance、FlashTP 等把 CG 张量积 / 对称收缩写成单个 GPU 内核；torch.compile、TorchScript、JAX JIT 去掉 Python 调度开销。同一架构可以因此快一个数量级。" },
+  { t: "微调与蒸馏", en: "fine-tuning, distillation", c: "eng", d: "微调：在基础模型上用少量目标体系数据继续训练，比从头训练省数据。蒸馏：用大模型给大量构型打标签，再训练一个小而快的模型（如 Allegro、NEP、ACE），兼顾精度与速度。" },
+  { t: "ASE / LAMMPS 接口", en: "MD engines", c: "eng", d: "ASE 是 Python 的原子模拟环境，几乎所有模型都提供 ASE 计算器，方便但每步都有 Python 往返；LAMMPS（ML-IAP、Kokkos、pair_style）、GPUMD、TorchSim 等原生接口更适合大规模生产 MD。" },
+];
+const on = new Set();
+const cats = document.getElementById("cats");
+cats.innerHTML = Object.entries(CATS).map(([k, v]) => `<button class="chip" data-c="${k}">${v}</button>`).join("");
+cats.addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  on.has(b.dataset.c) ? on.delete(b.dataset.c) : on.add(b.dataset.c);
+  b.classList.toggle("on"); render();
+});
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const strip = (s) => s.replace(/<[^>]+>/g, "");
+  const rows = G.filter((g) => (!on.size || on.has(g.c)) && (!q || (g.t + " " + g.en + " " + strip(g.d)).toLowerCase().includes(q)));
+  document.getElementById("count").textContent = `${rows.length} / ${G.length} 条`;
+  let html = "";
+  for (const [k, v] of Object.entries(CATS)) {
+    const rs = rows.filter((g) => g.c === k);
+    if (!rs.length) continue;
+    html += `<h2 id="${k}">${v}</h2><div class="grid g2">` + rs.map((g) =>
+      `<div class="card"><h3>${esc(g.t)} <span class="small muted">${esc(g.en)}</span></h3><p>${g.d}</p>${g.tex ? `<div class="math" data-tex="${esc(g.tex)}"></div>` : ""}</div>`).join("") + "</div>";
+  }
+  document.getElementById("list").innerHTML = html || '<p class="muted">没有匹配的术语。</p>';
+  renderAllTex(document.getElementById("list"));
+}
+document.getElementById("q").addEventListener("input", render);
+render();
+</script>
+</body>
+</html>

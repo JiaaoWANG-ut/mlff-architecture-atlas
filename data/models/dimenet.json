@@ -1,0 +1,203 @@
+{
+  "id": "dimenet",
+  "name": "DimeNet / DimeNet++",
+  "fullName": "DimeNet / DimeNet++: Directional Message Passing Neural Network",
+  "year": 2020,
+  "authors": "J. Gasteiger（原名 Klicpera）, J. Groß, S. Günnemann；DimeNet++ 另有 S. Giri, J. T. Margraf",
+  "paper": {"title": "Directional Message Passing for Molecular Graphs", "venue": "ICLR 2020（DimeNet++：Fast and Uncertainty-Aware Directional Message Passing for Non-Equilibrium Molecules，NeurIPS 2020 ML for Molecules Workshop）", "url": "https://www.cs.cit.tum.de/daml/dimenet"},
+  "repos": ["dimenet"],
+  "family": "invariant-mpnn",
+  "tags": ["方向性消息传递", "有向边消息 m_ji", "键角（3 体）", "球面 Fourier–Bessel 基", "E(3) 不变", "QM9 分子性质"],
+  "framework": "TensorFlow 2 (Keras) + SymPy 生成基函数；第三方 PyG / JAX / fairchem(PyTorch) 实现",
+  "license": "Hippocratic License 2.1（含人权条款的伦理许可，非 OSI 开源）",
+  "oneLiner": "把消息从“原子”搬到“有向边（键）”上：更新边 j→i 时，汇总所有指向 j 的边 k→j，并用距离 d_kj 与两边夹角 α 的球面 Fourier–Bessel 基去调制，于是网络第一次能显式“看到”键角。DimeNet++ 用降维 + 逐元素乘替换昂贵的双线性层，README 称快 8 倍。",
+  "analogy": "像用“道路”而不是“路口”记录城市交通：每条单行道 j→i 都有自己的状态，更新时去问所有汇入路口 j 的道路 k→j：“你有多长、和我拐了多大角度？”只记路口（原子）的人只知道附近有几条路、各多长；记道路的人还知道转弯角度，所以能分辨形状。",
+  "arch": {
+    "geometry": "边长 d_ji（Bessel 径向基 × 多项式包络）+ 三元组键角 α（球 Bessel j_l × Y_l^0）；无二面角",
+    "equivariance": "E(3) 不变：只用距离与角度，隐藏状态全是标量（球谐只取 m=0）",
+    "lmax": "num_spherical=7 → l=0…6，仅 m=0（即 Legendre P_l(cos α)）",
+    "bodyOrder": "每次消息更新显式 3 体（k–j–i 键角）；多块叠加后间接更高",
+    "layers": "DimeNet 6 个交互块；DimeNet++ 4 个（另有 1 个嵌入块）",
+    "cutoff": "5 Å（两版默认）；fairchem 包装默认 10 Å，OC20 配置 6 Å",
+    "receptiveField": "边消息每过一块外扩一个 c：T 块后 ≈(T+1)·c（DimeNet++ ≈25 Å，DimeNet ≈35 Å）",
+    "message": "m_ji ← f(m_ji, Σ_k g(m_kj, RBF(d_kj), SBF(d_kj, α)))；DimeNet 用 128×8×128 双线性层，DimeNet++ 降到 64 维后与 SBF 逐元素乘",
+    "readout": "嵌入块与每个交互块各接一个输出块：RBF⊙m_ji 求和到原子 i → 3 层 MLP → 目标；各块输出相加",
+    "forces": "conservative",
+    "forcesDetail": "能量模型应取 F=−∂E/∂R；本 TF2 仓库只训 QM9 标量、无求力代码；fairchem 版用 autograd 求力，但夹角输入被 detach，力缺角度项",
+    "stress": "无（无晶胞/PBC 输入，也无应变求导）",
+    "longRange": "无；EwaldMP 仓库提供 DimeNet++ + Ewald 长程消息传递外挂",
+    "dispersion": "无内建或外挂色散",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "任意不变标量：QM9 的 μ、α、HOMO、LUMO、gap、R²、ZPVE、U0、U、H、G、Cv（逐目标训练）",
+    "strictlyLocal": false,
+    "complexity": "边上 O(N·M·C²)；三元组 O(N·M²)：DimeNet 每个三元组 O(C²·8)，DimeNet++ 降为 O(C_int=64)",
+    "accel": "无专用内核，仅 tf.function 图编译；第三方 PyG / JAX 实现（README）；fairchem 版支持 PBC、max_neighbors=50"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "三元组数 ∝ N·M²；DimeNet 每个三元组做 128×8×128 双线性收缩，DimeNet++ 改为降维 + 逐元素乘（README 称快 8 倍），但仍明显慢于只在边上计算的 SchNet/PaiNN 类模型。"},
+    "expressiveness": {"v": 3, "why": "消息显式包含键角（3 体），多块叠加可间接获得更高体序；但只有不变量（m=0 球谐）、没有二面角，弱于 GemNet 与高阶等变模型。"},
+    "longRange": {"v": 2, "why": "无色散/静电/电荷，只有消息传递感受野 ≈(T+1)·c；EwaldMP 仓库提供了 DimeNet++ 的 Ewald 长程扩展，但不属于原实现。"},
+    "scalability": {"v": 1, "why": "原实现只处理孤立分子：CPU 上用 O(N²) 稠密距离矩阵建图、无 PBC、无 LAMMPS/多 GPU；多块边消息传递也难以空间分解。"},
+    "physics": {"v": 3, "why": "严格不变、多项式包络平滑截断、原子贡献求和保证广延；但仓库未实现力，包络隐含 1/d 使 l=0 球基在 d→0 发散，无 ZBL 近程排斥，且有若干已知 bug。"},
+    "coverage": {"v": 2, "why": "可回归任意不变标量（QM9 的 μ、α、HOMO/LUMO、ZPVE、U0、Cv 等），但没有力/应力/Hessian 或张量性质的官方实现。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：孤立分子的原子序数与坐标",
+      "plain": "输入只有每个原子的原子序数 Z（嵌入表支持到 Pu，Z≤94）和笛卡尔坐标 R，外加标记原子属于哪个分子的 batch_seg。原始 TF2 实现面向 QM9 这类孤立小分子：没有晶胞、没有周期边界，也不输入总电荷或自旋。所有边与三元组索引都在数据管线里预先算好，作为整数张量传入模型。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\quad Z_i\\in\\{1,\\dots,94\\},\\qquad \\text{no cell, no PBC, no charge/spin}",
+      "code": [{"file": "dimenet/model/dimenet_pp.py", "start": 105, "end": 111, "must": "inputs['Z'], inputs['R']", "caption": "DimeNetPP.call：读取 Z、R 及预计算的边/三元组索引"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断内的有向边 j→i，再枚举三元组 k→j→i",
+      "plain": "对每个分子算出全部原子对距离（O(N²) 稠密矩阵），距离 ≤ c=5 Å 的原子对连成两条方向相反的有向边。然后对每条边 j→i 找出所有指向 j 的边 k→j，并去掉 k=i 的“回头路”，得到三元组 k→j→i。id_expand_kj / id_reduce_ji 两组索引负责把边消息“展开”到三元组、再“汇总”回边——这是方向性消息传递的骨架，三元组数约为 N·M²。",
+      "math": "\\mathcal E=\\{\\,j\\to i:\\ \\lVert\\mathbf r_i-\\mathbf r_j\\rVert\\le c,\\ i\\ne j\\,\\},\\qquad \\mathcal T=\\{\\,k\\to j\\to i:\\ (k\\to j),(j\\to i)\\in\\mathcal E,\\ k\\ne i\\,\\}",
+      "code": [
+        {"file": "dimenet/training/data_container.py", "start": 66, "end": 83, "must": "Dij <= self.cutoff", "caption": "逐分子稠密距离矩阵 → 截断邻接矩阵 → 边 (i, j)"},
+        {"file": "dimenet/training/data_container.py", "start": 85, "end": 102, "must": "id3ynb_i != id3ynb_k", "caption": "枚举三元组 k→j→i、剔除 k=i，并生成 expand/reduce 索引"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：Bessel 径向基 × 多项式包络",
+      "plain": "每条边的长度 d 先除以截断 c 得 x，再展开成 6 个正弦 Bessel 函数 sin(f_n x)/x，频率 f_n 初始化为 nπ 且可训练。包络 u(x)（p=6 的多项式）在 x=1 处函数值和一、二阶导数都为 0，保证能量与力在截断处平滑。代码中的 Envelope 直接返回 u(x)/x（README 称“包络隐含除以距离”），在径向基里正好充当 1/x 因子。距离用 sqrt(relu(·)) 计算，避免对负数开方。",
+      "math": "e_{\\mathrm{RBF},n}(d)=\\frac{u(x)}{x}\\,\\sin(f_n x),\\ \\ x=\\frac{d}{c},\\ f_n\\overset{\\text{init}}{=}n\\pi,\\ n=1..6;\\qquad u(x)=1-\\frac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\frac{p(p+1)}{2}x^{p+2},\\ p=6,\\ u=0\\ (x\\ge 1)",
+      "code": [
+        {"file": "dimenet/model/layers/bessel_basis_layer.py", "start": 16, "end": 29, "must": "tf.sin(self.frequencies * d_scaled)", "caption": "BesselBasisLayer：可训练频率（初值 nπ）× 包络"},
+        {"file": "dimenet/model/layers/envelope.py", "start": 13, "end": 23, "must": "env_val = 1 / inputs", "caption": "Envelope：返回 u(x)/x，x≥1 时置零"},
+        {"file": "dimenet/model/dimenet_pp.py", "start": 85, "end": 90, "must": "tf.sqrt(tf.nn.relu(", "caption": "边长 d_ji"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "角度编码：2D 球面 Fourier–Bessel 基（距离 d_kj × 键角 α）",
+      "plain": "对每个三元组，用边 k→j 的长度 d_kj 与两条边的夹角 α 联合展开：径向部分是 l 阶球 Bessel 函数 j_l(z_ln x)（z_ln 为 j_l 的第 n 个零点，因此在截断处为 0），角向部分是 m=0 的实球谐 Y_l^0(α)（即 Legendre 多项式），l=0…6、n=1…6 共 42 个基函数。这些公式在初始化时由 SymPy 符号推导并 lambdify 成 TF 运算。只用 m=0 意味着基函数只依赖夹角，模型因此严格旋转不变。README 指出隐含的 1/x 对球基是错误的（如 l=0 项在 d→0 时发散），原版 DimeNet 的第二个角度向量还误写成 R_k−R_i，DimeNet++ 已改为 R_k−R_j。",
+      "math": "a_{\\mathrm{SBF},ln}=\\frac{u(x_{kj})}{x_{kj}}\\sqrt{\\frac{2}{j_{l+1}^{2}(z_{ln})}}\\,j_l(z_{ln}x_{kj})\\,\\sqrt{\\frac{2l+1}{4\\pi}}P_l(\\cos\\alpha),\\ \\ l=0..6,\\ n=1..6;\\qquad \\alpha=\\operatorname{atan2}\\big(\\lVert\\mathbf a\\times\\mathbf b\\rVert,\\ \\mathbf a\\cdot\\mathbf b\\big),\\ \\mathbf a=\\mathbf r_j-\\mathbf r_i,\\ \\mathbf b=\\mathbf r_k-\\mathbf r_j",
+      "code": [
+        {"file": "dimenet/model/layers/basis_utils.py", "start": 53, "end": 71, "must": "0.5*Jn(zeros[order, i], order+1)**2", "caption": "bessel_basis：球 Bessel 零点 z_ln 与归一化系数（SymPy 符号式）"},
+        {"file": "dimenet/model/layers/spherical_basis_layer.py", "start": 39, "end": 54, "must": "rbf_env * cbf", "caption": "SphericalBasisLayer：j_l·包络（按 kj 边 gather）× Y_l^0(α)"},
+        {"file": "dimenet/model/dimenet_pp.py", "start": 92, "end": 103, "must": "tf.math.atan2(y, x)", "caption": "三元组夹角：atan2(|a×b|, a·b)"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入块：在每条有向边上生成初始消息 m_ji",
+      "plain": "每种元素有一个 128 维可学习向量 h_Z（均匀分布初始化）。边 j→i 的初始消息由目标原子 i、源原子 j 的元素向量与该边的径向基特征拼接，再经一层全连接 + swish 得到。与 SchNet 等“原子特征”模型不同，DimeNet 的隐藏状态从一开始就放在边上。README 提到这里的 RBF 线性层本不该带偏置和激活，为兼容预训练权重而保留。",
+      "math": "\\mathbf m^{(0)}_{ji}=\\sigma\\Big(W\\big[\\mathbf h_{Z_i}\\,\\|\\,\\mathbf h_{Z_j}\\,\\|\\,\\sigma(W_{\\mathrm{rbf}}\\mathbf e_{\\mathrm{RBF}}(d_{ji})+\\mathbf b_{\\mathrm{rbf}})\\big]+\\mathbf b\\Big),\\qquad \\sigma(x)=x\\cdot\\mathrm{sigmoid}(x)",
+      "code": [
+        {"file": "dimenet/model/layers/embedding_block.py", "start": 15, "end": 38, "must": "tf.concat([x_i, x_j, rbf], axis=-1)", "caption": "EmbeddingBlock：[h_Zi ‖ h_Zj ‖ σ(W·RBF)] → Dense(swish)"},
+        {"file": "dimenet/model/activations.py", "start": 4, "end": 9, "must": "x*tf.sigmoid(x)", "caption": "swish 激活"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块（DimeNet）：双线性层把 m_kj 与角度基耦合",
+      "plain": "更新边 j→i 时，先把每条入边 k→j 的消息经 Dense(swish) 并乘上径向基滤波 W_rbf·e_RBF；再把 42 维 SBF 投影到 8 维，与消息一起送入 128×8×128 的双线性张量 W，最后把所有 k 的结果求和回边 ji。双线性层让“距离/角度”与“消息内容”充分相乘，表达力强，但每个三元组都要做 128×8×128 次乘加，是 DimeNet 慢的根源。README 还指出这里的 RBF 实际作用于 d_kj，而非论文所写的 d_ji。",
+      "math": "[\\tilde{\\mathbf m}_{ji}]_a=\\sum_{k\\in\\mathcal N(j)\\setminus\\{i\\}}\\sum_{b=1}^{8}\\sum_{c=1}^{128}W_{abc}\\,\\big[W_{\\mathrm{sbf}}\\mathbf a_{\\mathrm{SBF}}(d_{kj},\\alpha)\\big]_b\\,\\big[\\sigma(W_{kj}\\mathbf m_{kj}+\\mathbf b)\\odot W_{\\mathrm{rbf}}\\mathbf e_{\\mathrm{RBF}}(d_{kj})\\big]_c",
+      "code": [
+        {"file": "dimenet/model/layers/interaction_block.py", "start": 43, "end": 46, "must": "shape=(self.emb_size, self.num_bilinear, self.emb_size)", "caption": "双线性张量 W ∈ R^{128×8×128}"},
+        {"file": "dimenet/model/layers/interaction_block.py", "start": 48, "end": 80, "must": "tf.einsum(", "caption": "InteractionBlock.call：RBF 滤波 → gather 到三元组 → 双线性 → 求和 → 残差"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块（DimeNet++）：降维 → 逐元素乘角度基 → 汇总 → 升维",
+      "plain": "DimeNet++ 用三步替代双线性层：先在边上把 128 维消息乘以 RBF 滤波（6→8→128 的瓶颈投影），再降到 int_emb_size=64 维；然后到三元组上与 SBF 的投影（42→8→64）逐元素相乘；求和回边 ji 后再升回 128 维。三元组上的运算从 O(C²·8) 降到 O(64)，重计算被挪到数量少得多的边上。结果与 m_ji 自身的变换相加，经残差层和跳连得到新消息；config_pp.yaml 默认堆 4 个这样的块。",
+      "math": "\\tilde{\\mathbf m}_{ji}=\\sigma\\Big(W_{\\uparrow}\\sum_{k}\\sigma\\big(W_{\\downarrow}[\\sigma(W_{kj}\\mathbf m_{kj}+\\mathbf b)\\odot W^{(2)}_{\\mathrm{rbf}}W^{(1)}_{\\mathrm{rbf}}\\mathbf e_{\\mathrm{RBF}}(d_{kj})]\\big)\\odot W^{(2)}_{\\mathrm{sbf}}W^{(1)}_{\\mathrm{sbf}}\\mathbf a_{\\mathrm{SBF}}\\Big);\\qquad \\mathbf m_{ji}\\leftarrow\\mathrm{Res}\\circ\\mathrm{Res}\\Big(\\mathbf m_{ji}+\\sigma\\big(W'\\,\\mathrm{Res}(\\sigma(W_{ji}\\mathbf m_{ji}+\\mathbf b)+\\tilde{\\mathbf m}_{ji})+\\mathbf b'\\big)\\Big)",
+      "code": [
+        {"file": "dimenet/model/layers/interaction_pp_block.py", "start": 48, "end": 72, "must": "x_kj = self.down_projection(x_kj)", "caption": "InteractionPPBlock.call：RBF 滤波 → 降维 → gather → ⊙SBF → scatter-sum → 升维"},
+        {"file": "dimenet/model/layers/interaction_pp_block.py", "start": 74, "end": 86, "must": "x = x + x2", "caption": "残差层 + 跳连"},
+        {"file": "dimenet/model/layers/residual_layer.py", "start": 16, "end": 18, "must": "inputs + self.dense_2(self.dense_1(inputs))", "caption": "ResidualLayer：x + σ(W₂σ(W₁x))"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "输出块：每一块都读出一次原子贡献",
+      "plain": "嵌入块之后和每个交互块之后都接一个输出块：把所有指向原子 i 的边消息乘以该边的径向基滤波，再求和到原子 i 上，经 3 层 swish 全连接（DimeNet++ 先升到 256 维），最后线性映射到目标维度。“边 → 原子”的转换只发生在读出阶段，不同深度的块分别贡献不同尺度的信息。",
+      "math": "\\mathbf t^{(t)}_i=W_{\\mathrm{out}}\\,\\mathrm{MLP}_{3}\\Big(W_{\\uparrow}\\sum_{j\\in\\mathcal N(i)}\\big(W_{\\mathrm{rbf}}\\mathbf e_{\\mathrm{RBF}}(d_{ji})\\big)\\odot\\mathbf m^{(t)}_{ji}\\Big),\\quad t=0,\\dots,T",
+      "code": [
+        {"file": "dimenet/model/layers/output_pp_block.py", "start": 28, "end": 40, "must": "tf.math.unsorted_segment_sum(x, idnb_i, n_atoms)", "caption": "OutputPPBlock：RBF⊙m_ji → 求和到原子 i → 升维 256 → 3×Dense → 输出"},
+        {"file": "dimenet/model/layers/output_block.py", "start": 25, "end": 35, "must": "x = g * x", "caption": "DimeNet 的 OutputBlock（无升维，宽 128）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：各块输出相加，再对分子内原子求和",
+      "plain": "模型把 T+1 个输出块的原子贡献逐块累加，再用 segment_sum 对同一分子的原子求和得到总能（或其他广延量）；DimeNet++ 可设 extensive=False 改为对原子取平均（适合强度量）。能量写成原子贡献之和，保证了广延性和置换不变性。模型内部没有单原子参考能 E0，也没有 scale/shift，训练直接对 eV 单位目标做 MAE 回归，GradientTape 只用于对网络参数求梯度。",
+      "math": "E=\\sum_{i\\in\\mathrm{mol}}\\sum_{t=0}^{T}t^{(t)}_i,\\qquad \\mathcal L=\\mathrm{MAE}(E,E^{\\mathrm{ref}})",
+      "code": [
+        {"file": "dimenet/model/dimenet_pp.py", "start": 122, "end": 135, "must": "tf.math.segment_sum(P, batch_seg)", "caption": "逐块累加 P，再按分子 segment_sum / segment_mean"},
+        {"file": "dimenet/training/trainer.py", "start": 55, "end": 63, "must": "tf.abs(targets - preds)", "caption": "训练：GradientTape 只对参数求 MAE 损失的梯度（没有力项）"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标求导（原仓库未实现）",
+      "plain": "DimeNet 是能量模型：坐标 R 只通过距离 sqrt(·) 和 atan2 夹角进入网络，配合平滑包络，E(R) 处处可微，按标准做法力应取 F = −∂E/∂R（README 提到 DimeNet 曾在 MD17 上评测，DimeNet++ 论文面向非平衡分子）。但这个 TF2 仓库只训练 QM9 标量、没有求力代码，需要自己用 tf.GradientTape 监视 R 再对 E 求导。fairchem（OCP）的 PyTorch 版 DimeNetPlusPlusWrap 用 torch.autograd.grad 求力并支持周期边界，但计算夹角时对坐标做了 .detach()，力只含距离通道的梯度，严格说不是总能的精确负梯度。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}=-\\sum_{e}\\frac{\\partial E}{\\partial d_e}\\frac{\\partial d_e}{\\partial\\mathbf r_i}-\\sum_{\\tau}\\frac{\\partial E}{\\partial\\alpha_\\tau}\\frac{\\partial\\alpha_\\tau}{\\partial\\mathbf r_i}\\qquad(\\text{fairchem: 2nd term removed by detach})",
+      "code": [
+        {"file": "dimenet/model/dimenet_pp.py", "start": 113, "end": 120, "must": "self.calculate_neighbor_angles(", "caption": "TF 版中 R 只在这里进入（距离 + 角度），E(R) 可微，但仓库没有对 R 求导的代码"},
+        {"repo": "equiformer_v3", "file": "src/fairchem/core/models/dimenet_plus_plus.py", "start": 464, "end": 484, "must": "torch.autograd.grad(", "caption": "fairchem 版（equiformer_v3 仓库内置副本）forward：pos.requires_grad → F = −∂E/∂pos"},
+        {"repo": "equiformer_v3", "file": "src/fairchem/core/models/dimenet_plus_plus.py", "start": 430, "end": 449, "must": "pos_i = pos[idx_i].detach()", "caption": "fairchem 版计算夹角时 detach 坐标（含 PBC 偏移）：角度项不参与求力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程：原模型没有；EwaldMP 提供 Ewald 长程消息传递外挂",
+      "plain": "DimeNet/DimeNet++ 本身不含色散、静电或电荷，超出 (T+1)·c 感受野的相互作用完全缺失；对孤立小分子影响不大，但对周期体系和带电体系是硬伤。EwaldMP 仓库把 DimeNet++ 改造成“短程边消息 + 长程原子消息”双通道：每个交互块后，原子嵌入 h 再加上 Ewald 块（在倒空间 k 网格上计算）和可选的大截断原子间消息块的输出，并一起送入输出块。注释说明对 DimeNet++ 推荐让 Ewald 块 detach 坐标，因为它们对力的贡献很小。",
+      "math": "\\mathbf h^{(t+1)}_i=\\gamma\\big(\\mathbf h^{(t)}_i+\\mathbf h^{\\mathrm{Ewald}}_i(\\{\\mathbf k\\})+\\mathbf h^{\\mathrm{at}}_i\\big),\\qquad P_i\\mathrel{+}=\\mathrm{Out}^{(t+1)}\\big(\\mathbf m^{(t+1)},\\mathbf h^{(t+1)}\\big)",
+      "code": [
+        {"repo": "EwaldMP", "file": "ocpmodels/models/dimenet_plus_plus.py", "start": 637, "end": 667, "must": "h = self.skip_connection_factor * (h + h_ewald + h_at)", "caption": "EwaldMP 版 DimeNet++：每块后原子嵌入 h 叠加 Ewald 与长程原子消息"},
+        {"repo": "EwaldMP", "file": "ocpmodels/models/dimenet_plus_plus.py", "start": 431, "end": 435, "must": "self.detach_ewald", "caption": "Ewald 块默认 detach 坐标（注释称对 DimeNet++ 推荐）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "其他性质：同一架构回归 QM9 的各种标量",
+      "plain": "输出维度 num_targets 可任意设定，仓库用同一架构回归 QM9 的 12 个性质（偶极矩大小 μ、极化率 α、HOMO/LUMO/gap、R²、ZPVE、U0/U/H/G、Cv），并按目标分别发布单目标权重。不同目标的最后一层初始化不同（μ、HOMO、LUMO、ZPVE 用零初始化，其余用正交 Glorot）。这些都是旋转不变的标量；偶极向量、极化率张量等等变性质无法直接输出。",
+      "math": "\\mathbf P\\in\\mathbb R^{n_{\\mathrm{targets}}},\\quad \\text{targets}\\subseteq\\{\\mu,\\alpha,\\epsilon_{\\mathrm{HOMO}},\\epsilon_{\\mathrm{LUMO}},\\Delta\\epsilon,\\langle R^2\\rangle,\\mathrm{ZPVE},U_0,U,H,G,c_v\\}",
+      "code": [
+        {"file": "config_pp.yaml", "start": 9, "end": 13, "must": "output_init: 'GlorotOrthogonal'", "caption": "输出层初始化随目标而变；extensive 决定求和/平均"},
+        {"file": "config_pp.yaml", "start": 40, "end": 40, "must": "targets: ['U0']", "caption": "可选 12 个 QM9 目标（默认只训 U0）"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "5.0 Å", "note": "截断半径（DimeNet 与 DimeNet++ 相同）", "code": {"file": "config_pp.yaml", "start": 13, "end": 15, "must": "cutoff: 5.0"}},
+    {"name": "envelope_exponent", "value": "5（p = 6）", "note": "u(x)=1−28x⁶+48x⁷−21x⁸，代码返回 u(x)/x", "code": {"file": "dimenet/model/layers/envelope.py", "start": 13, "end": 16, "must": "self.p = exponent + 1"}},
+    {"name": "num_radial / num_spherical", "value": "6 / 7", "note": "RBF 6 维；SBF 7×6 = 42 维（l=0…6）", "code": {"file": "config_pp.yaml", "start": 9, "end": 10, "must": "num_spherical: 7"}},
+    {"name": "emb / out_emb / int_emb / basis_emb", "value": "128 / 256 / 64 / 8", "note": "DimeNet++：边消息 / 输出 MLP / 三元组降维 / 基函数瓶颈宽度", "code": {"file": "config_pp.yaml", "start": 3, "end": 6, "must": "int_emb_size: 64"}},
+    {"name": "num_blocks（DimeNet++）", "value": "4", "note": "交互块数（加嵌入块共 5 个输出块）", "code": {"file": "config_pp.yaml", "start": 3, "end": 7, "must": "num_blocks: 4"}},
+    {"name": "num_blocks / num_bilinear（DimeNet）", "value": "6 / 8", "note": "原版：6 个交互块，双线性张量 128×8×128", "code": {"file": "config.yaml", "start": 3, "end": 8, "must": "num_bilinear: 8"}},
+    {"name": "num_before_skip / num_after_skip / num_dense_output", "value": "1 / 2 / 3", "note": "跳连前后的残差层数；输出块全连接层数", "code": {"file": "config_pp.yaml", "start": 17, "end": 19, "must": "num_after_skip: 2"}},
+    {"name": "activation", "value": "swish：x·sigmoid(x)", "note": "全模型统一激活", "code": {"file": "dimenet/model/activations.py", "start": 4, "end": 9, "must": "x*tf.sigmoid(x)"}},
+    {"name": "训练（QM9）", "value": "lr 1e-3（3000 步预热）、batch 32、3M 步、EMA 0.999", "note": "AMSGrad + 指数衰减，MAE 损失；110k 训练 / 10k 验证", "code": {"file": "config_pp.yaml", "start": 21, "end": 35, "must": "ema_decay: 0.999"}},
+    {"name": "OC20 配置（fairchem AdsorbML）", "value": "hidden 192、3 块、cutoff 6 Å、use_pbc、regress_forces", "note": "第三方 PyTorch 重实现，用于催化 S2EF 与 LBFGS 弛豫", "code": {"repo": "fairchem", "file": "src/fairchem/applications/AdsorbML/adsorbml/configs/dpp.yml", "start": 14, "end": 45, "must": "regress_forces: True"}}
+  ],
+  "speedNotes": [
+    "开销集中在三元组：数量 ≈ Σ_j deg(j)²（∝ N·M²）。原版 DimeNet 每个三元组做一次 128×8×128 的双线性收缩（einsum），是最贵的一步。",
+    "DimeNet++ 把重计算挪到边上：边上降到 64 维，三元组上只做逐元素乘（SBF 经 42→8→64 瓶颈投影）；README 称比 DimeNet 快 8 倍且精度高约 10%。",
+    "基函数由 SymPy 符号生成后 lambdify 成 42 个球 Bessel 和 7 个 Legendre 的独立 TF 运算，逐个求值再 stack，没有融合内核。",
+    "邻居/三元组索引在 CPU 上用 NumPy/SciPy 构建，需要 O(N²) 稠密距离矩阵；对 QM9 足够，大体系时建图本身就是瓶颈。fairchem 版把每原子邻居上限设为 max_neighbors=50。"
+  ],
+  "weakNotes": [
+    "截断 c=5 Å，但消息沿有向边逐块传递：T 个交互块后原子贡献依赖沿边链 ≈(T+1)·c 内的原子（DimeNet++ ≈25 Å，DimeNet ≈35 Å）；对 QM9 小分子相当于全局，但间距 > c 的分离片段之间完全没有相互作用。",
+    "没有色散、静电项，也不输入总电荷/自旋：同一几何的不同电荷态、离子、自由基无法区分。",
+    "官方只提供 QM9 平衡结构小分子数据（data/qm9_eV.npz，README 承认有 off-by-one 过滤错误）与权重，不含非平衡构型和周期体系；层状 vdW 材料、分子晶体、物理吸附、离子液体都超出其适用范围。",
+    "原实现无 PBC：fairchem/OCP 重实现加入 use_pbc（OC20 配置 6 Å），但仍无长程物理；EwaldMP 仓库提供 DimeNet++ + Ewald 长程消息传递作为外挂。",
+    "包络隐含 1/x 使 l=0 球基在 d_kj→0 时发散，且没有 ZBL 近程排斥，高度压缩或碰撞构型的外推风险大。"
+  ],
+  "downstreamNotes": [
+    "设计目标是分子性质回归（QM9）：内能、焓、自由能、热容、HOMO/LUMO 等标量，每个目标单独训练、单独发布权重。",
+    "MD / 几何优化：作为光滑能量模型可通过 −∂E/∂R 获得保守力，但本仓库没有求力代码和 ASE/LAMMPS 接口，需要自行实现或使用 PyG / JAX / fairchem 版本。",
+    "催化：fairchem 文档列出 OC20 的 DimeNet / DimeNet++ S2EF、IS2RE 基线权重；AdsorbML 配置用 DimeNet++ 做 LBFGS 弛豫（fmax 0.02、最多 300 步）。",
+    "声子 / 弹性：无应力、无 Hessian 支持，fairchem 版的力还缺角度项，不适合对二阶导精度要求高的任务；README 建议能量+力任务改用后继模型 GemNet。"
+  ],
+  "strengths": ["最早系统引入键角的 MPNN 之一：消息放在有向边上，能区分仅靠距离分不开的构型", "物理启发的正交基（径向 Bessel + 2D 球面 Fourier–Bessel），基函数少而高效", "严格 E(3) 不变、平滑截断包络、原子贡献求和保证广延性", "DimeNet++ 提速 8 倍且更准（README），是 OC20 等基准的经典基线"],
+  "weaknesses": ["三元组数 ∝ N·M²，致密体系（M 大）代价陡增", "只用 3 体角、缺二面角（后继 GemNet 补上）；纯不变特征无法输出张量性质", "原 TF2 实现无 PBC、无力/应力代码、无 MD 接口", "README 列出多处已知 bug（角度向量、包络隐含 1/d、RBF 用 d_kj、嵌入层多余偏置/激活），为兼容权重未修复", "Hippocratic 许可证附带使用限制"],
+  "pretrained": ["DimeNet：QM9 单目标权重 ×11（U0, U, H, G, Cv, alpha, r2, zpve, mu, homo, lumo）", "DimeNet++：QM9 单目标权重 ×11（同上）", "OC20 S2EF / IS2RE 基线：DimeNet、DimeNet++（含 force-only 与 Large 版；fairchem 文档，PyTorch 重实现）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

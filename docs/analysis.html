@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深度分析：速度 · 弱相互作用 · 下游性质 · MLFF 架构图解</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+<div class="layout">
+<aside class="toc">
+  <a href="#summary"><b>结论摘要</b></a>
+  <a href="#speed"><b>A. 速度</b></a>
+  <a href="#speed-cost">　代价从哪里来</a>
+  <a href="#speed-measured">　实测：同平台 MD 速度</a>
+  <a href="#speed-scaling">　随体系增大的标度</a>
+  <a href="#speed-pareto">　精度–速度权衡</a>
+  <a href="#speed-parallel">　并行与工程</a>
+  <a href="#weak"><b>B. 弱相互作用 / 长程</b></a>
+  <a href="#weak-physics">　物理背景</a>
+  <a href="#weak-two">　两个层面的缺口</a>
+  <a href="#weak-rf">　感受野 ≠ 长程</a>
+  <a href="#weak-matrix">　能力矩阵</a>
+  <a href="#weak-data">　训练数据里有没有色散</a>
+  <a href="#weak-mech">　补救机制对比</a>
+  <a href="#weak-practice">　实践建议</a>
+  <a href="#downstream"><b>C. 下游性质</b></a>
+  <a href="#ds-kappa">　保守力与声子 / 热导</a>
+  <a href="#ds-data">　数据 vs 架构</a>
+  <a href="#ds-sym">　对称性保持</a>
+  <a href="#ds-diatomic">　短程与曲线光滑性</a>
+  <a href="#ds-md">　MD 质量与稳定性</a>
+  <a href="#ds-react">　反应性</a>
+  <a href="#ds-props">　性质覆盖</a>
+  <a href="#guide"><b>D. 选型指南</b></a>
+  <a href="#limits"><b>E. 局限说明</b></a>
+</aside>
+<div>
+<h1>深度分析：架构如何决定速度、弱相互作用与下游性质</h1>
+<p class="muted">本页把“底层结构”与“可观测表现”连起来看。架构事实来自各模型源码（见各模型页面）；数字来自
+  <a href="https://github.com/janosh/matbench-discovery" target="_blank" rel="noopener">Matbench Discovery</a>（MBD）与
+  <a href="https://github.com/atomind-ai/mlip-arena" target="_blank" rel="noopener">MLIP Arena</a> 仓库里的原始结果文件（固定 commit，见 <a href="bench.html">基准数据</a> 页）。所有图表都由浏览器从这些数据实时绘制。</p>
+
+<h2 id="summary">结论摘要</h2>
+<div class="grid g2">
+  <div class="card"><h3>⚡ 速度</h3><ul class="notes">
+    <li>单步开销 ≈ 原子数 × 邻居数 × 层数 × 每条边的运算量 ×（1 + 反传）。邻居数 ∝ r<sub>c</sub><sup>3</sup>，所以截断半径和层数是最大的杠杆，其次才是“用不用球谐”。</li>
+    <li>同一平台、同一 384 原子体系：直接力的 Orb ≈ 55 步/秒，保守力的 MACE / MatterSim ≈ 32–34，SevenNet ≈ 24，EquiformerV2 ≈ 9，eSCN ≈ 4.6，CHGNet ≈ 3，M3GNet ≈ 1.6。</li>
+    <li>实现与架构同样重要：MatterSim-v1 本质上是放大的 M3GNet，但借助 GPU 建图与编译比 matgl 版 M3GNet 快约 20 倍。</li>
+  </ul></div>
+  <div class="card"><h3>🧲 弱相互作用 / 长程</h3><ul class="notes">
+    <li>缺口有两层：<b>数据层</b>（PBE 训练集本身就没有色散）和<b>架构层</b>（截断 + 有限感受野丢掉 1/r 静电与 r<sup>−6</sup> 尾巴）。前者往往更致命。</li>
+    <li id="weak-count-li">统计见下文能力矩阵：绝大多数完整势没有任何显式静电；内置“电荷 + 静电 + 色散”的只有 PhysNet、SpookyNet、AIMNet2、SO3LR、BAMBOO、FeNNix 等分子 / 电解质路线。</li>
+    <li>消息传递把名义视野放大到 T·r<sub>c</sub>（十几到上百 Å），但并不是真正的长程：相距超过 r<sub>c</sub> 的两个分子之间没有边，相互作用严格为 0。</li>
+  </ul></div>
+  <div class="card"><h3>🔬 下游性质</h3><ul class="notes">
+    <li>MBD 中 4 个直接力条目的热导率误差 κ<sub>SRME</sub> 全部在 1.67 以上（0 最好、2 最差），最好的保守力模型已低于 0.1：二阶性质要求力是能量的精确梯度。</li>
+    <li>对称性是否“精确”直接写在弛豫结果里：严格容差下，无约束（Orb、PET）与直接力模型只有约 13–14% 的结构保持原有对称性，精确 O(3) 等变的保守力模型约 70%。</li>
+    <li>同一架构从 MPtrj 换到 MPtrj + OMat24 + sAlex，F1 普遍提升 0.07–0.19；只用 MPtrj 时不同架构之间也能差 0.2 以上——数据与架构都关键。</li>
+  </ul></div>
+  <div class="card"><h3>🧭 选型一句话</h3><ul class="notes">
+    <li>超大规模、固定体系的 MD：严格局域 + 可训练的小模型（Allegro、NEP、DeePMD、ACE/MTP），或用基础模型生成数据后蒸馏。</li>
+    <li>通用材料筛选 / 弛豫 / 声子：精确等变 + 保守力 + 大数据（OAM / OMat 系列）。</li>
+    <li>分子、溶液、电解质、界面：选内置电荷与色散的架构，或给基础模型加 D3/D4 与 LES 一类长程模块，并检查训练数据的泛函。</li>
+  </ul></div>
+</div>
+
+<!-- ======================= A. SPEED ======================= -->
+<h2 id="speed">A. 速度：时间花在哪里？</h2>
+<h3 id="speed-cost">A1. 代价从哪里来</h3>
+<div class="card">
+  <p>把一次“能量 + 力”的计算拆开，大致是：</p>
+  <div class="math" data-tex="t_{\text{step}}\ \approx\ \underbrace{N\cdot T\cdot\big(\bar M\,c_{\text{edge}}+c_{\text{node}}\big)}_{\text{前向}}\cdot\underbrace{(1+\gamma_{\text{grad}})}_{\text{反传求力}}\ +\ t_{\text{graph}}\ +\ t_0,\qquad \bar M\approx\frac{4\pi}{3}\,\rho\,r_c^{3}"></div>
+  <p class="small">N：原子数；T：消息传递层数（描述符/线性模型可视为 1）；M̄：平均邻居数，ρ 是原子数密度（固体约 0.05–0.1 Å<sup>−3</sup>）：r<sub>c</sub> = 5 Å 时 M̄ ≈ 26–52，6 Å 时 ≈ 45–90；
+    c<sub>edge</sub>：每条边上的运算量，由“几何编码 + 消息函数”决定，是各家族的根本差别；γ<sub>grad</sub> ≈ 1–2：自动微分求力的额外开销；t<sub>graph</sub>：建邻居表（在 CPU 上用 Python 建图常常比网络本身还慢）；t<sub>0</sub>：固定开销（内核启动、Python 调度）。</p>
+</div>
+<div class="table-wrap free"><table>
+  <thead><tr><th>家族</th><th>每条边上的核心运算</th><th>代价随什么增长</th><th>速度直觉</th></tr></thead>
+  <tbody>
+    <tr><td>线性 / 核方法</td><td>多体基函数求值 + 线性组合（ACE、MTP、SNAP、UF3 样条）</td><td>基函数个数、多体阶；无层数</td><td>最快，CPU 上也能跑百万原子；GAP 的核回归随稀疏点数增长</td></tr>
+    <tr><td>描述符 + NN</td><td>对称函数 / 嵌入矩阵 → 每元素小 MLP</td><td>描述符维度；DeePMD 的嵌入网络作用在每条边上</td><td>很快，严格局域，NEP（GPUMD）是速度标杆之一</td></tr>
+    <tr><td>不变 MPNN</td><td>标量滤波 × 特征（门控 MLP、矩阵乘）</td><td>通道数²；若有三体“线图”，三元组数 ∝ N·M<sub>3b</sub><sup>2</sup></td><td>本身轻量，但三体线图与 CPU 建图会拖慢（M3GNet、CHGNet）</td></tr>
+    <tr><td>笛卡尔等变</td><td>矢量 / 张量的点积、外积、矩阵乘</td><td>张量阶数 L（分量 3<sup>L</sup>），通常 L ≤ 2–3</td><td>中等偏快：避开 CG 系数，GPU 友好</td></tr>
+    <tr><td>球谐等变</td><td>CG 张量积 / SO(2) 卷积 / 注意力</td><td>朴素 CG 张量积 ∝ L<sup>6</sup>；eSCN 的 SO(2) 技巧降到 ∝ L<sup>3</sup>；再乘通道数与层数</td><td>l<sub>max</sub> ≤ 2–3 的 MACE、NequIP、SevenNet 中等；l<sub>max</sub> = 4–6 + 注意力（EquiformerV2、eSCN）明显更慢</td></tr>
+    <tr><td>无约束</td><td>普通边 / 节点 MLP、注意力</td><td>边数 × 宽度²；邻居上限直接截断边数</td><td>最 GPU 友好；Orb 的直接力版本是基准里最快的通用模型</td></tr>
+  </tbody></table></div>
+
+<h3 id="speed-measured">A2. 实测：同一平台、同一体系的 MD 速度</h3>
+<p>MLIP Arena 的氢气燃烧测试让所有模型在同一硬件上跑同一个 H<sub>256</sub>O<sub>128</sub>（384 原子）NVT 轨迹（300 → 3000 → 300 K，目标 200 万步），是少有的“同条件计时”。颜色表示架构家族。</p>
+<div class="card"><div class="chart-box short" id="box-comb"><canvas id="chart-comb"></canvas></div>
+  <p class="small muted">数据：MLIP Arena 燃烧基准（推断为 NERSC Perlmutter A100 节点）。标“直接力”的模型不做反传。未跑完的模型（完成度 &lt; 100%）的速度仍有效，但其产率不可直接比较（见 C 部分）。</p></div>
+<div class="callout"><b>读图</b>
+  ① 前三档都没有高阶球谐：Orb 是纯 MLP + 直接力；MACE 用 l<sub>max</sub> 较低的对称收缩；MatterSim 是不变网络。
+  ② EquiformerV2 / eSCN 即使是直接力（省了反传）也只有 4.6–9 步/秒：OC20 版本用高 l<sub>max</sub>（4–6）、深层堆叠的 SO(2) 卷积（EquiformerV2 还有注意力），每条边的代价太大。
+  ③ CHGNet 和 M3GNet 参数最少（≈0.2–0.4 M），却最慢：三体线图 + CPU / Python 建图 + eager PyTorch。<b>参数量 ≠ 速度</b>。
+  ④ MatterSim-v1 与 M3GNet 架构同源，速度却相差约 20 倍——工程实现（GPU 建图、编译、批处理）可以抵消一个数量级。</div>
+
+<h3 id="speed-scaling">A3. 随体系增大的标度</h3>
+<p>Arena 的升温稳定性测试覆盖了 75–1480 原子的体系。对每个模型拟合 步/秒 ≈ a·N<sup>−n</sup>（与 Arena 自身的拟合方式相同）：n 接近 1 说明计算量已经随原子数线性增长（GPU 已“喂饱”）；n 远小于 1 说明在这个尺寸范围内固定开销占主导，模型还有余量。</p>
+<div class="grid g2">
+  <div class="card"><div class="chart-box"><canvas id="chart-scale"></canvas></div></div>
+  <div class="card"><div class="table-wrap free"><table id="tbl-scale"></table></div>
+    <p class="small muted">“完整跑完”= 轨迹达到目标时长的 98% 以上。双对数坐标；点为单条轨迹，线为幂律拟合。</p></div>
+</div>
+
+<h3 id="speed-pareto">A4. 精度–速度权衡（MBD，NVIDIA H200）</h3>
+<p>MBD 的 MD 任务记录了每个模型跑完 17 个体系的总用时与硬件。下面只取 <b>NVIDIA H200</b> 上的记录以保证可比（不同硬件、不同批大小之间不能直接比较）。</p>
+<div class="grid g2">
+  <div class="card"><div class="chart-box tall" id="box-cost"><canvas id="chart-cost"></canvas></div></div>
+  <div class="card"><div class="chart-box tall"><canvas id="chart-pareto"></canvas></div>
+    <p class="small muted">横轴为 MD 总用时（对数，越左越快），纵轴为 MBD 稳定性发现 F1（越高越好）。左上角是“又快又准”的帕累托前沿。</p></div>
+</div>
+<div class="callout"><b>读图</b> 同一家族里，“变大”几乎线性地换取精度：NequIP-OAM-L → XL 用时约 2.2 倍；eSEN-30M、EquiformerV3、MatRIS-10M、PROPhet 等高精度模型比 Orb、GRACE 慢约 10–55 倍，比 MACE 慢约 5–17 倍。
+  直接力的 orb-v2 最快，但它的 κ<sub>SRME</sub> 与对称性保持都明显变差（见 C 部分）；保守的 orb-v3 用时约为 orb-v2 的 1.8 倍（两者模型规模也不同，仅作参考）。
+  参数量同样不决定速度：0.4 M 参数的 CHGNet 比 9 M 的 MACE-MPA 慢近 3 倍，7.3 亿参数（MBD 记录值）的 PET-OAM-XL 却与 8700 万参数的 eqV2-M 用时相当。
+  严格局域也不等于单卡快：Allegro-L 在这里要 63–80 h，它的优势在于多 GPU 空间分解（A5）。</div>
+
+<h3 id="speed-parallel">A5. 并行扩展与工程优化</h3>
+<div class="grid g2">
+  <div class="card"><h3>局域性决定多 GPU 扩展</h3>
+    <p>空间分解并行时，每块子区域要额外携带一层“幽灵原子”。严格局域模型只需厚度 r<sub>c</sub>；T 层消息传递要么携带厚度 T·r<sub>c</sub> 的幽灵层（大量重复计算），要么每层都通信一次。</p>
+    <div class="math" data-tex="\frac{N_{\text{ghost}}}{N_{\text{own}}}=\frac{(\ell+2Tr_c)^3-\ell^3}{\ell^3}\quad\xrightarrow{\ \ell=30\,\text{Å},\ r_c=6\,\text{Å}\ }\quad T=1:\ 1.7,\qquad T=3:\ 9.6"></div>
+    <p class="small">这正是 Allegro（严格局域的等变模型）、DeePMD、NEP、ACE 在亿级原子 MD 上的结构性优势；消息传递模型（MACE、SevenNet 等）需要专门的逐层通信实现才能高效扩展。</p></div>
+  <div class="card"><h3>同一架构，工程可以差一个数量级</h3><ul class="notes">
+    <li>融合的等变内核：NVIDIA cuEquivariance、OpenEquivariance、FlashTP 等把 CG 张量积 / 对称收缩做成单个 GPU 内核（见 <a href="model.html?id=cuequivariance">cuEquivariance</a>）。</li>
+    <li>编译：torch.compile、AOTInductor、TorchScript / JAX 导出，去掉 Python 调度开销。</li>
+    <li>GPU 上建邻居表（替代 pymatgen / ASE 的 CPU 建图），对小体系 MD 尤其关键。</li>
+    <li>低精度：TF32 / FP32 通常足够跑 MD，但严格的对称性与二阶导数（声子）对数值精度更敏感。</li>
+    <li>LAMMPS ML-IAP / Kokkos、GPUMD、TorchSim 等 MD 引擎的原生接口避免了 ASE 的逐步 Python 往返。</li>
+  </ul></div>
+</div>
+
+<!-- ======================= B. WEAK ======================= -->
+<h2 id="weak">B. 弱相互作用与长程：缺口在哪里？</h2>
+<h3 id="weak-physics">B1. 物理背景：哪些作用是“弱”或“远”的</h3>
+<div class="table-wrap free"><table>
+  <thead><tr><th>相互作用</th><th>距离依赖</th><th>典型场景</th><th>5–6 Å 截断的局域模型能否描述</th><th>前提</th></tr></thead>
+  <tbody>
+    <tr><td><b>色散（London / vdW）</b></td><td>−C<sub>6</sub>/r<sup>6</sup>（多体时更复杂）</td><td>层状材料层间结合、分子晶体、物理吸附、聚合物、生物分子</td><td>平衡距离（3–4 Å）附近的结合<b>可以学</b>，但尾巴被截断</td><td>训练数据必须含色散（D3 / VV10 / MBD），否则外加 D3/D4</td></tr>
+    <tr><td><b>电荷–电荷静电</b></td><td>q<sub>i</sub>q<sub>j</sub>/r</td><td>离子液体、电解质、带电缺陷、电极界面、极性表面</td><td>中性体相靠局部屏蔽可近似；带电 / 界面 / 外场体系会失败</td><td>需要电荷 + 全体系求和（Ewald / PME）</td></tr>
+    <tr><td><b>偶极 / 多极</b></td><td>1/r<sup>3</sup>、1/r<sup>5</sup>…</td><td>水与极性溶剂、介电响应、铁电</td><td>近邻部分可学，长程偶极–偶极缺失</td><td>电荷 / 偶极 + 长程求和</td></tr>
+    <tr><td><b>诱导 / 极化</b></td><td>依赖整个环境产生的电场</td><td>离子溶剂化、界面、外加电场</td><td>多体且非局域，只能近似</td><td>电荷平衡（QEq）、可极化模型、场相关输入</td></tr>
+    <tr><td><b>氢键</b></td><td>主要 1.5–3 Å</td><td>水、生物分子、MOF</td><td>基本在截断内，<b>可以学</b></td><td>数据质量与覆盖</td></tr>
+    <tr><td><b>远程电荷转移</b></td><td>非局域（由全局化学势决定）</td><td>氧化还原、带电缺陷、电化学</td><td>原理上不能</td><td>全局电荷约束（4G-HDNNP、电荷平衡）</td></tr>
+  </tbody></table></div>
+
+<h3 id="weak-two">B2. 两个层面的缺口：数据与架构</h3>
+<div class="grid g2">
+  <div class="card"><h3>① 数据层：PBE 里本来就没有色散</h3>
+    <p>MPtrj、Alexandria、OMat24 这些材料基础模型的主力训练集都是 PBE(+U)。PBE 几乎不描述色散，所以模型学到的是“没有 vdW 的世界”：石墨层间几乎不结合、分子晶体密度偏低、物理吸附能偏弱。这个缺口与架构无关——<b>再强的网络也学不到数据里没有的物理</b>。</p></div>
+  <div class="card"><h3>② 架构层：截断 + 有限感受野</h3>
+    <p>即使数据含色散，截断之外的尾巴也被丢掉。对均匀分布的原子，单原子损失的色散能可估计为：</p>
+    <div class="math" data-tex="\Delta E_{\text{tail}}\approx\frac{\rho}{2}\int_{r_c}^{\infty}4\pi r^{2}\Big(-\frac{C_6}{r^{6}}\Big)\,dr=-\frac{2\pi\rho\,C_6}{3\,r_c^{3}}"></div>
+    <p>它随 r<sub>c</sub><sup>−3</sup> 衰减：小但有系统性。静电更糟：∫4πr²·(1/r) dr 发散，库仑和只能条件收敛，任何有限截断都无法得到正确的长程静电（需要 Ewald / PME）。</p></div>
+</div>
+
+<h3 id="weak-rf">B3. 感受野 ≠ 长程</h3>
+<p>消息传递让原子能依赖 T·r<sub>c</sub> 以内的原子，看起来“视野”很大。下图是各模型代表性配置的名义感受野（严格局域模型 = r<sub>c</sub>）。</p>
+<div class="card"><div class="chart-box tall" id="box-rf"><canvas id="chart-rf"></canvas></div></div>
+<div class="grid g3">
+  <div class="card"><h3>有限</h3><p>无论多少层，T·r<sub>c</sub> 之外仍然是零；而静电 1/r 的尾巴在任何有限距离上都不可忽略。</p></div>
+  <div class="card"><h3>断开的图传不过去</h3><p>两个分子相距超过 r<sub>c</sub>，图中根本没有连接它们的边——消息无法跨越空隙，相互作用能<b>严格为 0</b>。分子二聚体结合曲线、远距离吸附都会因此出错。</p></div>
+  <div class="card"><h3>越远越模糊</h3><p>远处原子的信息要经过多次“传话”并与指数增长的其他邻居一起被压缩进固定宽度的特征（over-squashing），对远程细节的分辨能力很弱；代价是并行时幽灵原子成倍增长（A5）。</p></div>
+</div>
+
+<h3 id="weak-matrix">B4. 能力矩阵：谁内置了什么</h3>
+<p>按源码与官方文档归类（<a href="about.html#curated">归类规则</a>）：<span class="cell-builtin">内置</span>＝默认架构的一部分；<span class="cell-optional">可选扩展</span>＝官方代码提供开关或变体；<span class="cell-addon">外挂 D3/D4</span>＝官方示例 / 计算器支持叠加经验色散；<span class="cell-none">无</span>。</p>
+<div class="grid g4" id="weak-kpis"></div>
+<div class="table-wrap" style="margin-top:12px"><table id="tbl-weak"></table></div>
+
+<h3 id="weak-data">B5. 训练数据里有没有色散？</h3>
+<div class="table-wrap free"><table>
+  <thead><tr><th>数据集</th><th>参考方法</th><th>色散</th><th>常见于</th></tr></thead>
+  <tbody>
+    <tr><td>MPtrj（MP 弛豫轨迹）</td><td>PBE / PBE+U</td><td class="cell-none">无</td><td>CHGNet、MACE-MP-0、SevenNet-0、多数 *-mptrj 模型</td></tr>
+    <tr><td>Alexandria（含 sAlex 子集）</td><td>PBE / PBE+U</td><td class="cell-none">无</td><td>MACE-MPA-0、Orb、各 OAM 模型</td></tr>
+    <tr><td>OMat24</td><td>PBE / PBE+U</td><td class="cell-none">无</td><td>eSEN / EquiformerV2-OMat、UMA 的 omat 任务、各 OAM 模型</td></tr>
+    <tr><td>MatPES</td><td>PBE 与 r²SCAN</td><td class="cell-optional">r²SCAN 只含部分中程 vdW</td><td>MatGL 新权重、MACE / 其他 MatPES 模型</td></tr>
+    <tr><td>OC20</td><td>RPBE</td><td class="cell-none">无</td><td>eSCN、EquiformerV2（OC20）、UMA 的 oc20 任务</td></tr>
+    <tr><td>ODAC23、OMC25</td><td>PBE + D3</td><td class="cell-builtin">含 D3</td><td>UMA 的 odac / omc 任务</td></tr>
+    <tr><td>OMol25</td><td>ωB97M-V / def2-TZVPD</td><td class="cell-builtin">含（VV10 非局域关联）</td><td>UMA 的 omol 任务、OrbMol、eSEN-OMol</td></tr>
+    <tr><td>SPICE</td><td>ωB97M-D3(BJ) / def2-TZVPPD</td><td class="cell-builtin">含 D3(BJ)</td><td>MACE-OFF 等分子势</td></tr>
+    <tr><td>ANI-1x / ANI-2x</td><td>ωB97X / 6-31G(d)</td><td class="cell-none">无</td><td>ANI（常外加 D3）</td></tr>
+  </tbody></table></div>
+<p class="small muted">按各数据集论文与模型文档概括整理，使用前请以原文为准。要点：同一个模型权重的“弱相互作用能力”首先取决于它模仿的是哪一种 DFT。</p>
+
+<h3 id="weak-mech">B6. 补救机制对比</h3>
+<div class="table-wrap free"><table>
+  <thead><tr><th>机制</th><th>做法</th><th>额外代价</th><th>能解决</th><th>局限</th><th>代表</th></tr></thead>
+  <tbody>
+    <tr><td><b>显式电荷 + 库仑 / Ewald</b></td><td>网络预测原子电荷（约束 Σq<sub>i</sub> = Q），再做 1/r 直接求和（分子）或 Ewald / PME（周期）</td><td>Ewald ∝ N<sup>3/2</sup>，PME ∝ N log N</td><td>离子、带电体系、偶极、介电</td><td>电荷是辅助量、不唯一；没有电荷平衡时无法描述远程电荷转移</td><td><a href="model.html?id=physnet">PhysNet</a>、<a href="model.html?id=spookynet">SpookyNet</a>、<a href="model.html?id=aimnet2">AIMNet2</a>、<a href="model.html?id=so3lr">SO3LR</a>、<a href="model.html?id=bamboo">BAMBOO</a>、<a href="model.html?id=fennix">FeNNix</a></td></tr>
+    <tr><td><b>隐变量电荷 + Ewald</b></td><td>从局域特征预测“隐电荷”，只用能量 / 力训练，无需电荷标签；可挂在任意局域模型上</td><td>倒空间求和 ∝ N·K</td><td>长程静电；可由隐电荷求 Born 有效电荷</td><td>隐电荷物理含义有限；仍不含全局电荷平衡</td><td><a href="model.html?id=les">LES</a>（MACE-LES、CACE-LES 等）</td></tr>
+    <tr><td><b>倒空间消息传递</b></td><td>在 k 空间做一层“全局”消息传递，与实空间短程网络并联</td><td>每块 ∝ N·N<sub>k</sub>·C</td><td>长程有效相互作用（不限于静电）</td><td>非周期体系需特殊处理；解释性弱</td><td><a href="model.html?id=ewaldmp">Ewald MP</a></td></tr>
+    <tr><td><b>经验色散 D3 / D4</b></td><td>按配位数插值的 C<sub>6</sub>/C<sub>8</sub> + 阻尼函数，独立于网络叠加</td><td>很低（成对截断默认 ≈ 50 Å）</td><td>色散（含长程尾巴）</td><td>经验参数；参数须与训练泛函一致；D3 不随电荷变化（D4 会）</td><td><a href="model.html?id=dftd3">DFT-D3</a>；MACE、SevenNet、Orb、CHGNet、UMA 等外挂</td></tr>
+    <tr><td><b>全局电荷 / 自旋嵌入</b></td><td>把总电荷 Q、自旋多重度 S（和任务标签）作为输入嵌入</td><td>几乎为 0</td><td>区分电荷态、自旋态</td><td><b>不是长程</b>：不改变空间作用范围，也不给出电荷分布</td><td><a href="model.html?id=uma">UMA</a>、<a href="model.html?id=esen">eSEN</a>（OMol）</td></tr>
+  </tbody></table></div>
+
+<h3 id="weak-practice">B7. 实践建议</h3>
+<div class="grid g2">
+  <div class="card"><h3>避免重复计算色散</h3><ul class="notes">
+    <li>训练数据是 PBE(+U)（MPtrj / Alex / OMat）→ 叠加 PBE 参数的 D3(BJ)。</li>
+    <li>训练数据已含色散（UMA 的 omc / odac / omol 任务、orb-d3 系列、SPICE 训练的 MACE-OFF）→ <b>不要</b>再加 D3。</li>
+    <li>r²SCAN 训练的模型 → 用 r²SCAN 对应的 D3/D4 参数，而不是 PBE 参数。</li>
+  </ul></div>
+  <div class="card"><h3>公开基准几乎不测弱相互作用</h3>
+    <p>MBD 的任务（稳定性、弛豫、声子、双原子、MD）都在 PBE 无色散的框架内；双原子曲线也只有同核体系。若你的问题依赖弱相互作用，请自行测试，例如：分子晶体晶格能（X23）、非共价二聚体结合曲线（S66×8）、层状材料层间结合与层间距、水团簇与液态水密度、离子液体 / 电解质的密度与电导、带电表面的功函数或界面电势降。</p></div>
+</div>
+
+<!-- ======================= C. DOWNSTREAM ======================= -->
+<h2 id="downstream">C. 下游性质：架构细节如何显形</h2>
+<h3 id="ds-kappa">C1. 保守力 vs 直接力：声子与热导</h3>
+<p>热导率 κ 需要准确的二阶（甚至三阶）力常数，也就是力对坐标的导数。只有当力是能量的精确梯度时，这些导数才自洽。MBD 的 <code>targets</code> 字段标明了模型如何得到力：EFS_G = 能量求导（保守），EFS_D = 直接预测。</p>
+<div class="card"><div class="chart-box tall"><canvas id="chart-fk"></canvas></div>
+  <p class="small muted">κ<sub>SRME</sub>：103 个晶体的晶格热导率对称相对平均误差（0 最好，2 最差）。F1：稳定性发现分类分数。EFSH_G 表示训练中还加入了 Hessian / 声子信息。</p></div>
+<div class="callout warn" id="kappa-callout"></div>
+
+<h3 id="ds-data">C2. 数据 vs 架构：同一架构换数据</h3>
+<div class="grid g2">
+  <div class="card"><div class="chart-box"><canvas id="chart-data"></canvas></div></div>
+  <div class="card"><p>把同一架构在“只用 MPtrj”和“MPtrj + OMat24 + sAlex（OAM）”上训练的成对条目放在一起：</p>
+    <div class="table-wrap free"><table id="tbl-data"></table></div>
+    <p class="small muted">注意：成对条目的参数量与训练细节不一定相同（如 AlphaNet、GRACE-2L）。</p></div>
+</div>
+
+<h3 id="ds-sym">C3. 对称性保持：等变是否“精确”决定弛豫结果</h3>
+<p>MBD 的结构弛豫任务统计弛豫后空间群是否与 DFT 一致（这里取最严格的 symprec = 10<sup>−5</sup>）。如果模型的力在对称位置上不严格为零（等变性不精确），弛豫就会把晶体“推歪”，对称性下降。结果几乎按架构类别整齐分层：</p>
+<div class="card"><div class="chart-box tall" id="box-sym"><canvas id="chart-sym"></canvas></div><div class="legend" id="legend-sym" style="margin-top:8px"></div></div>
+<div class="callout"><b>解读</b>
+  <b>无结构等变</b>（Orb、PET：靠数据增强“学”对称性）与<b>直接预测力</b>的条目全部落在 13–14%；
+  <b>非严格旋转不变</b>的 AlphaNet（标架中向量长度用 L1 范数）同样如此；
+  <b>S² 网格非线性</b>（eSEN、EquiformerV3、DPA-4 等：SO(2) 卷积精确，但网格上的逐点非线性只在网格分辨率内近似等变）大多在 25–43%（DPA-4.1c 例外，约 71%）；
+  <b>只保证 SO(3)、不含宇称</b>的 SevenNet-0 / l3i5 与 HIENet 约 44–45%，而加入宇称的 SevenNet-MF-ompa / Omni 升到约 71%；
+  <b>精确 O(3) 等变或不变 + 保守力</b>的 MACE、NequIP、Allegro、GRACE、DPA-3、MatterSim 等多在 68–74%。
+  容差放宽时差距会缩小，数值精度（FP32 / FP64）也有影响；但这清楚说明：<b>“近似等变”在需要严格对称性的任务里会显形</b>。</div>
+
+<h3 id="ds-diatomic">C4. 短程与曲线光滑性：双原子势能曲线</h3>
+<p>MBD 扫描同核双原子从极近到解离的能量曲线。理想曲线只有一个极小值：力的符号翻转次数（force flips）≈ 1，曲折度（tortuosity）= 1；“能量跳变”（energy jump，单位 eV）衡量曲线上非物理的振荡和跳变。训练数据几乎不含 &lt; 1 Å 的构型，所以这里主要考验架构的<b>短程先验</b>（如 ZBL 排斥）与<b>光滑性</b>（包络函数、保守力）。</p>
+<div class="table-wrap"><table id="tbl-diat"></table></div>
+<p class="small muted">点击表头排序。黄色高亮：能量跳变 &gt; 10 eV，说明在极短距离处曲线出现严重的非物理行为（高温高压 MD、辐照碰撞中会有风险）。</p>
+
+<h3 id="ds-md">C5. MD 质量与稳定性</h3>
+<div class="grid g2">
+  <div class="card"><h3>MBD：MD 轨迹与 DFT 的一致性</h3><div class="table-wrap free" style="max-height:420px"><table id="tbl-md"></table></div>
+    <p class="small muted" id="md-corr"></p></div>
+  <div class="card"><h3>MLIP Arena：极端条件下能否跑完</h3><div class="chart-box"><canvas id="chart-stab"></canvas></div>
+    <p class="small muted">升温：NVT，10 ps 内 300 → 3000 K；加压：NPT，10 ps 内 300 → 3000 K 且 0 → 500 GPa。“平均完成度”是轨迹在崩溃前跑完的比例的平均值。</p></div>
+</div>
+<div class="callout"><b>读图</b> RDF / ADF 误差与 F1 高度相关（见左表下方的相关系数），数据规模与架构精度的提升会直接传导到 MD 结构性质。直接力条目表现分化：eqv2-m 的 RDF 误差与同等 F1 的保守模型相当，orb-v2 则明显偏大（约 5.1，而 F1 相近的保守模型约 3.6）。
+  Arena 加压测试极为苛刻（500 GPa），多数模型没能完整跑完：高压把原子间距压进训练数据很少覆盖的短程区域，这与 C4 的短程行为是同一类问题。</div>
+
+<h3 id="ds-react">C6. 反应性：氢气燃烧</h3>
+<div class="grid g2">
+  <div class="card"><div class="table-wrap free"><table id="tbl-comb"></table></div></div>
+  <div class="card"><p>H<sub>2</sub> + O<sub>2</sub> 在 3000 K 下应该反应生成水；“水产率”= 轨迹最后一帧中识别出的水分子数 / 128（用 ASE 的自然共价半径判断成键）。</p><ul class="notes">
+    <li>MACE（两个版本）、MatterSim、SevenNet 都完整跑完且产率 0.71–0.89。</li>
+    <li>Orb / Orb v2 速度最快、也完整跑完，但最后一帧没有识别出任何水分子——数据就是这样，原因需看轨迹（可能与远离平衡的反应构型在训练数据中稀少、直接力等有关），这里不过度解读。</li>
+    <li>CHGNet、EquiformerV2、eSCN、M3GNet 没有跑完，它们的“产率”是中途某一帧的值，不能与其他模型直接比较。</li>
+  </ul></div>
+</div>
+
+<h3 id="ds-props">C7. 性质覆盖：除了能量、力、应力还能给什么</h3>
+<p>Hessian 对所有可微的保守模型原则上都可得（再求一次导），这里只标出官方提供接口或专门优化的模型。</p>
+<div class="table-wrap"><table id="tbl-props"></table></div>
+
+<!-- ======================= D. GUIDE ======================= -->
+<h2 id="guide">D. 选型指南</h2>
+<div class="table-wrap free"><table>
+  <thead><tr><th>场景</th><th>架构上最关键的需求</th><th>可优先考虑</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>通用材料筛选、结构弛豫</td><td>精度、对称性保持、广覆盖数据</td><td>OAM / OMat 训练的保守等变模型：<a href="model.html?id=esen">eSEN</a>、<a href="model.html?id=equiformer-v3">EquiformerV3</a>、<a href="model.html?id=grace">GRACE</a>、<a href="model.html?id=nequip">NequIP</a>、<a href="model.html?id=mace">MACE</a>、<a href="model.html?id=sevennet">SevenNet</a>、<a href="model.html?id=dpa4">DPA-4</a>、<a href="model.html?id=uma">UMA</a></td><td>高通量时看速度–精度前沿（A4）；需要严格空间群时优先精确等变</td></tr>
+    <tr><td>声子、热导、弹性常数</td><td>保守力、光滑、二阶导数自洽</td><td>κ<sub>SRME</sub> 低的保守模型（见 C1），如 <a href="model.html?id=prophet">PROPhet</a>、<a href="model.html?id=dpa4">DPA-4</a>、<a href="model.html?id=equflash">EquFlash</a>、<a href="model.html?id=equiformer-v3">EquiformerV3</a>、<a href="model.html?id=nequip">NequIP</a></td><td>避免直接力模型；Hessian 训练（EFSH）进一步改善</td></tr>
+    <tr><td>大规模长时间 MD（固定化学体系）</td><td>速度、线性标度、多 GPU</td><td>严格局域：<a href="model.html?id=allegro">Allegro</a>、<a href="model.html?id=nep">NEP</a>、<a href="model.html?id=deepmd-se">DeePMD</a>、<a href="model.html?id=pace">ACE</a>、<a href="model.html?id=mtp">MTP</a>；或微调基础模型后蒸馏</td><td>主动学习覆盖目标相空间；高温高压加 ZBL</td></tr>
+    <tr><td>分子、溶液、生物体系</td><td>色散、静电、总电荷 / 自旋</td><td><a href="model.html?id=so3lr">SO3LR</a>、<a href="model.html?id=aimnet2">AIMNet2</a>、<a href="model.html?id=spookynet">SpookyNet</a>、<a href="model.html?id=fennix">FeNNix</a>、<a href="model.html?id=uma">UMA</a>（omol 任务）、<a href="model.html?id=mace">MACE-OFF</a></td><td>确认训练泛函是否已含色散；周期体系外推要谨慎</td></tr>
+    <tr><td>电解质、离子液体、带电界面</td><td>长程静电、电荷守恒</td><td><a href="model.html?id=bamboo">BAMBOO</a>、<a href="model.html?id=les">LES</a> 增强的 MACE / CACE、<a href="model.html?id=ewaldmp">Ewald MP</a>、带 4G 电荷平衡的 <a href="model.html?id=bpnn">HDNNP</a></td><td>纯局域基础模型在这里最不可靠</td></tr>
+    <tr><td>多相催化、吸附</td><td>表面 + 分子、物理吸附</td><td><a href="model.html?id=uma">UMA</a>（oc20 / odac 任务）、<a href="model.html?id=equiformer-v2">EquiformerV2</a>、<a href="model.html?id=escn">eSCN</a>（OC20）</td><td>OC20 为 RPBE 无色散，物理吸附需外加 D3</td></tr>
+    <tr><td>磁性材料</td><td>磁矩 / 自旋自由度</td><td><a href="model.html?id=chgnet">CHGNet</a>、<a href="model.html?id=matris">MatRIS</a>（磁矩监督）、<a href="model.html?id=spookynet">SpookyNet</a>（自旋）</td><td>多数通用模型不显式处理磁构型</td></tr>
+    <tr><td>反应、燃烧、远离平衡</td><td>短程排斥、平滑性、反应构型覆盖</td><td>Arena 中完整跑完且产率高的 MACE、MatterSim、SevenNet；或针对体系训练的专用势</td><td>检查双原子曲线（C4）与加压稳定性（C5）</td></tr>
+  </tbody></table></div>
+
+<h2 id="limits">E. 局限说明</h2>
+<div class="callout warn"><ul class="notes">
+  <li>速度数字来自不同基准的原始记录：Arena 在同一平台（推断为 Perlmutter A100）上；MBD 的用时只在相同硬件（这里用 H200）内比较，且受批大小、精度、实现版本影响。</li>
+  <li>MBD 的 F1、κ、RMSD、MD 指标都是对 PBE 参考的复现能力，不代表对实验或更高精度方法的精度，也不覆盖弱相互作用。</li>
+  <li>能力归类与 1–5 评分是编辑判断，依据写在各模型页面；“名义感受野”= 层数 × 截断，取代表性发布配置。</li>
+  <li>部分基准条目与源码默认配置不一致（例如 CHGNet 截断、Orb 半径、AlphaNet 配置），已在相应模型页面标注。</li>
+</ul></div>
+</div></div>
+</main>
+<script src="assets/analysis.js"></script>
+</body>
+</html>

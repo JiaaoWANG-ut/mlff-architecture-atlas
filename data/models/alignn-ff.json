@@ -1,0 +1,188 @@
+{
+  "id": "alignn-ff",
+  "name": "ALIGNN-FF",
+  "fullName": "ALIGNN-FF: Atomistic Line Graph Neural Network Force Field（原子线图神经网络力场）",
+  "year": 2023,
+  "authors": "K. Choudhary, B. DeCost, L. Major, K. Butler, J. Thiyagalingam, F. Tavazza",
+  "paper": {"title": "Unified graph neural network force-field for the periodic table", "venue": "Digital Discovery (2023)；ALIGNN 架构见 npj Computational Materials (2021)", "url": "https://doi.org/10.1039/D2DD00096B"},
+  "repos": ["alignn"],
+  "family": "invariant-mpnn",
+  "tags": ["不变 MPNN", "原子图 + 线图（键角）", "边门控图卷积", "JARVIS-DFT / OptB88vdW", "保守力（对键向量求导）", "DGL"],
+  "framework": "PyTorch + DGL（建图依赖 jarvis-tools）；Matbench Discovery 中的 ALIGNN 2.0 MPtrj 版为纯 PyTorch 重写，不在本克隆中",
+  "license": "NIST 软件使用条款（LICENSE.rst：美国境内不受版权保护，可免费使用/修改/分发）；ALIGNN 2.0 MPtrj 权重为 CC-BY-4.0",
+  "oneLiner": "在“原子–键”晶体图之外再建一张“线图”：每条键变成一个节点，共享原子的两条键之间连边并记下键角余弦；每个 ALIGNN 层先在原子图、再在线图上做边门控图卷积，把三体（键角）信息不断写回键和原子。ALIGNN-FF 用平均池化给出每原子能 × N 作为总能，再对键向量自动求导得到力与维里应力。",
+  "analogy": "像分析一张社交网络：普通 GNN 只看“谁和谁是朋友、关系多亲近”（键长）；ALIGNN 再画一张“友谊关系图”——把每段友谊当成一个点，两段友谊共享同一个人时连线，并记下它们之间的“夹角”。在两张图上轮流传话，就能同时理解“谁离谁多远”和“三个人围成什么形状”。",
+  "arch": {
+    "geometry": "键向量 r_ij → 键长（80 个高斯 RBF，0–8 Å）；线图边 → 键角余弦 cosθ（40 个高斯 RBF，−1…1）；无二面角、无球谐",
+    "equivariance": "E(3) 不变（只用键长与键角余弦；力、应力由对键向量求导得到）",
+    "lmax": "无球谐；角度只以 cosθ 的高斯展开进入（相当于平滑的键角直方图）",
+    "bodyOrder": "每个 ALIGNN 层显式 3 体（键角）；层层堆叠后隐式更高体序（无显式二面角）",
+    "layers": "alignn_layers + gcn_layers：ALIGNNAtomWise 默认 2+2；原 ALIGNN 默认 4+4；MPtrj 版（Matbench Discovery）4+4、hidden 256",
+    "cutoff": "默认 k-nearest：保留第 12 近邻所在壳层（8 Å 内搜索，不足则扩大）；可选 radius_graph（示例 4 Å）；MPtrj 版 5 Å 图截断 + 3.5 Å 三体截断",
+    "receptiveField": "≥ (alignn_layers+gcn_layers) 跳 × 近邻壳层半径；线图更新让信息每层多传一跳；k-NN 下随局部密度变化",
+    "message": "边门控卷积：σ_ji = sigmoid(W_s h_j + W_d h_i + W_e e_ji)，h_i ← h_i + SiLU(LN(W_1 h_i + Σσ⊙W_2 h_j / Σσ))；同一公式先用于原子图（原子/键），再用于线图（键/键角）",
+    "readout": "原子特征平均池化 → Linear → 每原子能；× 原子数得总能（等价于线性原子能求和）",
+    "forces": "conservative",
+    "forcesDetail": "对键向量 r_e 求导得键力 f_e = −∂E/∂r_e，按“入边 − 出边”汇总成原子力；键角在前向中由同一 r_e 现场重算（lg_on_fly），三体梯度完整",
+    "stress": "键维里：σ = −(1/V) Σ_e r_e ⊗ f_e（×160.2 换算 GPa）；ASE 计算器再乘 stress_wt（默认 0.05）并换回 eV/Å³",
+    "longRange": "无静电/长程项；只有多层消息传递带来的半局域感受野",
+    "dispersion": "无 D3 外挂；默认 JARVIS 模型拟合 OptB88vdW（非局域 vdW 泛函），色散在感受野内被隐式学到；MPtrj 版为 PBE、无色散",
+    "chargeSpin": "无总电荷/自旋输入；可选 extra_features（如晶格参数）作为全局特征",
+    "otherOutputs": "iAlignnAtomwiseCalculator 叠加独立的多性质 ALIGNN：原子电荷、磁矩 + 带隙、模量、介电、Tc 等 22 种图级性质",
+    "strictlyLocal": false,
+    "complexity": "原子图 O(N·M·C²) + 线图 O(N·M²·C²)（线图边数 ≈ N·M²），C = hidden_features；另有 CPU 上的 Python 建图",
+    "accel": "DGL GPU 推理（默认 float32）；ASE 计算器与 ForceField 封装（优化、NVE/NVT/NPT MD、phonopy 声子）；训练可 torchrun DDP；无 LAMMPS、无专用内核"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "不变特征、无张量积；但线图边数 ∝ N·M²，每层要在两张图上各卷积一次，且每次调用都在 CPU 上用 Python 重建 k-NN 图与线图。"},
+    "expressiveness": {"v": 3, "why": "线图显式引入键角，强于纯距离模型；但只有不变量、无二面角与高阶角动量，弱于高体序等变模型。"},
+    "longRange": {"v": 2, "why": "没有静电或 D3 外挂，只靠多层消息传递的半局域感受野（默认模型借 OptB88vdW 数据隐式含截断内 vdW）。"},
+    "scalability": {"v": 1, "why": "只有 ASE 整图推理，无 LAMMPS / 空间分解接口；线图内存随近邻数平方增长。"},
+    "physics": {"v": 2, "why": "力由能量求导（保守）、应力为精确键维里、能量广延；但默认 k-NN 建图且不加包络，势能面在近邻壳层/截断处不连续，短键惩罚只进力不进返回能量。"},
+    "coverage": {"v": 3, "why": "能量/力/应力之外，官方 iAlignn 计算器还输出原子电荷、磁矩与 22 种图级性质（来自独立的多性质模型）；无解析 Hessian、偶极。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：ASE 结构 → JARVIS Atoms → 按配置重建图",
+      "plain": "ASE 计算器每次被调用都把 ASE Atoms 转成 jarvis Atoms，并按 checkpoint 自带的 config.json（neighbor_strategy、cutoff、max_neighbors、atom_features）重新建原子图和线图，再连同晶胞送进模型。原子的初始特征是 CGCNN 的 92 维元素特征向量（atom_features=\"cgcnn\"）。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf L\\in\\mathbb R^{3\\times3}\\qquad Z_i\\mapsto\\mathbf c_{Z_i}\\in\\mathbb R^{92}\\ (\\text{CGCNN})",
+      "code": [{"file": "alignn/ff/calculators.py", "start": 280, "end": 302, "must": "Graph.atom_dgl_multigraph(", "caption": "AlignnAtomwiseCalculator.calculate：建图并调用 ALIGNNAtomWise"}]
+    },
+    {
+      "stage": "graph",
+      "title": "原子图：第 k 近邻壳层（默认 k=12）",
+      "plain": "默认 k-nearest 策略：先在 8 Å 内找出所有邻居并按距离排序，保留到第 12 近邻所在距离为止的全部原子（不足 12 个就扩大搜索半径），再补上反向边成为无向图。这种“按名次选邻居”的方式在原子移动时邻居集合会突变，是势能面不平滑的来源之一；另一选项 radius_graph 则取固定半径内的全部原子对。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert\\le d_i^{(k)}\\,\\},\\quad d_i^{(k)}=\\text{distance to the }k\\text{-th neighbour},\\ k=12",
+      "code": [
+        {"file": "alignn/graphs.py", "start": 490, "end": 505, "must": "build_undirected_edgedata(atoms, edges)", "caption": "atom_dgl_multigraph：按 neighbor_strategy 选择 k-NN 或半径图"},
+        {"file": "alignn/graphs.py", "start": 200, "end": 214, "must": "max_dist = distances[max_neighbors - 1]", "caption": "nearest_neighbor_edges：保留到第 k 近邻壳层"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "线图：键变成节点，键角变成边",
+      "plain": "DGL 的 line_graph 把原子图中每条有向键 a→b 变成线图的一个节点；两条首尾相接的键 a→b、b→c 在线图中连一条边，对应以 b 为顶点的键角，边特征是夹在 [−1, 1] 的键角余弦。线图边数约为 原子数 × 近邻数²：这既是 ALIGNN 显式三体信息的来源，也是它主要的内存与计算开销。",
+      "math": "L(g):\\ \\mathcal V_L=\\mathcal E_g,\\ \\ (a\\!\\to\\! b,\\ b\\!\\to\\! c)\\in\\mathcal E_L,\\qquad \\cos\\theta_{abc}=\\frac{(-\\mathbf r_{ab})\\cdot\\mathbf r_{bc}}{\\lVert\\mathbf r_{ab}\\rVert\\,\\lVert\\mathbf r_{bc}\\rVert}",
+      "code": [
+        {"file": "alignn/graphs.py", "start": 584, "end": 592, "must": "lg = g.line_graph(shared=True)", "caption": "构建原子线图（节点=键，边=键对）"},
+        {"file": "alignn/graphs.py", "start": 847, "end": 864, "must": "torch.clamp(bond_cosine, -1, 1)", "caption": "compute_bond_cosines：由两条键向量算键角余弦"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：键长与键角余弦的高斯 RBF 展开",
+      "plain": "键长用 80 个中心均匀分布在 0–8 Å 的高斯基展开，键角余弦用 40 个中心在 −1…1 的高斯基展开（宽度 γ = 1/中心间距，SchNet 风格）。前向中会用当前键向量现场重算键角（lg_on_fly=True），保证三体项进入自动微分图。可选的多项式包络（use_cutoff_function，默认关闭；inner_cutoff=3 Å、p=5）可乘到键嵌入上，使其在截断处平滑归零。",
+      "math": "\\mathrm{RBF}_k(d)=\\exp\\!\\big(-\\gamma\\,(d-\\mu_k)^2\\big),\\ \\gamma=1/\\Delta\\mu\\qquad f_c(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=r/r_{\\text{in}}\\ (\\text{optional})",
+      "code": [
+        {"file": "alignn/models/utils.py", "start": 26, "end": 44, "must": "np.diff(self.centers).mean()", "caption": "RBFExpansion：高斯径向基"},
+        {"file": "alignn/models/alignn_atomwise.py", "start": 416, "end": 432, "must": "overwrites precomputed h", "caption": "键向量设为可求导，并现场重算键角余弦"},
+        {"file": "alignn/models/alignn_atomwise.py", "start": 435, "end": 453, "must": "y = self.edge_embedding(bondlength) * c_off", "caption": "可选多项式截断包络（默认不启用）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：元素、键、键角各自映射到隐藏维",
+      "plain": "原子的 CGCNN 元素特征经一个 Linear+LayerNorm+SiLU 映射到 hidden_features 维；键长 RBF 与键角 RBF 各经两层同样结构的 MLP 得到键特征 e 和键角特征 t。模型里没有每元素参考能 E0，元素相关的能量偏置完全由网络学习。",
+      "math": "h_i^{(0)}=\\mathrm{SiLU}\\big(\\mathrm{LN}(W\\mathbf c_{Z_i})\\big),\\quad e_{ij}^{(0)}=\\mathrm{MLP}_2\\big(\\mathrm{RBF}(r_{ij})\\big),\\quad t_{abc}^{(0)}=\\mathrm{MLP}_2\\big(\\mathrm{RBF}(\\cos\\theta_{abc})\\big)",
+      "code": [{"file": "alignn/models/alignn_atomwise.py", "start": 271, "end": 292, "must": "vmax=8.0", "caption": "atom/edge/angle embedding"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "ALIGNN 层 ①：原子图上的边门控图卷积",
+      "plain": "对每条键 j→i，先由两端原子与键特征算一个逐通道的“门” σ（0–1 之间）；原子 i 的新特征 = 自身线性项 + 邻居特征按门加权的归一化平均，再经 LayerNorm、SiLU 和残差。门的预激活值 m 同时成为键的新特征。键长信息因此不是直接相加，而是决定“听哪个邻居、听多少”（类似 CGCNN 的门控）。",
+      "math": "m_{ji}=W_s h_j+W_d h_i+W_e e_{ji},\\ \\sigma_{ji}=\\mathrm{sigmoid}(m_{ji})\\qquad h_i\\leftarrow h_i+\\mathrm{SiLU}\\Big(\\mathrm{LN}\\Big(W_1h_i+\\frac{\\sum_j\\sigma_{ji}\\odot W_2h_j}{\\sum_j\\sigma_{ji}+\\epsilon}\\Big)\\Big),\\ \\ e_{ji}\\leftarrow e_{ji}+\\mathrm{SiLU}(\\mathrm{LN}(m_{ji}))",
+      "code": [{"file": "alignn/models/alignn_atomwise.py", "start": 177, "end": 208, "must": "torch.sigmoid(m)", "caption": "EdgeGatedGraphConv.forward"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "ALIGNN 层 ②：在线图上做同样的卷积，把键角写回键",
+      "plain": "ALIGNNConv 把上一步输出的键特征 m 当作线图的“节点特征”、键角特征 t 当作线图的“边特征”，再做一次完全相同的边门控卷积：每条键根据共享原子的相邻键及其夹角更新自己，键角特征也随之更新。先堆 alignn_layers 个这样的“原子图 + 线图”双卷积层，再堆 gcn_layers 个只在原子图上的门控卷积层，三体信息由此逐层传回原子。",
+      "math": "(h,e)\\xrightarrow{\\ \\mathrm{EGGC}_{g}\\ }(h',m)\\qquad (m,t)\\xrightarrow{\\ \\mathrm{EGGC}_{L(g)}\\ }(e',t')\\qquad \\times N_{\\text{alignn}},\\ \\text{then }\\mathrm{EGGC}_g\\times N_{\\text{gcn}}",
+      "code": [
+        {"file": "alignn/models/alignn_atomwise.py", "start": 238, "end": 246, "must": "y, z = self.edge_update(lg, m, z)", "caption": "ALIGNNConv.forward：先原子图、后线图"},
+        {"file": "alignn/models/alignn_atomwise.py", "start": 294, "end": 310, "must": "for idx in range(config.alignn_layers)", "caption": "alignn_layers 与 gcn_layers 两段堆叠"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：平均池化 → 线性层 → 每原子能",
+      "plain": "所有层之后，对图中原子特征取平均（AvgPooling），再经一个线性层得到“每原子能量”——ALIGNN-FF 的训练目标就是每原子能（README 要求 energy per atom）。因为读出是线性的，“平均再乘 N”等价于把每个原子的线性能量相加，总能仍然是广延量。",
+      "math": "\\varepsilon=\\mathbf w^{\\top}\\Big(\\frac{1}{N}\\sum_{i=1}^{N}h_i\\Big)+b",
+      "code": [{"file": "alignn/models/alignn_atomwise.py", "start": 456, "end": 467, "must": "out = self.fc(h)", "caption": "层循环 + AvgPooling + fc"}]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：每原子能 × N（+ 短键惩罚）",
+      "plain": "energy_mult_natoms=True 时用 ε×N 作为求导用的总能；use_penalty=True 时再对每条短于 1 Å 的有向键加线性惩罚 0.1×(1−r)，防止优化或 MD 中原子塌缩。惩罚只加在用于求导的 en_out 上，返回的能量不含它，所以极短键处力与能量并不严格一致。ASE 计算器最后把每原子能乘以原子数作为 energy。",
+      "math": "E=N\\,\\varepsilon=\\sum_{i}\\big(\\mathbf w^{\\top}h_i+b\\big),\\qquad E_{\\text{grad}}=E+\\sum_{e}0.1\\,\\max(0,\\,1-r_e)",
+      "code": [
+        {"file": "alignn/models/alignn_atomwise.py", "start": 492, "end": 510, "must": "en_out = out * natoms", "caption": "每原子能 × 原子数 + 短键线性惩罚"},
+        {"file": "alignn/ff/calculators.py", "start": 356, "end": 372, "must": "energy *= num_atoms", "caption": "计算器：返回总能、力、应力"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对键向量求导，再汇总到原子",
+      "plain": "键向量 r_e（目标原子 − 源原子 + 周期平移）在前向前就打开了梯度；一次 autograd 得到每条键上的“键力” f_e = −∂E/∂r_e。由于 r_e 对目标原子坐标的导数为 +1、对源原子为 −1，原子力 = 入边键力之和 − 出边键力之和（add_reverse_forces=True）。键角由同一批 r_e 现场计算，三体贡献完整进入力，整体是保守力。",
+      "math": "\\mathbf f_e=-\\frac{\\partial E_{\\text{grad}}}{\\partial\\mathbf r_e},\\qquad \\mathbf F_i=\\sum_{e:\\,j\\to i}\\mathbf f_e-\\sum_{e:\\,i\\to j}\\mathbf f_e",
+      "code": [{"file": "alignn/models/alignn_atomwise.py", "start": 526, "end": 563, "must": "dgl.reverse(g, copy_edata=True)", "caption": "pair_forces → 入边/出边聚合为原子力"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：键维里公式",
+      "plain": "能量只通过键向量依赖几何，均匀应变下 r_e → (1+ε)r_e，所以对应变的导数可写成 Σ r_e ⊗ ∂E/∂r_e——这就是代码里的键维里，不需要额外的应变变量，和力共用同一次反传。模型输出单位为 GPa（乘 160.2）；ASE 计算器换回 eV/Å³ 时还乘了 stress_wt（AlignnAtomwiseCalculator 默认 0.05，ForceField 默认 1.0），做晶胞优化或弹性计算前要留意这一经验缩放。",
+      "math": "\\boldsymbol\\sigma=-\\frac{160.2}{V}\\sum_{e}\\mathbf r_e\\otimes\\mathbf f_e\\ [\\text{GPa}],\\qquad \\boldsymbol\\sigma_{\\text{ASE}}=w_{\\text{stress}}\\,\\boldsymbol\\sigma/160.2\\ [\\text{eV}/\\mathring{\\mathrm A}^3]",
+      "code": [
+        {"file": "alignn/models/alignn_atomwise.py", "start": 614, "end": 638, "must": "stresses.append(st)", "caption": "逐结构键维里应力（batch_stress）"},
+        {"file": "alignn/ff/calculators.py", "start": 333, "end": 343, "must": "* self.stress_wt", "caption": "计算器：Voigt 化并乘 stress_wt"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：电荷、磁矩、22 种性质；有限位移声子",
+      "plain": "iAlignnAtomwiseCalculator 同时加载力场模型和一个多性质 ALIGNN（v2024.12.12_dft_3d_multi_prop）：后者的原子级读出给出电荷与磁矩，图级读出给出带隙、费米能、体/剪切模量、介电常数、超导 Tc 等 22 种性质。ff.py 还封装了结构优化、EV 曲线、空位/表面/界面能、NVE/NVT/NPT 分子动力学，以及基于 phonopy 有限位移的声子计算（没有解析 Hessian）。",
+      "math": "(q_i,\\ \\mu_i)=W_{\\text{atom}}h_i,\\qquad \\Phi_{ij}^{\\alpha\\beta}\\approx-\\frac{\\Delta F_j^{\\beta}}{\\Delta u_i^{\\alpha}}\\ (\\text{phonopy})",
+      "code": [
+        {"file": "alignn/ff/calculators.py", "start": 513, "end": 535, "must": "magmoms = [i[1] for i in atomwise]", "caption": "iAlignnAtomwiseCalculator：电荷、磁矩与图级性质"},
+        {"file": "alignn/ff/ff.py", "start": 1154, "end": 1179, "must": "phonon.produce_force_constants(forces=set_of_forces)", "caption": "phonons：phonopy 有限位移求力常数"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "neighbor_strategy", "value": "k-nearest（TrainingConfig 默认）", "note": "按第 k 近邻壳层建图；可选 radius_graph / radius_graph_jarvis", "code": {"file": "alignn/config.py", "start": 156, "end": 159, "must": "] = \"k-nearest\""}},
+    {"name": "cutoff / max_neighbors", "value": "8.0 Å / 12", "note": "k-NN 搜索半径与近邻数；Matbench Discovery 对 2023 版 ALIGNN-FF 同样记为 8 Å / 12", "code": {"file": "alignn/config.py", "start": 194, "end": 196, "must": "max_neighbors: int = 12"}},
+    {"name": "edge RBF", "value": "80 个高斯，0–8 Å", "note": "edge_input_features=80", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 275, "end": 283, "must": "vmax=8.0"}},
+    {"name": "angle RBF", "value": "40 个高斯，cosθ ∈ [−1, 1]", "note": "triplet_input_features=40", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 284, "end": 292, "must": "vmin=-1"}},
+    {"name": "alignn_layers / gcn_layers", "value": "2 / 2（ALIGNNAtomWiseConfig）；原 ALIGNN 4 / 4", "note": "MPtrj 版为 4 / 4（Matbench Discovery）", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 31, "end": 35, "must": "alignn_layers: int = 2"}},
+    {"name": "embedding / hidden_features", "value": "64 / 64（原子级模型默认）；原 ALIGNN hidden 256", "note": "MPtrj 版 hidden 256、4,057,473 个参数（Matbench Discovery）", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 36, "end": 40, "must": "hidden_features: int = 64"}},
+    {"name": "atom_input_features", "value": "92（CGCNN 特征，示例 FF 配置）", "note": "代码默认 1；发布模型的 config.json 随 checkpoint 下载，不在仓库中", "code": {"file": "alignn/examples/sample_data_ff/config_example_atomwise.json", "start": 42, "end": 56, "must": "\"atom_input_features\": 92"}},
+    {"name": "use_cutoff_function / inner_cutoff / exponent", "value": "False / 3 Å / 5", "note": "多项式包络默认关闭；MPtrj 版在 4 Å 启用（Matbench Discovery）", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 59, "end": 68, "must": "use_cutoff_function: bool = False"}},
+    {"name": "use_penalty", "value": "True：r < 1 Å 时每条边 +0.1×(1−r)", "note": "防原子塌缩的线性排斥（只进入求导用能量）", "code": {"file": "alignn/models/alignn_atomwise.py", "start": 66, "end": 70, "must": "penalty_factor: float = 0.1"}},
+    {"name": "stress_wt", "value": "0.05（AlignnAtomwiseCalculator）/ 1.0（ForceField）", "note": "ASE 输出应力的经验缩放", "code": {"file": "alignn/ff/calculators.py", "start": 189, "end": 193, "must": "stress_wt=0.05"}}
+  ],
+  "speedNotes": [
+    "主要开销在线图：线图边数 ≈ 原子数 × 近邻数²（约为原子图边数的 M 倍），每个 ALIGNN 层要在原子图和线图上各做一次门控卷积。",
+    "k-NN 建图与线图构造是 jarvis-tools/numpy + DGL 的 Python/CPU 代码，ASE 计算器每一步都重新执行，再把图搬到 GPU。",
+    "Matbench Discovery 记录：2023 版 ALIGNN-FF 训练时 12 GB 的 MPtrj 数据转成 ALIGNN 图后达 600 GB，只能用小 batch，训练很慢（该提交因此中止）。",
+    "力与应力共用一次对键向量的反传；默认 float32，没有 torch.compile、融合内核或模型压缩。"
+  ],
+  "weakNotes": [
+    "没有任何显式长程项：感受野来自 k-NN 壳层（8 Å 内搜索）与多层卷积，超出部分的静电 r⁻¹ 与色散 r⁻⁶ 尾巴全部缺失。",
+    "默认 JARVIS-DFT 模型（README：约 7.5 万材料、400 万能量-力条目中选 307,113 条训练）基于 OptB88vdW 非局域 vdW 泛函，层间结合在截断内被隐式学到；但它与 PBE 的 MP 能量不兼容，Matbench Discovery 因此中止了 2023 版提交。",
+    "ALIGNN 2.0 MPtrj 版在 PBE 数据上训练，Matbench Discovery 明确指出范德华结合结构描述较差；官方未提供 D3 外挂。",
+    "无总电荷/自旋输入、无静电：带电缺陷、离子液体、界面电荷转移、极性表面不可靠；iAlignn 给出的电荷只是独立模型的预测，不参与能量。"
+  ],
+  "downstreamNotes": [
+    "结构优化是设计重点：ForceField.optimize_atoms 默认 FIRE + ExpCellFilter 同时弛豫晶胞（fmax=0.1）；Matbench Discovery 对 MPtrj 版报告 F1=0.697（unique prototypes）、几何 RMSD 0.0901。",
+    "势能面不连续：Matbench Discovery 报告 MPtrj 版 Si 二聚体在 5 Å 图截断处能量跳 2.2 eV、3.5 Å 三体截断处跳 0.15 eV，默认 k-NN 模型在近邻壳层变化处也会跳变；长时间 NVE 与高温 MD 需检验。",
+    "声子：ff.phonons 用 phonopy 有限位移（默认 2×2×2 超胞、distance=0.2）并扣除漂移力；Matbench Discovery 对 MPtrj 版报告 κ_SRME 1.4515、失败率 19.42%，热导率较弱。",
+    "ff.py 现成任务：EV 曲线、空位/表面/界面能、NVE/NVT/NPT MD；用应力算弹性常数前需确认 stress_wt 设置。",
+    "同一骨架可直接预测带隙、磁矩、电荷等性质（iAlignn 一次给出 22 种），适合“弛豫 + 性质筛选”流水线。"
+  ],
+  "strengths": ["线图显式编码键角，三体信息充分且只用不变量，实现简单", "同一框架兼做性质预测与力场，覆盖 89 种元素", "ASE 工具链完整：优化、MD、声子、EOS、表面/空位/界面能、多性质计算器", "力、应力由同一能量对键向量求导，保守且一次反传"],
+  "weaknesses": ["线图开销随近邻数平方增长，训练数据图化后体积膨胀", "默认 k-NN 建图且无平滑包络，势能面不连续，影响 MD 与声子", "无 LAMMPS / 空间分解，CPU 端 Python 建图拖慢 MD", "无静电、色散外挂与电荷/自旋输入", "计算器含 stress_wt、batch_size 等经验缩放，易误用"],
+  "pretrained": ["v12.2.2024_dft_3d_307k（默认，JARVIS-DFT OptB88vdW）", "v12.2.2024_mp_1.5mill / v12.2.2024_mp_187k（MP 数据）", "v8.29.2024_mpf、v8.29.2024_dft_3d、v10.30.2024_dft_3d_307k、v10.30.2024_mp_168k", "alignnff_wt10 / wt1 / wt01 / fmult（2023 原始 ALIGNN-FF）", "v2024.12.12_dft_3d_multi_prop（电荷/磁矩/22 种性质）", "ALIGNN 2.0 MPtrj（Matbench Discovery alignn-ff-mptrj）"],
+  "mbdKeys": ["alignn-ff", "alignn-ff-mptrj"],
+  "arenaKeys": ["ALIGNN"]
+}

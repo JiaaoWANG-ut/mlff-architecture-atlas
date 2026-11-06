@@ -1,0 +1,191 @@
+{
+  "id": "escn",
+  "name": "eSCN",
+  "fullName": "eSCN: Equivariant Spherical Channel Network",
+  "year": 2023,
+  "authors": "S. Passaro, C. L. Zitnick",
+  "paper": {"title": "Reducing SO(3) Convolutions to SO(2) for Efficient Equivariant GNNs", "venue": "ICML 2023", "url": "https://proceedings.mlr.press/v202/passaro23a.html"},
+  "repos": ["fairchem"],
+  "family": "spherical-equivariant",
+  "tags": ["SO(2) 卷积", "Wigner-D 边对齐", "球面通道", "S2 网格非线性", "OC20 催化", "直接力"],
+  "framework": "PyTorch（e3nn 仅用于 S2 网格 / 球谐工具）",
+  "license": "MIT",
+  "oneLiner": "先用 Wigner-D 矩阵把每条边旋转到“边沿极轴”的局部坐标系，此时边方向的球谐只剩 m=0 分量，SO(3) 张量积卷积退化为只在相同 |m| 之间混合的 SO(2) 线性层，代价从 O(L⁶) 降到 O(L³)，于是能用到 L=6 的高阶球面通道。",
+  "analogy": "好比给每对原子拍照前，先把镜头对准两者的连线：对准后，画面里的花纹只按“绕这条线转几圈”（m）分组，不同组互不串扰；原本要把所有花纹两两配对的庞大运算（CG 张量积），就变成每组各自做一次小小的二维旋转乘法，算完再把照片转回原来的朝向。",
+  "arch": {
+    "geometry": "边长 → 512 个高斯基 + 多项式包络；方向 → 每条边一个 Wigner-D 旋转（把边转到极轴），不显式构造 Y_lm 卷积核",
+    "equivariance": "SO(3) 等变（无宇称）；SO(2) 卷积本身严格等变，S2 网格点态非线性仅在网格无限细时严格等变",
+    "lmax": "OC20 发布 L=4/6、m_max=2/3（L4-M2、L6-M2、L6-M3）；共享 eSCN-MD 实现默认 lmax=mmax=2",
+    "bodyOrder": "无显式体序；每条边用 i、j 的完整球面特征，靠多层 + 非线性隐式提升多体关联",
+    "layers": "OC20 发布 12 或 20 层（Lay12 / Lay20）；共享实现默认 num_layers=2",
+    "cutoff": "共享实现默认 5.0 Å、max_neighbors=300；OC20 原始配置未保留在当前仓库",
+    "receptiveField": "层数 × r_c（12–20 层时远大于单个截断球）",
+    "message": "D_ij[x_j‖x_i] → SO(2) 卷积（径向调制）→ 门控/S2 激活 → SO(2) 卷积 → D_ij⁻¹ × 包络 → Σ_j",
+    "readout": "最终等变归一化 → 取 l=0 通道 → MLP(Linear-SiLU-Linear-SiLU-Linear) → 原子能求和",
+    "forces": "direct",
+    "forcesDetail": "OC20 eSCN 直接预测力（非能量梯度）；共享实现 Linear_Force_Head 取 l=1 分量；direct_forces=False 时改为 −∂E/∂R",
+    "stress": "OC20 版无；共享实现在保守模式下用 autograd 维里 / V（eSEN/UMA 用）",
+    "longRange": "无；仅靠多层消息传递扩大感受野",
+    "dispersion": "无（OC20 为 RPBE 数据，无 D3 外挂）",
+    "chargeSpin": "OC20 版无；共享 eSCN-MD（UMA）在 l=0 上加 charge/spin/dataset 嵌入",
+    "otherOutputs": "OC20：S2EF 能量（吸附能）+ 力、IS2RE 直接弛豫能（ODAC 权重）；共享实现保守模式可算 Hessian",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·[L³·C + Σ_{m≤m_max}(L−m+1)²·C²])（M=邻居数）；完整 CG 张量积为 O(L⁶)",
+    "accel": "四元数 Wigner-D + 自定义 kernel、Triton 融合旋转/scatter、CUDA graph、activation checkpointing、多 GPU 图并行；torch.export 导出版"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "SO(2) 卷积已比完整 CG 张量积便宜得多，直接力也省去反传；但 OC20 发布模型 L=6、12–20 层，仍属深层等变网络。"},
+    "expressiveness": {"v": 4, "why": "高达 L=6 的球面通道 + 网格点态非线性，角分辨率很高；但没有 MACE/ACE 式的显式高体序完备基，m 截断也是一种近似。"},
+    "longRange": {"v": 2, "why": "没有任何色散或静电项，只靠多层消息传递扩大感受野。"},
+    "scalability": {"v": 2, "why": "深层消息传递每层都要交换邻居特征，难以严格空间分解；共享实现提供多 GPU 图并行（all-gather / all-to-all）。"},
+    "physics": {"v": 2, "why": "OC20 版为直接力（非保守）、无应力，网格非线性仅近似等变；共享实现虽有多项式包络，但保守性要切换到 eSEN/UMA 模式。"},
+    "coverage": {"v": 1, "why": "OC20 版只输出能量（吸附能）和力。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：原子序数、坐标、晶胞",
+      "plain": "输入是 N 个原子的坐标 R、原子序数 Z 和晶胞（周期体系）。OC20 版 eSCN 直接预测力，所以不需要对坐标求导；共享的 eSCN-MD 实现只有在 direct_forces=False（保守模式，即 eSEN/UMA 的做法）时才对坐标与晶胞打开 requires_grad。说明：原始 eSCN 代码已从当前 fairchem 主干移除（文档指向 fairchem_core-1.10.0），本页引用的是实现同一 SO(2) 卷积思想的共享模块 uma/escn_md.py、escn_md_block.py、nn/so2_layers.py、common/rotation.py。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3}",
+      "code": [{"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 777, "end": 786, "must": "if not self.regress_config.direct_forces:", "caption": "仅在非直接力（保守）模式下对坐标/晶胞开梯度"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断半径 + 最大邻居数",
+      "plain": "在截断半径 r_c 内（含周期镜像）寻找邻居，并用 max_neighbors 限制每个原子的邻居数；也可直接使用外部给定的 edge_index 和晶胞平移。边向量 r_ij 从接收消息的原子 i 指向发送者 j。若邻居上限真正起作用，原子移动时邻居集合会突变，能量随之出现不平滑的跳变。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\},\\ |\\mathcal N(i)|\\le N_{\\max},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 649, "end": 657, "must": "max_neighbors=self.max_neighbors,", "caption": "在线建图：cutoff + max_neighbors"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 682, "end": 690, "must": "+ shifts", "caption": "外部给定边时：边向量 = pos[source] − pos[target] + 周期平移"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：512 个高斯基 + 元素对嵌入，包络平滑归零",
+      "plain": "边长 r_ij 用 512 个等间距高斯函数展开（中心从 0 到 r_c，宽度为间距的 2 倍），再拼接发送原子 j 与接收原子 i 的元素嵌入，作为“这条边连着谁、有多长”的不变特征 e_ij。多项式包络（p=5）在 r_c 处平滑降为 0，代码把它直接乘进逆旋转矩阵，相当于给每条消息加权，让邻居进出截断球时消息连续地消失。",
+      "math": "\\mathbf e_{ij}=\\Big[\\exp\\!\\Big(-\\frac{(r_{ij}-\\mu_k)^2}{2(2\\Delta\\mu)^2}\\Big)\\Big]_{k=1}^{512}\\Vert\\,\\mathbf a_{Z_j}\\Vert\\,\\mathbf b_{Z_i},\\qquad f_{\\text{env}}(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r_{ij}}{r_c}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/radial.py", "start": 52, "end": 58, "must": "torch.exp(self.coeff * torch.pow(dist, 2))", "caption": "GaussianSmearing：高斯径向基"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/radial.py", "start": 27, "end": 40, "must": "torch.where(d_scaled < 1, env_val, 0)", "caption": "PolynomialEnvelope：多项式平滑截断"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 839, "end": 858, "must": "wigner_inv_envelope = wigner_inv * edge_envelope", "caption": "拼接 e_ij，并把包络预乘进逆 Wigner 矩阵"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "关键准备：用 Wigner-D 把每条边转到极轴上，并截断 |m|≤m_max",
+      "plain": "对每条边求一个旋转 R_ij，使 r̂_ij 落在极轴上（论文表述为 z 轴；代码沿用 e3nn 约定，极轴是 y 轴：β=arccos(ŷ 分量)、α=atan2(x, z)）。绕边轴的第三个角 γ 随机取，因为后续 SO(2) 卷积对绕该轴的旋转本身是等变的。由欧拉角按 l 分块构造 Wigner-D 矩阵；当 m_max<L 时只保留 |m|≤m_max 的行并按 m 重新排序，这就是“m 截断”，大幅减少每条边要处理的系数。默认路径用四元数混合算法计算同样的 Wigner-D。",
+      "math": "\\mathbf R_{ij}\\hat{\\mathbf r}_{ij}=\\hat{\\mathbf y},\\ \\ \\beta=\\arccos\\hat r_y,\\ \\alpha=\\operatorname{atan2}(\\hat r_x,\\hat r_z),\\ \\gamma\\sim U[0,2\\pi)\\qquad \\mathbf D^{(l)}_{ij}=Z_l(-\\gamma)\\,J_l\\,Z_l(-\\beta)\\,J_l\\,Z_l(-\\alpha),\\qquad \\tilde{\\mathbf x}=\\mathbf D_{ij}\\mathbf x\\big|_{|m|\\le m_{\\max}}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/rotation.py", "start": 43, "end": 58, "must": "gamma = torch.rand_like(alpha) * 2 * torch.pi", "caption": "由边方向求欧拉角（γ 随机）"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/rotation.py", "start": 65, "end": 77, "must": "return Xa @ J @ Xb @ J @ Xc", "caption": "wigner_D：绕轴旋转矩阵与 J 矩阵相乘"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/execution_backends.py", "start": 160, "end": 174, "must": "wigner = wigner.index_select(1, coefficient_index)", "caption": "prepare_wigner：m 截断 + 按 m 重排（to_m）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素 → l=0 通道，再加“边度嵌入”",
+      "plain": "每个原子的特征是一组“球面通道”：(L+1)² 个球谐系数 × C 个通道，相当于每个通道都是球面上的一个函数。初始时只有 l=0 分量由元素嵌入填充（UMA 版还会加电荷/自旋/数据集嵌入，原 OC20 eSCN 没有）。随后“边度嵌入”把径向 MLP 的输出放在边坐标系的 m=0 系数上，乘包络后用逆 Wigner 转回原坐标、对邻居求和并除以 5，让每个原子一开始就带有方向信息。",
+      "math": "\\mathbf x^{(0)}_{i,\\,l=0}=\\mathbf E_{Z_i},\\qquad \\mathbf x^{(0)}_i\\mathrel{+}=\\frac{1}{5}\\sum_{j\\in\\mathcal N(i)} f_{\\text{env}}(r_{ij})\\,\\mathbf D_{ij}^{-1}\\big[\\mathrm{MLP}(\\mathbf e_{ij})\\big]_{m=0}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 810, "end": 821, "must": "self.sphere_embedding(", "caption": "球面通道张量 [N, (L+1)², C]，只填 l=0"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/execution_backends.py", "start": 263, "end": 279, "must": "x_edge_embedding = torch.bmm(wigner_inv_m0, radial)", "caption": "edge_degree_scatter：m=0 径向特征逆旋转后求和 / rescale"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "核心：SO(2) 卷积——只在同一 |m| 之间混合",
+      "plain": "边对齐后，边方向的球谐 Y_lm(ŷ) 只有 m=0 非零，原本要对 (l₁,l₂,l₃) 三重求和的 Clebsch–Gordan 张量积就塌缩为：输出的第 m 阶系数只由输入的 ±m 阶系数线性组合得到（跨所有 l 和通道）。代码对 m=0 用普通线性层 fc_m0；对每个 m>0 用“复数乘法”式线性层（实部 W_r、虚部 W_i）同时处理 +m、−m 两组系数；距离信息通过径向 MLP 输出逐元素调制输入。官方文档称这把等变卷积复杂度从 O(L⁶) 降到 O(L³)。",
+      "math": "\\tilde{\\mathbf y}_{+m}=W^{(m)}_{r}\\tilde{\\mathbf x}_{+m}-W^{(m)}_{i}\\tilde{\\mathbf x}_{-m},\\quad \\tilde{\\mathbf y}_{-m}=W^{(m)}_{i}\\tilde{\\mathbf x}_{+m}+W^{(m)}_{r}\\tilde{\\mathbf x}_{-m},\\quad \\tilde{\\mathbf y}_{0}=W^{(0)}\\tilde{\\mathbf x}_{0}+\\mathbf b\\qquad \\tilde{\\mathbf x}_{\\pm m}=\\big[\\tilde x_{l,\\pm m}\\big]_{l=m}^{L}\\odot\\mathbf h_m(\\mathbf e_{ij}),\\ 0\\le m\\le m_{\\max}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 67, "end": 80, "must": "x_m_r = x_r_0 - x_i_1", "caption": "SO2_m_Conv：±m 的复数式线性混合"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 640, "end": 667, "must": "x_m = self.so2_m_conv[m - 1](x_m)", "caption": "SO2_Convolution.forward：m=0 与各 m>0 分别处理，径向特征逐元素调制"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：边消息 = 旋转 → SO(2) 卷积 → 门控 → SO(2) 卷积 → 转回",
+      "plain": "每层先对节点特征做等变 RMS 归一化，把发送者 j 与接收者 i 的球面特征拼接后用 D_ij 转到边坐标系；经过带径向调制的第一个 SO(2) 卷积、门控激活（l=0 用 SiLU，l>0 乘以由 m=0 额外输出得到的 sigmoid 门），再过第二个 SO(2) 卷积；最后用 D_ij⁻¹（已含包络）转回原坐标，按接收原子 index_add 求和并加残差。原始 eSCN 在卷积中用 S2 网格上的点态非线性（官方文档：网格无限细时才严格等变），共享实现中 act_type=s2 仍可选，默认是门控。",
+      "math": "\\mathbf x_i\\leftarrow\\mathbf x_i+\\sum_{j\\in\\mathcal N(i)} f_{\\text{env}}(r_{ij})\\,\\mathbf D_{ij}^{-1}\\,\\mathrm{SO2}_2\\Big(\\sigma_{\\text{gate}}\\big(\\mathrm{SO2}_1(\\mathbf D_{ij}[\\bar{\\mathbf x}_j\\Vert\\bar{\\mathbf x}_i];\\ \\mathbf e_{ij})\\big)\\Big),\\qquad \\bar{\\mathbf x}=\\mathrm{RMSNorm}(\\mathbf x)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 234, "end": 246, "must": "x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)", "caption": "Edgewise：旋转 → conv1 → 激活 → conv2 → 逆旋转 + 聚合"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/execution_backends.py", "start": 195, "end": 231, "must": "new_embedding.index_add_(0, scatter_target, x_rotated)", "caption": "gather + bmm(wigner) 与 bmm(wigner_inv) + index_add"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/activation.py", "start": 146, "end": 165, "must": "input_tensors_vectors = input_tensors_vectors * gating_scalars", "caption": "GateActivation：标量 SiLU，l>0 乘 sigmoid 门"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：节点上的 S2 网格前馈网络，多层堆叠",
+      "plain": "聚合消息后再做一次归一化，把每个原子的球谐系数投影到球面经纬网格点上（分辨率由 lmax/mmax 决定），在每个网格点上独立地做 3 层 SiLU MLP，再投影回球谐系数并加残差。在网格上做点态非线性，避开了昂贵的张量积，代价是只有网格足够细时才严格等变。OC20 发布的 eSCN 堆叠 12 或 20 层，共享实现默认 2 层。",
+      "math": "\\mathbf x_i\\leftarrow\\mathbf x_i+\\mathcal G^{-1}\\Big[\\mathrm{MLP}_{\\text{SiLU}}\\big(\\mathcal G[\\bar{\\mathbf x}_i](\\hat{\\mathbf s}_k)\\big)\\Big],\\qquad \\mathcal G[\\mathbf x](\\hat{\\mathbf s}_k)=\\sum_{l\\le L}\\sum_{m}x_{lm}\\,Y_{lm}(\\hat{\\mathbf s}_k)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 363, "end": 370, "must": "x_grid = self.grid_mlp(x_grid)", "caption": "GridAtomwise：to_grid → 点态 MLP → from_grid"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 447, "end": 473, "must": "x = self.atom_wise(x)", "caption": "eSCNMD_Block：norm → 边消息 + 残差 → norm → 网格 FFN + 残差"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/activation.py", "start": 241, "end": 253, "must": "x_grid = self.act(x_grid)", "caption": "S2Activation_M：可选的边上 S2 网格 SiLU"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：最终归一化后取 l=0 标量 → MLP 得原子能",
+      "plain": "所有层结束后做最后一次等变归一化，然后只取每个原子的 l=0（旋转不变）通道，经 Linear–SiLU–Linear–SiLU–Linear 的 MLP 得到原子能。只用标量读能量，保证了能量对旋转不变。",
+      "math": "E_i=W_3\\,\\mathrm{SiLU}\\big(W_2\\,\\mathrm{SiLU}(W_1\\mathbf x^{(T)}_{i,\\,l=0}+\\mathbf b_1)+\\mathbf b_2\\big)+b_3",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 877, "end": 902, "must": "x_message = self.norm(x_message)", "caption": "逐层堆叠 eSCNMD_Block，最后归一化"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1088, "end": 1096, "must": "self.energy_block = nn.Sequential(", "caption": "能量 MLP 头"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和（OC20 目标为吸附能）",
+      "plain": "按体系把原子能相加得到能量（也可选 mean 得到每原子能），“原子能之和”保证广延性。注意 OC20 发布模型的训练目标是吸附能（DFT 总能减去干净表面与气相吸附物能量，见官方模型文档），而不是体系总能，跨数据集比较前要先对齐能量参考。",
+      "math": "E=\\sum_{i=1}^{N}E_i",
+      "code": [{"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 114, "end": 123, "must": "node_energy = energy_block(scalar_embedding)", "caption": "compute_energy：l=0 → 原子能 → 按体系求和"}]
+    },
+    {
+      "stage": "forces",
+      "title": "力：直接从 l=1 等变特征读出（非能量梯度）",
+      "plain": "OC20 版 eSCN 用独立的力头直接预测每个原子的力矢量；共享实现中的 Linear_Force_Head 对 l=0/1 特征做逐 l 线性变换，取出 l=1 的 3 个分量（像矢量一样随旋转变换）作为力。这省去一次反向传播，推理更快；但力不是某个能量的梯度，NVE 动力学会漂移，Hessian/声子也不自洽。把 direct_forces 设为 False（eSEN/UMA 的做法）则改为 F=−∂E/∂R。",
+      "math": "\\mathbf F_i^{\\text{direct}}=\\big[\\,W^{(1)}\\mathbf x^{(T)}_{i}\\big]_{l=1}\\in\\mathbb R^{3}\\qquad \\text{vs.}\\qquad \\mathbf F_i^{\\text{cons}}=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1221, "end": 1233, "must": "forces = get_l_component_range(forces_output, l_min=1, l_max=1)", "caption": "Linear_Force_Head：直接力 = l=1 分量"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 152, "end": 157, "must": "torch.autograd.grad(", "caption": "保守模式（eSEN/UMA）：F = −∂E/∂R"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "lmax / mmax", "value": "OC20 发布：L4-M2、L6-M2、L6-M3；共享实现默认 2 / 2", "note": "节点球谐最高阶 / 边上保留的最高 |m|", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 283, "end": 288, "must": "mmax: int = 2,"}},
+    {"name": "num_layers", "value": "OC20 发布：12（Lay12）/ 20（Lay20）；共享实现默认 2", "note": "交互块层数", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 305, "end": 309, "must": "num_layers: int = 2,"}},
+    {"name": "sphere_channels / hidden_channels", "value": "128 / 128（共享默认）", "note": "每个球谐系数的通道数 / SO(2) 卷积与 FFN 隐藏宽度", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 283, "end": 288, "must": "sphere_channels: int = 128,"}},
+    {"name": "cutoff / max_neighbors", "value": "5.0 Å / 300（共享默认）", "note": "截断半径 / 每原子最大邻居数", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 290, "end": 294, "must": "cutoff: float = 5.0,"}},
+    {"name": "num_distance_basis", "value": "512（高斯，宽度系数 2.0，中心 0→r_c）", "note": "距离展开", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 454, "end": 460, "must": "GaussianSmearing("}},
+    {"name": "edge_channels", "value": "128", "note": "源/靶元素嵌入维数；径向 MLP 输入 = 512 + 2×128", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 470, "end": 474, "must": "self.num_distance_basis + 2 * self.edge_channels,"}},
+    {"name": "包络指数 p", "value": "5", "note": "多项式截断包络", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 487, "end": 487, "must": "PolynomialEnvelope(exponent=5)"}},
+    {"name": "边度嵌入缩放", "value": "除以 5.0", "note": "代码注释为 sqrt(平均度)", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 476, "end": 485, "must": "rescale_factor=5.0"}},
+    {"name": "S2 网格分辨率", "value": "纬向 2(lmax+1)；经向 2(mmax+1)+1（lmax=mmax）或 2·mmax+1", "note": "网格越细越接近严格等变", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/so3.py", "start": 186, "end": 193, "must": "self.lat_resolution = 2 * (self.lmax + 1)"}},
+    {"name": "act_type / ff_type / norm_type", "value": "gate / grid / rms_norm_sh（共享默认）", "note": "边上激活 / 节点 FFN / 归一化", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 305, "end": 309, "must": "act_type: str ="}},
+    {"name": "direct_forces", "value": "True（共享默认；OC20 eSCN 同为直接力）", "note": "False 时改为 autograd 保守力", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 298, "end": 298, "must": "direct_forces: bool = True,"}}
+  ],
+  "speedNotes": [
+    "每条边两笔主要开销：Wigner-D 旋转（按 l 分块，每块 (2l+1)²，约 O(L³·C)）与 SO(2) 线性层（每个 m 一次 [(L−m+1)·C] 规模的矩阵乘）；官方文档称等变卷积复杂度由 O(L⁶) 降到 O(L³)，这是 L=6 能跑起来的根本原因。",
+    "m 截断：边上只保留 |m|≤m_max 的系数（L6-M2 / L6-M3），旋转矩阵的行数和 SO(2) 子层数都随 m_max 缩减；节点上仍保留完整 (L+1)² 个系数。",
+    "直接力头不需要反向传播，比同规模保守模型少一次 backward；但 OC20 发布模型 12–20 层、L=6，参数和激活显存都很大，整体仍属慢档。",
+    "共享 eSCN-MD 代码的工程加速：四元数混合 Wigner-D（l≤4 用自定义 kernel）、Triton 融合的 gather+旋转 / 逆旋转+scatter、CUDA graph、按边分块的 activation checkpointing、多 GPU 图并行；OC20 的 L6-M2-Lay12 还发布了 torch.export 导出版。"
+  ],
+  "weakNotes": [
+    "感受野 = 层数 × r_c：共享实现默认 r_c=5 Å、max_neighbors=300；OC20 发布模型 12–20 层，消息可传得很远，但没有任何显式长程项（无 Ewald / 静电）。",
+    "OC20 训练数据为 RPBE 泛函（官方教程指出 eSCN 用 RPBE 数据训练），不含 D3 色散；物理吸附、层状材料层间作用、分子晶体等 vdW 主导体系会被低估，仓库也没有为 eSCN 提供色散外挂。",
+    "OC20 版没有总电荷/自旋输入：带电吸附物、电化学界面、离子体系无法区分电荷态；共享 eSCN-MD（UMA）加入了 charge/spin 嵌入，但仍无显式静电。",
+    "OC20 只覆盖“吸附物 + 催化剂表面”，目标是吸附能；用于体相材料、分子或液体属于域外外推，应重新训练或改用 UMA 等多域模型。"
+  ],
+  "downstreamNotes": [
+    "原生任务是 OC20 S2EF（结构 → 能量 + 力）与吸附构型弛豫；官方文档：eSCN-L6-M3-Lay20（All+MD）在 OC20 val-ID 上力 MAE 0.0139 eV/Å、EFwT 6.64%。AdsorbML 2023 挑战赛评测脚本内置 escn-2M 选项。",
+    "直接力非保守：NVE 分子动力学会能量漂移，声子、热导率、振动频率等依赖 Hessian 的任务不可靠；需要时应改用同一代码库的保守模型（eSEN / UMA，direct_forces=False）。",
+    "OC20 版不输出应力，无法做晶胞弛豫、状态方程或弹性常数。",
+    "MLIP Arena 用 eSCN(OC20) 跑了同核双原子势能曲线与氢气燃烧 MD，可用来观察直接力模型在训练域外的行为。",
+    "其 SO(2) 卷积被 EquiformerV2、eSEN、UMA 继承（官方文档），是 fairchem 后续模型的基础算子。"
+  ],
+  "strengths": ["SO(2) 卷积让 L=6 的高阶等变卷积变得可负担", "发布时在 OC20 / OC22 上达到 SOTA（官方文档）", "球面通道 + 网格点态非线性，角分辨率高", "核心算子被 EquiformerV2 / eSEN / UMA 沿用，工程实现持续优化"],
+  "weaknesses": ["OC20 版为直接力、非保守，不适合 NVE MD 与声子", "无应力、无电荷/自旋、无色散与长程静电", "网格非线性仅近似等变；只有 SO(3)、无宇称", "深层 + 高 L，推理与显存成本高", "原始 eSCN 代码已从 fairchem 主干移除，加载 OC20 权重需 fairchem-core 1.x"],
+  "pretrained": ["eSCN-L4-M2-Lay12-S2EF-OC20-2M", "eSCN-L6-M2-Lay12-S2EF-OC20-2M", "eSCN-L6-M2-Lay12-S2EF-OC20-All+MD", "eSCN-L6-M3-Lay20-S2EF-OC20-All+MD", "eSCN-S2EF-ODAC", "eSCN-IS2RE-ODAC"],
+  "mbdKeys": [],
+  "arenaKeys": ["eSCN(OC20)"]
+}

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机器学习力场（MLFF）底层架构图解 · 从构型到能量、力与更多性质</title>
+<meta name="description" content="几十种主流机器学习力场（MACE、NequIP、Allegro、eSEN、UMA、Orb、DeePMD、NEP、CHGNet……）的底层架构逐步拆解：从原子构型到能量、力、应力与其他性质，附源码片段与速度、长程/弱相互作用、下游性质分析。">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<section class="hero">
+  <div class="inner">
+    <h1>机器学习力场（MLFF）底层架构图解</h1>
+    <p>从一堆原子坐标出发，一步一步看懂：模型如何<strong>建图</strong>、<strong>编码几何</strong>、<strong>传递消息</strong>、算出<strong>能量</strong>，再<strong>求导</strong>得到力、应力和更多性质。
+      收录主流 MLFF 架构的源码级拆解——每一步都配有通俗解释、公式和直接链接到 GitHub 具体 commit 的源码片段；并基于公开基准数据分析它们的<strong>速度</strong>、<strong>长程 / 弱相互作用能力</strong>与<strong>下游性质</strong>表现。</p>
+    <div class="stats" id="stats"></div>
+    <div class="btns">
+      <a class="btn" href="#pipeline">从通用流水线开始 ↓</a>
+      <a class="btn ghost" style="color:#fff;border-color:#fff" href="models.html">浏览模型库</a>
+      <a class="btn ghost" style="color:#fff;border-color:#fff" href="analysis.html">看深度分析</a>
+    </div>
+  </div>
+</section>
+
+<main class="wrap">
+  <h2 id="what">一句话理解：MLFF 在学什么？</h2>
+  <div class="grid g2">
+    <div class="card">
+      <p>量子化学（DFT）可以精确算出一个原子构型的能量和受力，但很贵——几百个原子算一步要几分钟到几小时。
+        机器学习力场用神经网络去<strong>拟合</strong>这张“能量地形图”：</p>
+      <div class="math" data-tex="E_\theta(\{\mathbf r_i, Z_i\},\ \mathbf L)\ \approx\ E_{\mathrm{DFT}},\qquad \mathbf F_i=-\frac{\partial E_\theta}{\partial \mathbf r_i}"></div>
+      <p>训练好之后，算一次能量和力只需毫秒级，于是可以跑百万步的分子动力学、筛选几十万种材料。</p>
+    </div>
+    <div class="card">
+      <p>几乎所有 MLFF 都建立在同一个“局域分解”假设上：<strong>总能量 = 每个原子贡献之和，每个原子只受附近原子影响</strong>。</p>
+      <div class="math" data-tex="E=\sum_{i=1}^{N} E_i\big(\{\mathbf r_{ij},Z_j\}_{\,r_{ij}\lt r_c}\big)"></div>
+      <p>它带来<strong>线性标度</strong>（体系翻倍、计算量翻倍）和可迁移性；代价是截断半径 r<sub>c</sub> 之外的物理（长程静电、色散尾巴）被丢掉——这正是后面“弱相互作用”分析的核心。</p>
+    </div>
+  </div>
+  <div class="callout"><b>四条“物理铁律”</b>贯穿所有架构设计：
+    ① 平移、旋转不变（整体移动/转动体系，能量不变）；② 同种原子交换不变（置换不变）；③ 原子进出截断球时能量要<em>光滑</em>（否则力会跳变、MD 会崩）；④ 力应当是能量的负梯度（保守场，能量守恒）。
+    不同家族的区别，本质上是<strong>用什么数学工具满足这些铁律、又付出多少计算代价</strong>。</div>
+
+  <h2 id="pipeline">通用流水线：从构型到能量、力与更多性质</h2>
+  <p class="muted">下面 11 步是几乎所有 MLFF 共享的骨架。每一步点击“看各模型怎么做”，即可横向对比所有模型在这一步的具体实现（含公式与源码）。</p>
+  <div class="pipeline" id="pipe-nav"></div>
+
+  <div class="card stage-card step" id="s-input"><div class="num">1</div>
+    <h3>输入构型：坐标、元素、晶胞（+ 电荷 / 自旋）</h3>
+    <p>一个“构型”就是 N 个原子的位置 <b>r</b><sub>i</sub> 和元素 Z<sub>i</sub>；晶体还要晶胞矩阵 <b>L</b>（三个晶格矢量）与周期边界条件；部分分子模型还需要总电荷 Q 和自旋多重度 S。
+      模型<strong>从不直接使用绝对坐标</strong>：整体平移或旋转后能量不应改变，所以后面每一步都只用相对几何（原子间矢量）。</p>
+    <div class="math" data-tex="\mathcal S=\{(\mathbf r_i, Z_i)\}_{i=1}^{N},\quad \mathbf L=[\mathbf a_1,\mathbf a_2,\mathbf a_3],\quad E(\{\mathbf R\mathbf r_i+\mathbf t\})=E(\{\mathbf r_i\}),\quad E(\{\mathbf r_{\pi(i)}\})=E(\{\mathbf r_i\})"></div>
+    <div class="analogy">给模型一张“原子点名册 + 房间尺寸”：谁（元素）、在哪（坐标）、房间多大，以及四面墙外是不是一模一样的房间（周期性）。</div>
+    <a href="stages.html?stage=input">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-graph"><div class="num">2</div>
+    <h3>建图：截断半径内找邻居</h3>
+    <p>只把距离小于截断半径 r<sub>c</sub>（通常 4.5–6 Å）的原子对连成“边”。周期体系要考虑晶胞镜像：原子可以和隔壁晶胞里的原子（甚至自己的镜像）相连。
+      每个原子的邻居数 M 一般 20–100，计算量 ∝ N·M —— 这就是 MLFF 线性标度的来源。有的模型还会构造“线图”（边与边相连，用来表示键角），或给每个原子设邻居上限（如 Orb、EquiformerV2 的 20 近邻）。</p>
+    <div class="math" data-tex="\mathcal E=\{(i,j,\mathbf n):\ \lVert\mathbf r_j+\mathbf n^{\top}\mathbf L-\mathbf r_i\rVert\lt r_c\},\qquad \mathbf r_{ij}=\mathbf r_j+\mathbf n^{\top}\mathbf L-\mathbf r_i,\quad \mathbf n\in\mathbb Z^3"></div>
+    <div class="analogy">每个原子只“加好友”方圆 r<sub>c</sub> 内的原子；截断以外的原子，它一概不认识——长程静电和色散尾巴就在这一步被丢掉了。</div>
+    <a href="stages.html?stage=graph">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-geometry"><div class="num">3</div>
+    <h3>几何编码：距离 → 径向基，方向 → 球谐 / 张量 / 键角</h3>
+    <p>边向量 <b>r</b><sub>ij</sub> 拆成“距离 + 方向”。<strong>距离</strong>用一组光滑函数（高斯、Bessel、Chebyshev）展开成几十维向量，再乘一个在 r<sub>c</sub> 处平滑降到 0 的包络函数，保证原子进出截断球时能量和力连续。
+      <strong>方向</strong>的编码最能体现家族差异：描述符模型用键角 cos θ；不变 MPNN 用键角/二面角；笛卡尔等变模型直接用单位矢量与张量积 r̂⊗r̂；球谐等变模型用球谐函数 Y<sub>l</sub><sup>m</sup>(r̂)。</p>
+    <div class="math" data-tex="e_k(r)=\sqrt{\tfrac{2}{r_c}}\,\frac{\sin(k\pi r/r_c)}{r}\,f_{\mathrm{cut}}(r),\qquad f_{\mathrm{cut}}(r_c)=f'_{\mathrm{cut}}(r_c)=0,\qquad \hat{\mathbf r}_{ij}\ \mapsto\ \big\{Y_l^m(\hat{\mathbf r}_{ij})\big\}_{l\le l_{\max}}"></div>
+    <div class="analogy">把“邻居在哪”翻译成模型能读的语言：距离像收音机的不同频道（径向基），方向像把地球仪上的位置展开成一组“纬度带 + 经度波纹”（球谐）。</div>
+    <a href="stages.html?stage=geometry">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-embedding"><div class="num">4</div>
+    <h3>原子嵌入：元素（与电荷、自旋、任务）→ 初始特征</h3>
+    <p>元素 Z 查表变成一个可学习向量 <b>h</b><sub>i</sub><sup>(0)</sup>，相当于“元素性格”的词向量。新一代通用模型还在这里加入总电荷、自旋、数据集/泛函标签（多保真、多任务），让同一个网络能区分 PBE 与 r²SCAN、阴离子与阳离子。</p>
+    <div class="math" data-tex="\mathbf h_i^{(0)}=\mathbf W_{\mathrm{emb}}\,\mathrm{onehot}(Z_i)\ \ \big(+\ \mathrm{embed}(Q,\,S,\,\text{task})\big)"></div>
+    <a href="stages.html?stage=embedding">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-interaction"><div class="num">5</div>
+    <h3>相互作用 / 消息传递：多体信息在这里产生</h3>
+    <p>这是模型的“大脑”。每一层里，原子 i 从每个邻居 j 收到一条<strong>消息</strong>（邻居特征 × 几何决定的权重），把所有消息<strong>求和</strong>（保证置换不变）后<strong>更新</strong>自己的特征。重复 T 层后，原子 i 的特征就编码了约 T·r<sub>c</sub> 范围内的环境（感受野）。</p>
+    <div class="math" data-tex="\mathbf m_i^{(t)}=\sum_{j\in\mathcal N(i)} M_t\big(\mathbf h_i^{(t)},\mathbf h_j^{(t)},\mathbf r_{ij}\big),\qquad \mathbf h_i^{(t+1)}=U_t\big(\mathbf h_i^{(t)},\mathbf m_i^{(t)}\big)"></div>
+    <p>等变模型的消息是一个<strong>张量积</strong>：把邻居的方向信息（球谐）和邻居特征按角动量规则（Clebsch–Gordan 系数）耦合，输出仍然随旋转正确变换：</p>
+    <div class="math" data-tex="\mathbf m_{i,\,l_3}=\sum_{j\in\mathcal N(i)} R_{l_1l_2l_3}(r_{ij})\,\big[\,\mathbf h_{j,\,l_1}\otimes Y_{l_2}(\hat{\mathbf r}_{ij})\,\big]_{l_3},\qquad f(\mathbf R\mathbf x)=D(\mathbf R)\,f(\mathbf x)"></div>
+    <p><strong>体序（body order）</strong>衡量一次能同时“看到”几个原子的关联：两体（只看距离）→ 三体（键角）→ 四体（二面角）……
+      ACE / MACE 用“先求和、再相乘”的技巧在一层内得到高体序；描述符/线性模型（BPNN、ACE、NEP、DeePMD）没有多轮传话，而是一次性构造好多体描述符。</p>
+    <div class="math" data-tex="A_{i,nlm}=\sum_{j} R_{nl}(r_{ij})\,Y_l^m(\hat{\mathbf r}_{ij})\quad\Longrightarrow\quad B_{i}=\sum C\,\prod_{t=1}^{\nu}A_{i,n_tl_tm_t}\ \ (\nu+1\ \text{体})"></div>
+    <div class="analogy">像“传话游戏”：每轮每个原子把听到的周围情况整理后再讲给邻居；传 T 轮后，你能间接知道 T 层“朋友圈”以外的事——但消息会被层层压缩，越远越模糊。</div>
+    <a href="stages.html?stage=interaction">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-readout"><div class="num">6</div>
+    <h3>读出：特征 → 原子能</h3>
+    <p>每个原子最终特征中旋转不变的标量部分（l = 0）经过一个小 MLP 变成一个数 E<sub>i</sub>。原子能不是可观测量，只是把总能量“分摊”给原子的方式，但它保证能量随体系大小可加（广延性），模型才能外推到比训练集更大的体系。</p>
+    <div class="math" data-tex="E_i=\mathrm{MLP}\big(\mathbf h_i^{(T)}\big|_{l=0}\big)\qquad(\text{部分模型把每一层的读出相加：}E_i=\textstyle\sum_t \mathrm{Read}_t(\mathbf h_i^{(t)}))"></div>
+    <a href="stages.html?stage=readout">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-energy"><div class="num">7</div>
+    <h3>能量汇总：求和 + 元素参考能 + 缩放平移</h3>
+    <p>总能量 = 所有原子能之和，再加每种元素的参考能（孤立原子能 E<sub>0</sub> 或对训练集做线性回归得到），并用训练数据的统计量缩放/平移，让网络只需学习“偏离参考”的那一小部分。</p>
+    <div class="math" data-tex="E=\sum_{i=1}^{N}\big(\sigma\,E_i+\mu_{Z_i}\big)\qquad\text{或}\qquad E=\sum_{i} E_i+\sum_i E^{0}_{Z_i}"></div>
+    <a href="stages.html?stage=energy">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-longrange"><div class="num">8</div>
+    <h3>长程项：把截断之外的物理补回来</h3>
+    <p>前面所有信息都局限在感受野内。静电（∝ 1/r）和色散（∝ −C<sub>6</sub>/r<sup>6</sup>）衰减慢，截断会把它们丢掉。补救办法有三类：
+      (a) 网络预测原子电荷 q<sub>i</sub>，再做库仑 / Ewald 求和；(b) 加上解析的 DFT-D3/D4 色散校正；(c) 隐式电荷 + Ewald（LES）、倒空间消息传递（Ewald MP）等“学出来的长程项”。</p>
+    <div class="math" data-tex="E_{\mathrm{elec}}=\frac12\sum_{i\ne j}\frac{q_i q_j}{4\pi\varepsilon_0\, r_{ij}}\ \ (\text{周期体系：Ewald / PME}),\qquad E_{\mathrm{disp}}^{\mathrm{D3(BJ)}}=-\sum_{i\lt j}\sum_{n=6,8}s_n\frac{C_n^{ij}}{r_{ij}^{\,n}+\big(a_1R_0^{ij}+a_2\big)^{n}}"></div>
+    <div class="analogy">局域模型像近视眼，只看得清身边；长程项相当于给它配一副“看远处的眼镜”。</div>
+    <a href="stages.html?stage=longrange">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-forces"><div class="num">9</div>
+    <h3>力：能量的负梯度（或直接预测）</h3>
+    <p>主流做法：力 = 能量对坐标的负梯度，用自动微分（反向传播）一次算出所有原子的力。这样的力是<strong>保守的</strong>：沿闭合路径做功为零、MD 中能量守恒、声子和弹性常数等二阶性质自洽；代价是多一次反向传播（约 1–3 倍前向的时间和更多显存）。
+      另一类模型（Orb v2、EquiformerV2 OC/OMat 版等）用输出头<strong>直接预测</strong>力向量，更快，但这个力不再是任何能量的梯度。</p>
+    <div class="math" data-tex="\mathbf F_i=-\frac{\partial E}{\partial \mathbf r_i}=\sum_{j}\Big(\frac{\partial E}{\partial \mathbf r_{ij}}-\frac{\partial E}{\partial \mathbf r_{ji}}\Big)\quad(\text{autograd}),\qquad \text{直接法：}\ \mathbf F_i=\mathrm{Head}\big(\mathbf h_i^{(T)}\big|_{l=1}\big)"></div>
+    <div class="analogy">能量是一张地形图，力就是“哪边下坡最陡”。保守力保证你绕一圈回到原点，上坡下坡正好抵消；直接预测的力则像一张手绘的“坡度示意图”，局部看着对，绕一圈可能多出（或少了）能量。</div>
+    <a href="stages.html?stage=forces">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-stress"><div class="num">10</div>
+    <h3>应力 / 维里：对应变求导</h3>
+    <p>给晶胞施加一个微小的对称应变 ε（原子坐标与晶格矢量一起变形），能量对 ε 的导数除以体积就是应力；同样由自动微分得到。应力是晶胞弛豫、NPT 分子动力学、弹性常数和状态方程的基础。</p>
+    <div class="math" data-tex="\sigma_{\alpha\beta}=\frac{1}{V}\frac{\partial E}{\partial\varepsilon_{\alpha\beta}}\Big|_{\varepsilon=0},\qquad \mathbf r_i\to(\mathbf 1+\boldsymbol\varepsilon)\,\mathbf r_i,\quad \mathbf L\to\mathbf L\,(\mathbf 1+\boldsymbol\varepsilon)^{\top}"></div>
+    <a href="stages.html?stage=stress">看各模型怎么做 →</a>
+  </div>
+
+  <div class="card stage-card step" id="s-output"><div class="num">11</div>
+    <h3>更多性质：再求导，或加读出头</h3>
+    <p>有了可微的能量，很多性质都能“求导出来”：Hessian（二阶导）→ 声子谱、热导率、振动频率；对外电场求导 → 极化、Born 有效电荷；对磁矩求导 → 磁力。另一些性质靠额外的读出头直接预测：原子电荷、磁矩、偶极、不确定度（集成 / 方差头）。</p>
+    <div class="math" data-tex="H_{i\alpha,\,j\beta}=\frac{\partial^2E}{\partial r_{i\alpha}\,\partial r_{j\beta}},\qquad \boldsymbol\mu=\sum_i q_i\,\mathbf r_i,\qquad Z^{*}_{i,\alpha\beta}=\frac{\partial P_\alpha}{\partial r_{i\beta}}=\frac{\partial F_{i\beta}}{\partial \mathcal E_\alpha}"></div>
+    <a href="stages.html?stage=output">看各模型怎么做 →</a>
+  </div>
+
+  <h2 id="concepts">四个关键概念</h2>
+  <div class="grid g2">
+    <div class="card"><h3>不变 vs 等变</h3>
+      <p><strong>不变</strong>：旋转体系后输出不变（能量）。<strong>等变</strong>：旋转后输出“跟着一起转”（力、偶极）。
+        不变模型的中间特征全是标量（距离、角度），信息损失但便宜；等变模型的中间特征带方向（矢量、张量、球谐系数），能更完整地保留几何信息，数据效率高、精度高，但运算更贵。</p>
+      <div class="math" data-tex="E(\mathbf R\,\mathbf x)=E(\mathbf x),\qquad \mathbf F(\mathbf R\,\mathbf x)=\mathbf R\,\mathbf F(\mathbf x)"></div></div>
+    <div class="card"><h3>体序（Body order）</h3>
+      <p>一个特征最多同时依赖几个原子的相对位置。两体只能区分距离（无法区分键角），三体能区分键角，四体能区分二面角 / 手性。
+        经典势（LJ、EAM）基本是两体或嵌入两体；ACE / MACE 每层可达 4–5 体；消息传递靠堆层“间接”提高体序。</p></div>
+    <div class="card"><h3>感受野（Receptive field）</h3>
+      <p>原子能能“看到”的最远距离。严格局域模型（ACE、NEP、DeePMD、Allegro）= r<sub>c</sub>；T 层消息传递 ≈ T·r<sub>c</sub>。
+        感受野越大，越能捕捉中程效应，但多 GPU 并行时需要交换的“幽灵原子”也越多；而且它仍是有限的，无法表达 1/r 的静电尾巴。</p></div>
+    <div class="card"><h3>保守力 vs 直接力</h3>
+      <p>保守力（F = −∇E）满足能量守恒、二阶导数自洽，适合 NVE MD、声子、热导；直接力省掉反传、更快，但会造成能量漂移，在声子/热导这类依赖二阶导的任务上明显变差（见 <a href="analysis.html#downstream">深度分析</a> 中 κ<sub>SRME</sub> 数据）。</p></div>
+  </div>
+
+  <h2 id="families">八大家族</h2>
+  <p class="muted">按“用什么数学工具编码几何与对称性”划分。点击模型名进入逐步拆解页面。</p>
+  <div class="grid g2" id="family-cards"></div>
+
+  <h2 id="timeline">发展时间线</h2>
+  <div class="legend" id="legend"></div>
+  <div class="card timeline" id="timeline-box" style="margin-top:10px"></div>
+
+  <h2 id="takeaways">核心结论速览</h2>
+  <div class="grid g2" id="takeaways-box">
+    <div class="card"><h3>① 架构主线：从“手工描述符”到“等变大模型”，再到“去约束”</h3>
+      <p>2007–2018 年以描述符 + 小网络、线性多体展开为主（BPNN、GAP、SNAP、MTP、ACE、DeePMD）；2017 年后不变消息传递（SchNet、DimeNet、M3GNet、CHGNet）兴起；2021 年后等变网络（NequIP、MACE、Allegro、Equiformer、eSEN、UMA）成为精度主力；Orb、PET 则选择放弃结构性等变，用数据增强换速度。</p></div>
+    <div class="card"><h3>② 速度由“构件 + 层数 + 力的求法 + 实现”共同决定</h3>
+      <p>同平台 384 原子反应 MD（MLIP Arena）中，直接力的 Orb 约 55 步/秒，保守力的 MACE、MatterSim 约 32–34 步/秒，SevenNet 约 24，EquiformerV2 约 9，eSCN 约 4.6，CHGNet 约 3，M3GNet 约 1.6。<a href="analysis.html#speed">详见速度分析 →</a></p></div>
+    <div class="card"><h3>③ 弱相互作用是通用大模型的普遍短板</h3>
+      <p>主流材料基础模型都训练在 PBE(+U) 数据上——数据里本来就没有色散；绝大多数也没有任何显式静电。补救要靠外挂 D3/D4 或 LES 一类长程模块；真正把电荷 + 静电 + 色散都内置的是 PhysNet、SpookyNet、AIMNet2、SO3LR、BAMBOO、FeNNix 等“分子 / 电解质”路线。<a href="analysis.html#weak">详见弱相互作用分析 →</a></p></div>
+    <div class="card"><h3>④ 保守力决定了二阶性质能不能用</h3>
+      <p>Matbench Discovery 中 4 个直接力模型的热导率误差 κ<sub>SRME</sub> 都在 1.67 以上，而最好的保守力模型已降到 0.1 以下。直接力省下的时间，换来的是声子、热导和 NVE 能量守恒上的明显代价。<a href="analysis.html#downstream">详见下游性质分析 →</a></p></div>
+  </div>
+</main>
+
+<script>
+mountChrome("index.html");
+const D = window.MLFF, B = window.MLFF_BENCH;
+const pots = D.models.filter((m) => !["infrastructure", "long-range-module"].includes(m.family));
+document.getElementById("stats").innerHTML = [
+  [D.models.length, "个架构 / 模块"],
+  [Object.keys(D.manifest).length, "个源码仓库（固定 commit）"],
+  [D.families.length, "大家族"],
+  [B ? B.mbd.length : "—", "条 Matbench Discovery 记录"],
+  [pots.filter((m) => m.arch.forces !== "n/a").length, "个完整势函数"],
+].map(([v, t]) => `<div class="stat"><b>${v}</b>${t}</div>`).join("");
+
+document.getElementById("pipe-nav").innerHTML = D.stages.map((s, i) =>
+  `<a class="node" href="#s-${s}">${i + 1}. ${STAGE[s].name}</a>${i < D.stages.length - 1 ? '<span class="arrow">→</span>' : ""}`).join("");
+
+document.getElementById("family-cards").innerHTML = D.families.map((f) => {
+  const ms = D.models.filter((m) => m.family === f);
+  return `<div class="card"><div class="flex"><span class="badge fam" style="background:${famColor(f)}">${esc(FAMILY[f].name)}</span><span class="muted small">${ms.length} 个</span></div>
+    <p class="small" style="margin-top:8px">${esc(FAMILY[f].desc)}</p>
+    <div class="tags">${ms.map((m) => `<a class="badge" href="${modelLink(m)}">${esc(m.name)}</a>`).join("")}</div></div>`;
+}).join("");
+
+document.getElementById("legend").innerHTML = D.families.map((f) => `<span><i style="background:${famColor(f)}"></i>${esc(FAMILY[f].name)}</span>`).join("");
+const years = [...new Set(D.models.map((m) => String(m.year)))].sort();
+document.getElementById("timeline-box").innerHTML = years.map((y) => {
+  const ms = D.models.filter((m) => String(m.year) === y).sort((a, b) => D.families.indexOf(a.family) - D.families.indexOf(b.family));
+  return `<div class="year-row"><div class="y">${esc(y)}</div><div class="items">${ms.map((m) =>
+    `<a href="${modelLink(m)}" style="background:${famColor(m.family)}" title="${esc(m.fullName)}">${esc(m.name)}</a>`).join("")}</div></div>`;
+}).join("");
+
+window.addEventListener("load", () => renderAllTex());
+</script>
+</body>
+</html>

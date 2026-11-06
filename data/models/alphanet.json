@@ -1,0 +1,206 @@
+{
+  "id": "alphanet",
+  "name": "AlphaNet",
+  "fullName": "AlphaNet: scaling up local-frame-based neural network interatomic potentials",
+  "year": 2025,
+  "authors": "B. Yin, J. Wang, W. Du, P. Wang, P. Ying, H. Jia, Z. Zhang, Y. Du, C. Gomes, C. Duan, G. Henkelman, H. Xiao",
+  "paper": {"title": "AlphaNet: scaling up local-frame-based neural network interatomic potentials", "venue": "npj Computational Materials 11, 332 (2025)", "url": "https://arxiv.org/abs/2501.07155"},
+  "repos": ["AlphaNet"],
+  "family": "cartesian-equivariant",
+  "tags": ["局部标架", "笛卡尔向量等变", "复数 MPS 多体收缩", "PyTorch + JAX 双实现", "保守力"],
+  "framework": "PyTorch（PyG + torch-scatter，Lightning 训练）与 JAX（Haiku / Flax）",
+  "license": "GPL-3.0（Matbench 记录：MPtrj 权重 CC-BY-4.0，OAM 权重 GPL-3.0）",
+  "oneLiner": "给每条边 i→j 搭一个局部坐标架（键方向 + 由邻居质心叉乘出的法向 + 第三轴），把原子的向量特征投影进去变成几个普通数字——不用球谐函数和 CG 张量积，标量网络也能“看见”完整方向信息；再用复数“矩阵乘积态”（MPS）式的张量收缩做多体消息传递。",
+  "analogy": "像在每对原子之间立一个“随身指南针”：以键为北、以邻居重心定出的平面法线为东。整块晶体怎么转，指南针就跟着怎么转，所以只要记下“邻居在指南针上的读数”（几个普通数字），既不丢方向信息、又天然与朝向无关，省去了球谐展开那种“全方位测绘”。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（可训练频率 Bessel 基 × 余弦截断）+ 单位方向 ê_ij；每条边的局部标架 [ê_ij, (r_i−c_i)×(r_j−c_i), ê_ij×…]，c_i 为邻居质心",
+    "equivariance": "设计为 E(3)：能量不变、力等变（向量投影到等变标架→标量，叉乘轴取 |·| 消除镜像符号）；注：FTE 中向量“长度”用 L1 范数（p=1），严格讲非旋转不变",
+    "lmax": "无球谐；只有 C 个笛卡尔三维向量通道（相当于 l=1）+ 标架坐标标量",
+    "bodyOrder": "标架含 i、j 与邻居质心，投影 S_i/S_j 带入 3–4 体角度/二面角信息；复数 MPS 收缩再叠加多体关联，无显式体序截断",
+    "layers": "4（OMA / MPtrj / MATPES 发布配置；config 默认 3；Matbench MPtrj YAML 记 6）",
+    "cutoff": "5 Å（config 默认与发布配置）；Matbench MPtrj YAML 记 6 Å",
+    "receptiveField": "名义 ≈ (层数+2)×r_c：NeighborEmb、S_vector 两次预聚合后每层再 +1 跳，4 层 ≈ 30 Å",
+    "message": "标量：Σ_j MLP(h_j)⊙W·e_B(r)⊙MLP(标架标量)，并经复数 MPS 收缩得相位角；向量：Σ_j(v_j·a + ê_ij·b)/√C",
+    "readout": "Linear(h_i) + Linear([Re ψ_i, Im ψ_i])/χ₁ 得原子能，再按元素 a_Z·ε_i + b_Z，最后求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R：PyTorch 用 torch.autograd.grad，JAX 用 jax.value_and_grad（jit 编译）",
+    "stress": "对称虚拟应变 ε（借自 MACE）：r、cell 同乘 (1+ε_sym)，σ = (∂E/∂ε)/V；PyTorch 与 JAX 均实现",
+    "longRange": "无（只靠截断内多跳消息传递）",
+    "dispersion": "无内置 D3/色散项；只能靠训练数据（PBE/PBE+U 或 r²SCAN）在截断内隐式学习",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "无额外物理量；output_dim / use_sigmoid 可做通用标量回归（config 默认数据为 QM9 U0）",
+    "strictlyLocal": false,
+    "complexity": "O(E·C²)：每层边上 dir_proj（3C 宽）、scale、diagonal 等 MLP 主导；另有 O(E·χ₂·χ₁²) 边 MPS 与 O(N·C·χ₁²) 节点 MPS；PyTorch 建图 O(N²)",
+    "accel": "JAX（Haiku/Flax）jit，README 称 4090 上提速 2.5–3×；freeze.py 导出 TorchScript；lammps 分支含 Triton 加速与 LAMMPS 接口；Lightning 多 GPU 训练"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "没有球谐与 CG 张量积，只有笛卡尔向量和边上 MLP（PaiNN 级算子）；但 4 层、3C 宽的边 MLP 与复数 MPS 收缩让它比 SchNet/PaiNN 略重。"},
+    "expressiveness": {"v": 4, "why": "局部标架让标量直接看到完整方向（含手性/二面角），再叠加 MPS 多体收缩；但向量通道只到 l=1，没有 MACE/ACE 那样系统可控的高体序展开。"},
+    "longRange": {"v": 2, "why": "只有截断 + 多跳消息传递带来的半局域感受野，没有色散、静电或电荷模块。"},
+    "scalability": {"v": 2, "why": "PyTorch 建图对每个结构做 N² 原子对枚举，名义感受野约 6 r_c 使空间分解需要很厚的 ghost 区；LAMMPS 接口尚在 lammps 分支。"},
+    "physics": {"v": 3, "why": "保守力、原子能求和保证广延、余弦截断、可选 ZBL；但标架质心是硬截断内平均、交互层 Bessel 分支未乘包络、FTE 用 L1 范数，平滑性与严格旋转不变性没有被构造性保证。"},
+    "coverage": {"v": 1, "why": "官方只有能量/力/应力；可回归通用标量（如 QM9 U0），但没有 Hessian、偶极、电荷、磁矩等输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞（非周期自动加真空盒）",
+      "plain": "输入是原子序数 Z、笛卡尔坐标 R 和晶胞。ASE 计算器先把坐标 wrap 回晶胞并打开 requires_grad（力要靠对坐标求导）。PyTorch 版建图只支持周期体系，所以分子会被自动放进比自身尺寸大 20 Å 的真空盒里当作周期体系计算。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3};\\qquad \\text{non-PBC}:\\ \\mathbf C=\\mathrm{diag}\\big(\\text{extent}+20\\,\\text{Å}\\big)",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/infer/calc.py", "start": 68, "end": 91, "must": "get_positions(wrap = True)", "caption": "AlphaNetCalculator：非周期体系加 20 Å 真空；坐标 wrap 并设为可求导"},
+        {"repo": "AlphaNet", "file": "alphanet/models/model.py", "start": 20, "end": 43, "must": "processed_data = process_positions_and_edges(", "caption": "AlphaNetWrapper：先建图/准备应变，再调用 AlphaNet"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：周期镜像下 r ≤ r_c 的原子对，最多 50 个近邻",
+      "plain": "radius_graph_pbc 先枚举同一结构内所有原子对与所需的周期镜像，保留距离 ≤ r_c（5 Å）的对，再按距离只保留每个原子最近的 50 个邻居；get_pbc_distances 给出带周期平移的边向量与长度。这种“全对枚举”在小晶胞里很快，但内存随 N² 增长；JAX 计算器则改用 matscipy 的 neighbour_list（不截邻居数）。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j+\\mathbf S_{ij}\\mathbf C-\\mathbf r_i\\rVert\\le r_c\\,\\},\\quad |\\mathcal N(i)|\\le 50;\\qquad \\mathbf r_{ij}=\\mathbf r_j+\\mathbf S_{ij}\\mathbf C-\\mathbf r_i",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/graph.py", "start": 392, "end": 419, "must": "max_num_neighbors_threshold=50", "caption": "process_positions_and_edges：radius_graph_pbc + get_pbc_distances"},
+        {"repo": "AlphaNet", "file": "alphanet/infer/new_haiku.py", "start": 69, "end": 74, "must": "neighbour_list(", "caption": "JAX 计算器：matscipy 近邻表"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：可训练 Bessel 基 + 余弦截断",
+      "plain": "距离用 8 个 Bessel 函数 sin(ω_n r/r_c)/r 展开，频率 ω_n 从 nπ 起步且可训练；再经两层 MLP 并乘上余弦截断 f_c(r)，得到在 r_c 处归零的径向特征 R̃_ij。注意：交互层还会直接使用未乘 f_c 的 Bessel 特征 e_B（经 rbf_proj），所以截断处的平滑性并非处处由包络保证。",
+      "math": "e_{B,n}(r)=\\frac{2}{r_c}\\,\\frac{\\sin(\\omega_n r/r_c)}{r},\\ \\omega_n^{(0)}=n\\pi;\\qquad f_c(r)=\\tfrac12\\big[\\cos(\\pi r/r_c)+1\\big];\\qquad \\tilde R_{ij}=f_c(r_{ij})\\,\\mathrm{MLP}\\big(e_B(r_{ij})\\big)",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 39, "end": 61, "must": "torch.sin(self.bessel_weights * x.unsqueeze(-1) / self.r_max)", "caption": "rbf_emb：可训练频率的 Bessel 径向基"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 533, "end": 536, "must": "rbounds = 0.5 * (torch.cos(dist * self.pi / self.cutoff) + 1.0)", "caption": "径向 MLP × 余弦截断"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：元素向量 + 一跳邻居元素，外加一个复数“量子态”",
+      "plain": "每种元素查表得到 C 维向量（LayerNorm 后），NeighborEmb 再把邻居的元素向量按 R̃_ij 加权求和加进来，得到初始标量特征 h⁽⁰⁾；向量特征 v⁽⁰⁾ 初始为 0。同时用一个可学习矩阵把元素嵌入映射成 χ₁ 维复向量 ψ⁽⁰⁾，作为后面“矩阵乘积态”链的起点。",
+      "math": "h_i^{(0)}=\\mathrm{LN}(E_{Z_i})+\\sum_{j\\in\\mathcal N(i)}\\tilde R_{ij}\\odot\\mathrm{LN}(E'_{Z_j}),\\qquad \\mathbf v_i^{(0)}=\\mathbf 0,\\qquad \\psi_i^{(0)}=K_1^{\\top}\\mathrm{LN}(E_{Z_i})\\in\\mathbb C^{\\chi_1}",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 113, "end": 126, "must": "s_neighbors = self.propagate(edge_index, x=s_neighbors, norm=embs)", "caption": "NeighborEmb：邻居元素嵌入按径向权重求和"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 565, "end": 568, "must": "quantum = torch.einsum(equation, self.kernel1, z_emb)", "caption": "初始复数态 ψ⁽⁰⁾"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "局部标架：用键方向 + 邻居质心叉乘为每条边搭坐标架",
+      "plain": "这是 AlphaNet 的核心。对边 i→j：第一轴是键方向 ê_ij；先算 i 的邻居质心 c_i，第二轴取 (r_i−c_i)×(r_j−c_i)，即 i、j、c_i 三点平面的法向；第三轴为 ê_ij×第二轴。三根轴都由原子坐标构造，整体旋转时跟着一起转（等变），所以任何向量在其中的坐标都是旋转不变的标量。代码里 c_i 是截断内邻居的简单平均，且 c_i 与第二轴用的是原子在晶胞内的坐标 pos（未加周期平移），PyTorch 与 JAX 实现一致。",
+      "math": "\\hat{\\mathbf e}_{ij}=\\frac{\\mathbf r_{ij}}{r_{ij}},\\quad \\mathbf c_i=\\frac{1}{|\\mathcal N(i)|}\\sum_{k\\in\\mathcal N(i)}\\mathbf r_k,\\quad \\mathbf b_{ij}=(\\mathbf r_i-\\mathbf c_i)\\times(\\mathbf r_j-\\mathbf c_i),\\quad \\mathbf n_{ij}=\\hat{\\mathbf e}_{ij}\\times\\mathbf b_{ij},\\qquad \\mathcal F_{ij}=[\\hat{\\mathbf e}_{ij},\\mathbf b_{ij},\\mathbf n_{ij}]",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 541, "end": 549, "must": "edge_cross = torch.cross(pos[i]-mean[i], pos[j]-mean[i])", "caption": "PyTorch：邻居质心 + 两次叉乘构造边标架"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alpha_haiku.py", "start": 388, "end": 398, "must": "edge_frame = jnp.stack([edge_diff, edge_cross, edge_vertical], axis=-1)", "caption": "JAX/Haiku 版同样的标架构造"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "标架标量化：把邻域向量投影到标架，得到方向感知的边权",
+      "plain": "先用 S_vector 为每个原子累积向量特征 S_i=Σ_j φ(h_j)⊙R̃_ij ê_ij（C 个三维向量，描述邻居在各通道上的方向分布）。再把 S_i 和 S_j 分别投影到边标架上得到 3 个坐标；叉乘轴那一维取绝对值，使结果在镜像下也不变。小 MLP（3→C/4→1）把 3 个坐标压成 1 个标量并加上沿键分量，乘 f_c 后与 R̃_ij、e_B 拼成边权 w_ij。一次 3×3 投影就把角度、二面角等多体方向信息写进了普通标量。",
+      "math": "\\mathbf S_i=\\sum_{j}\\phi(h_j)\\odot\\tilde R_{ij}\\,\\hat{\\mathbf e}_{ij},\\qquad \\mathbf u_{ij}=\\big(\\hat{\\mathbf e}_{ij}\\!\\cdot\\!\\mathbf S_i,\\ |\\mathbf b_{ij}\\!\\cdot\\!\\mathbf S_i|,\\ \\mathbf n_{ij}\\!\\cdot\\!\\mathbf S_i\\big),\\qquad w_{ij}=\\Big[\\tfrac{f_c(r_{ij})}{\\sqrt C}\\big(g(\\mathbf u_{ij})+u_{ij,1}\\big),\\ (\\text{same for }\\mathbf S_j),\\ \\tilde R_{ij},\\ e_B(r_{ij})\\Big]",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 143, "end": 158, "must": "emb = emb.unsqueeze(1) * v", "caption": "S_vector：按边方向累积的原子向量特征"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 551, "end": 563, "must": "scalrization1[:, 1, :] = torch.abs(scalrization1[:, 1, :].clone())", "caption": "投影到标架、叉乘分量取绝对值、拼成边权 edge_weight"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "等变消息传递 + 复数 MPS 收缩：标量、向量与相位一起更新",
+      "plain": "每层对每条边：邻居标量 h_j 经 MLP 后与 W·e_B(r_ij)、MLP(w_ij) 逐元素相乘，切成 x、a、b 三份。向量消息 = v_j·a + ê_ij·b（PaiNN 式，保持等变）；标量部分 x 被重塑成 16 个“头”的复数向量 φ，与可学习复张量 K 收缩，再乘一个由边滤波（距离 + 标架标量）生成的矩阵 D_ij，最后只取相位角 θ_ij——即 README 所说“用矩阵乘积态收缩代替两体消息”。所有边求和聚合并 LayerNorm 后，θ 部分经线性层变成单位模复数 e^{iθ}（代码中叫 rope），x 部分作为标量增量 Δh。",
+      "math": "[x,a,b]_{ij}=\\mathrm{MLP}(h_j)\\odot W e_B(r_{ij})\\odot\\mathrm{MLP}(w_{ij}),\\quad \\theta_{ij}=\\arg\\Big(W_m\\sum_k\\Big[\\sum_{h,l}\\phi_{hl}(x_{ij})K_{hlk}\\Big]D^{(ij)}_{k\\cdot}\\Big),\\qquad \\Delta\\mathbf v_i=\\frac{1}{\\sqrt C}\\sum_j\\Big(\\mathbf v_j\\odot\\tfrac{a_{ij}}{\\sqrt3}+\\hat{\\mathbf e}_{ij}\\odot b_{ij}\\Big),\\quad [\\vartheta_i,\\Delta h_i]=\\mathrm{LN}\\Big(\\sum_j[\\theta_{ij},x_{ij}]\\Big)",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 301, "end": 331, "must": "kernel = torch.angle(torch.complex(kernel_real, kernel_imag))", "caption": "EquiMessagePassing.message：复数 MPS 收缩取相位 + 向量消息"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 273, "end": 299, "must": "dx = torch.complex(torch.cos(dx), torch.sin(dx))", "caption": "forward：边滤波、聚合、LayerNorm，相位 → e^{iθ}"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "层内更新：相位旋转（rope）、节点 MPS 链与 FTE",
+      "plain": "上一层得到的 e^{iθ} 会在下一层算消息前作用在标量上：把 h 的前后两半当作实部/虚部乘以单位模复数，相当于在特征空间做一组可学习的二维旋转（类似 RoPE）。每层还以节点标量 h 为系数组合出 χ₁×χ₁ 的复矩阵去乘复向量 ψ，再逐分量归一化成纯相位——像在原子上不断累乘转移矩阵的矩阵乘积态。最后 FTE（frame transition encoding）块把向量通道的内积与“长度”喂给标量，再用标量门控向量；代码中这个“长度”取 L1 范数（p=1）。",
+      "math": "\\tilde h_i=\\big(h_i^{\\mathrm{re}}+\\mathrm{i}\\,h_i^{\\mathrm{im}}\\big)\\odot e^{\\mathrm{i}W\\vartheta_i};\\qquad \\psi_i\\leftarrow\\frac{M(h_i)\\psi_i}{|M(h_i)\\psi_i|},\\ M(h)=\\sum_{c}h_cK^{(t)}_c\\in\\mathbb C^{\\chi_1\\times\\chi_1};\\qquad [\\mathbf U,\\mathbf V]=W\\mathbf v_i,\\ [p,q,g]=\\mathrm{MLP}\\big([h_i,\\lVert\\mathbf U\\rVert_1]\\big),\\ \\Delta h_i=\\tfrac{p+q+\\langle\\mathbf U,\\mathbf V\\rangle/\\sqrt C}{\\sqrt2},\\ \\Delta\\mathbf v_i=g\\odot\\mathbf V",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 267, "end": 272, "must": "dy_pre = dy_pre* rope", "caption": "rope：用上一层相位旋转标量特征"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 570, "end": 589, "must": "quantum = quantum / quantum.abs().to(self.complex_type)", "caption": "层循环：消息传递 → 节点 MPS 更新 → FTE"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 379, "end": 403, "must": "scalar = torch.norm(vec1, dim=-2, p=1)", "caption": "FTE.forward：向量↔标量信息交换"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：标量通道 + MPS 相位态 → 原子能",
+      "plain": "最后一层的标量 h_i 经线性层给出一个数；复数态 ψ_i 的实部与虚部拼起来再经线性层、除以 χ₁ 作为修正，两者相加得到原子能 ε_i。读出只用不变量（标量与相位），保证能量与朝向无关。",
+      "math": "\\varepsilon_i=w^{\\top}h_i^{(T)}+\\frac{1}{\\chi_1}\\,w_q^{\\top}\\big[\\mathrm{Re}\\,\\psi_i,\\ \\mathrm{Im}\\,\\psi_i\\big]",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 591, "end": 591, "must": "self.last_layer_quantum(torch.cat([quantum.real, quantum.imag], dim=-1))", "caption": "last_layer + last_layer_quantum"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：按元素缩放/偏移后求和（ZBL 可选）",
+      "plain": "每个原子能再按元素做可学习的仿射变换 a_Z·ε_i + b_Z（逐元素尺度与参考能），然后对结构内所有原子求和，保证广延性。配置 zbl=true 时会计算一个 8 项指数屏蔽的“灵活 ZBL”库仑排斥对势（只在 r<1 Å 内以余弦渐隐生效）：Haiku（JAX）版把它加进总能，而 PyTorch 与 Flax 版在求和处把 + V_graph 注释掉了，即该项不进入能量。",
+      "math": "E=\\sum_i\\big(a_{Z_i}\\varepsilon_i+b_{Z_i}\\big)\\ \\big(+E_{\\mathrm{ZBL}}\\big),\\qquad E_{\\mathrm{ZBL}}=\\tfrac12\\sum_{i\\neq j}\\frac{Z_iZ_je^2}{r_{ij}}\\sum_{m=1}^{8}w_m e^{-b_m r_{ij}/a_{ij}}\\,f_c^{(1\\,\\text{Å})}(r_{ij}),\\quad a_{ij}=\\frac{0.8854\\,\\gamma\\,a_0}{Z_i^{\\alpha}+Z_j^{\\alpha}}",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 638, "end": 645, "must": "reduce=self.readout).squeeze()#+ V_graph", "caption": "PyTorch：a[z]·s + b[z] 后求和（ZBL 项被注释）"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 606, "end": 637, "must": "V_edge = (Z_j * Z_i * E2) * (phi_vals / r_e)", "caption": "灵活 ZBL 对势与 1 Å 余弦渐隐"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alpha_haiku.py", "start": 544, "end": 551, "must": "s = jnp.sum(s)+V_graph", "caption": "Haiku 版：求和并加上 ZBL"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标自动微分（PyTorch / JAX）",
+      "plain": "力是总能对坐标的负梯度：PyTorch 版用 torch.autograd.grad（训练时 create_graph=True，以便力的损失还能再反传），JAX 版用 jax.value_and_grad 并 jit 编译，一次调用同时得到能量和梯度。这样力场严格保守，MD 中能量守恒更好；代价是反传约为前向的 2–3 倍。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 664, "end": 677, "must": "forces = torch.autograd.grad(", "caption": "cal_forces"},
+        {"repo": "AlphaNet", "file": "alphanet/infer/new_haiku.py", "start": 77, "end": 96, "must": "value_and_grad(energy_fn, (0, 1))", "caption": "JAX：对 (pos, displacement) 求 value_and_grad 并 jit"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对称虚拟应变求导",
+      "plain": "做法与 MACE 相同（代码注明 Borrowed from MACE）：引入全零 3×3 位移张量 ε 并对称化，让坐标和晶胞一起形变；能量对 ε 的梯度就是维里，除以晶胞体积即应力。PyTorch 一次 autograd 同时得到力与维里；JAX 版对 (pos, displacement) 求梯度后除以体积并对称化 Voigt 分量。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon_{\\mathrm{sym}}),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon_{\\mathrm{sym}}),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "AlphaNet", "file": "alphanet/models/graph.py", "start": 343, "end": 360, "must": "symmetric_displacement = 0.5 * (", "caption": "get_symmetric_displacement"},
+        {"repo": "AlphaNet", "file": "alphanet/models/alphanet.py", "start": 679, "end": 700, "must": "stress = virial / volume_expanded", "caption": "cal_stress_and_force：一次反传得到维里与力"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "num_layers", "value": "4（OMA / MPtrj / MATPES 配置）；config 默认 3", "note": "交互层数（每层 = 消息传递 + 节点 MPS + FTE）", "code": {"repo": "AlphaNet", "file": "pretrained/OMA/oma.json", "start": 11, "end": 24, "must": "\"num_layers\": 4"}},
+    {"name": "hidden_channels C", "value": "176（发布配置）；默认 128", "note": "标量/向量通道数", "code": {"repo": "AlphaNet", "file": "pretrained/OMA/oma.json", "start": 11, "end": 24, "must": "\"hidden_channels\": 176"}},
+    {"name": "cutoff r_c", "value": "5.0 Å", "note": "余弦截断半径；Matbench MPtrj YAML 记 6.0 Å", "code": {"repo": "AlphaNet", "file": "alphanet/config.py", "start": 73, "end": 73, "must": "cutoff: float = 5.0"}},
+    {"name": "num_radial", "value": "8（发布配置）；默认 96", "note": "Bessel 基个数（频率可训练）", "code": {"repo": "AlphaNet", "file": "pretrained/OMA/oma.json", "start": 11, "end": 24, "must": "\"num_radial\": 8"}},
+    {"name": "head", "value": "16（config 默认，发布配置未覆盖）", "note": "边上复数 MPS 的头数；Matbench OAM YAML 写 n_heads: 24", "code": {"repo": "AlphaNet", "file": "alphanet/config.py", "start": 77, "end": 77, "must": "head: int = 16"}},
+    {"name": "main_chi1 / mp_chi1 / chi2", "value": "24 / 24 / 6（默认）；MATPES 为 96 / 64 / 24", "note": "节点 ψ 维度 / 边相位维度 / 边收缩中间维度", "code": {"repo": "AlphaNet", "file": "alphanet/config.py", "start": 80, "end": 83, "must": "main_chi1: int = 24"}},
+    {"name": "hidden_channels_chi", "value": "96", "note": "边 MPS 输入的复数通道总数（16 头 × 6）", "code": {"repo": "AlphaNet", "file": "alphanet/config.py", "start": 83, "end": 83, "must": "hidden_channels_chi: int = 96"}},
+    {"name": "max_num_neighbors", "value": "50", "note": "PyTorch 建图每原子保留的最近邻上限（Matbench OAM YAML: max_neighbors 50）", "code": {"repo": "AlphaNet", "file": "alphanet/models/graph.py", "start": 404, "end": 405, "must": "max_num_neighbors_threshold=50"}},
+    {"name": "zbl", "value": "true（OMA、MATPES）；MPtrj 配置未开启", "note": "ZBL 渐隐半径 r_cut = 1.0 Å", "code": {"repo": "AlphaNet", "file": "pretrained/OMA/oma.json", "start": 23, "end": 23, "must": "\"zbl\": true"}},
+    {"name": "参数量", "value": "4,653,577（AlphaNet-v1-OAM）", "note": "Matbench Discovery YAML；MPtrj README 称约 4.5M，AQCAT25 约 6.9M", "code": {"repo": "matbench-discovery", "file": "models/alphanet/alphanet-v1-oam.yml", "start": 70, "end": 100, "must": "model_params: 4653577"}},
+    {"name": "loss 权重 E : F : S", "value": "4 : 100 : 10（MAE）", "note": "发布配置的训练损失权重", "code": {"repo": "AlphaNet", "file": "pretrained/OMA/oma.json", "start": 44, "end": 46, "must": "\"energy_coef\": 4.0"}},
+    {"name": "dtype", "value": "\"32\"（float32 + complex64）；可选 \"64\"", "note": "复数 MPS 精度随之切换", "code": {"repo": "AlphaNet", "file": "alphanet/config.py", "start": 75, "end": 75, "must": "dtype: str = \"32\""}}
+  ],
+  "speedNotes": [
+    "没有球谐和 Clebsch–Gordan 张量积：方向信息通过“向量投影到局部标架”变成标量，之后几乎都是普通 Linear/MLP 和逐元素乘，GEMM 友好，这是 AlphaNet 速度—精度折中好的根本原因。",
+    "FLOPs 主要在边上：每层每条边都要过 dir_proj（输入 3C+n_rbf、宽 3C 的两层 MLP）、scale、diagonal 以及复数 einsum 收缩；节点上的 C×χ₁×χ₁ 复数 MPS 与 FTE 相对便宜。",
+    "PyTorch 建图 radius_graph_pbc 枚举每个结构内全部 N² 原子对 × 周期像再筛选：小晶胞很快，但大体系显存/时间按 N² 增长；JAX 计算器改用 matscipy 的 O(N) 近邻表。",
+    "JAX（Haiku/Flax）版 jit 编译后，README 报告在 RTX 4090 上 4–300 原子体系比 PyTorch 快 2.5–3 倍（首次调用需编译）；另有 freeze.py 导出 TorchScript，lammps 分支提供 Triton 加速。",
+    "复数运算随精度切换：float32 用 complex64，float64 用 complex128；力需一次反传（约为前向的 2–3 倍）。"
+  ],
+  "weakNotes": [
+    "截断 5 Å（余弦截断）；4 层消息传递 + 两次预聚合，名义感受野约 30 Å，但没有任何显式长程项，超出部分的 r⁻⁶ 色散与 r⁻¹ 静电完全缺失。",
+    "材料基础模型训练于 MPtrj / OMat24 / sAlex（PBE/PBE+U），PBE 几乎不含 vdW：层状材料层间结合、物理吸附、分子晶体会被低估；仓库未提供 D3 外挂接口，需要用户自行叠加。",
+    "AlphaNet-MATPES-r2scan 基于 r²SCAN 数据，中程 vdW 比 PBE 好一些，但截断外的色散尾巴依然缺失。",
+    "没有总电荷/自旋输入，也没有电荷平衡或 Ewald：带电缺陷、离子液体、电极/电解质界面、不同氧化态体系无法区分。",
+    "ZBL 只修正 r<1 Å 的近核排斥（高能碰撞/辐照），不是长程项；且只有 Haiku 版真正把它加进能量。"
+  ],
+  "downstreamNotes": [
+    "几何优化/晶胞弛豫：保守力 + 应力齐全；Matbench Discovery 上 AlphaNet-v1-OAM 的 F1 = 0.883、能量 MAE 0.023 eV/atom，AlphaNet-v1-MPtrj 的 F1 = 0.789。",
+    "声子与热导需要平滑的二阶导：Matbench Discovery κ_SRME 为 0.6435（OAM）与 1.3046（MPtrj）；标架质心是硬截断内平均、交互层 Bessel 分支无包络，邻居进出截断球时可能出现小跳变，对 Hessian 精度不利。",
+    "表面吸附与催化：官方 AlphaNet-AQCAT25（约 6.9M 参数）在 AQCAT25 上训练，README 报告 test_id 能量/力 MAE 为 0.010 eV/atom 与 0.088 eV/Å。",
+    "分子与团簇：ASE 计算器会把非周期体系放进 20 Å 真空盒计算；没有偶极/极化率输出，IR/Raman 光谱需另建模型。"
+  ],
+  "strengths": ["局部标架把完整方向信息变成标量，免去球谐/CG 张量积，计算轻且易用 GEMM 加速", "复数 MPS 收缩引入多体关联，参数量小（OAM 约 4.65M）而 Matbench Discovery F1 达 0.883", "PyTorch 与 JAX（Haiku/Flax）双实现，权重可互转，JAX 版提速 2.5–3×", "覆盖材料（MPtrj、OMA、MATPES-r²SCAN）与表面催化（AQCAT25）预训练模型"],
+  "weaknesses": ["无长程静电/色散，无电荷与自旋输入", "截断处平滑性与严格旋转不变性未完全由构造保证（硬平均质心、无包络的 Bessel 分支、FTE 的 L1 范数）", "PyTorch 建图 O(N²) 且仅支持周期体系（非周期靠加真空盒）", "只输出能量/力/应力，无 Hessian、偶极、磁矩等扩展", "LAMMPS 接口与 Triton 加速仍在单独分支"],
+  "pretrained": ["AlphaNet-MPtrj-v1（MPtrj）", "AlphaNet-oma-v1（OMAT24 预训练 + sALEX/MPtrj 微调）", "AlphaNet-MATPES-r2scan", "AlphaNet-AQCAT25（表面吸附/反应）"],
+  "mbdKeys": ["alphanet-v1-mptrj", "alphanet-v1-oam"],
+  "arenaKeys": []
+}

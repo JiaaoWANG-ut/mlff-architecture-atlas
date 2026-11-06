@@ -1,0 +1,211 @@
+{
+  "id": "spookynet",
+  "name": "SpookyNet",
+  "fullName": "SpookyNet: Learning Force Fields with Electronic Degrees of Freedom and Nonlocal Effects",
+  "year": 2021,
+  "authors": "O. T. Unke, S. Chmiela, M. Gastegger, K. T. Schütt, H. E. Sauceda, K. R. Müller",
+  "paper": {"title": "SpookyNet: Learning force fields with electronic degrees of freedom and nonlocal effects", "venue": "Nat. Commun. 12, 7273 (2021)", "url": "https://doi.org/10.1038/s41467-021-27504-0"},
+  "repos": ["SpookyNet"],
+  "family": "invariant-mpnn",
+  "tags": ["不变 MPNN（s/p/d 层内收缩为标量）", "总电荷/自旋输入", "FAVOR+ 全局注意力", "ZBL + 静电 + D4 物理项", "保守力 + C^∞ 截断"],
+  "framework": "PyTorch（TorchScript 兼容）+ ASE 计算器",
+  "license": "MIT",
+  "oneLiner": "SpookyNet 是“物理 + 机器学习”拼得最完整的力场之一：网络本身是带 s/p/d 角度特征的不变消息传递，再加覆盖全体系的线性注意力；总电荷与自旋作为输入，输出端显式叠加 ZBL 近核排斥、部分电荷静电和随电荷变化的 D4 色散。",
+  "analogy": "像一位既走街串巷又开全体大会的调查员：先挨家问邻居“谁在哪个方向”（局域 s/p/d 交互），再开全楼大会让每个人都听到所有人（全局注意力）；他手里还拿着全楼的“总账”——一共多少电荷、几个未成对电子（Q/S 输入）；最后按物理常识补上三笔账：靠太近必然强烈互斥（ZBL）、带电者远距离也相互作用（库仑）、所有人之间都有微弱的范德华吸引（D4）。",
+  "arch": {
+    "geometry": "r_ij → 16 个指数 Bernstein 径向基 × C^∞ 截断；方向 → p_ij（l=1，3 分量）与 d_ij（l=2，5 个实球谐分量）",
+    "equivariance": "E(3) 不变：隐藏特征全是标量；p/d 只是层内等变中间量，立即点积收缩",
+    "lmax": "l ≤ 2（s/p/d 三类交互，use_irreps=True 时 d 为 5 个实球谐）",
+    "bodyOrder": "s 项 2 体；p·p、d·d 收缩含邻居对 (j,k) → 每层显式 3 体（cosθ、P₂(cosθ)）；3 层后更高",
+    "layers": "3 个 InteractionModule（num_modules=3），每个含局域 + 非局域交互",
+    "cutoff": "神经网络 r_c = 10 a₀ ≈ 5.29 Å；静电/D4 默认无截断（lr_cutoff=None）",
+    "receptiveField": "局域消息 3×r_c ≈ 15.9 Å；非局域注意力与 Q/S 嵌入覆盖整个体系",
+    "message": "Σ_j (W_s ρ)∘x_j^s、Σ_j (W_p ρ) r̂_ij∘x_j^p、Σ_j (W_d ρ) d_ij∘x_j^d；p、d 两两投影点积 → 标量；再加 FAVOR+ 自注意力",
+    "readout": "各模块输出 y 累加为 f → 无偏置线性层同时给出原子能 E_i 与部分电荷 q_i（+元素偏置）；q_i 均匀修正使 Σq_i = Q",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R（torch.autograd.grad 一次反传），梯度同时流经 q_i(R)、静电、D4 与注意力；训练时 create_graph=True",
+    "stress": "未实现：计算器 implemented_properties 无 stress，代码不对晶胞/应变求导",
+    "longRange": "内置：守恒的部分电荷 + 库仑静电（短程阻尼，可选 lr_cutoff 平移截断或 Ewald）+ 全局 FAVOR+ 注意力",
+    "dispersion": "内置 Grimme D4，C6 随网络预测的部分电荷变化；BJ 阻尼，s8/a1/a2 可训练、s6=1 固定",
+    "chargeSpin": "有：总电荷 Q 与未成对电子数 S 经注意力式电子嵌入注入每个原子，可区分单/三重态、离子态",
+    "otherOutputs": "部分电荷、偶极 Σq_i r_i、Hessian（3N 次反传）、D4 原子极化率与 C6、原子描述符 f、集成模型的标准差",
+    "strictlyLocal": false,
+    "complexity": "局域 O(N·M·F·9)（1+3+5 个分量）；FAVOR+ 注意力 O(N·F·m)；非周期默认全对静电/D4 为 O(N²)；Hessian 需 3N 次反传",
+    "accel": "TorchScript 兼容（@torch.jit.export）、GPU 上用 gather、eval() 缓存元素嵌入；ASE 计算器用 skin 复用邻居表；无 LAMMPS / 多 GPU 接口"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "主体是 64 维不变特征、无 CG 张量积，网络本身较轻；但每个模块有十余个残差 MLP 和全局注意力，再加默认 N² 的静电与 D4（每对还要收缩参考 C6 张量），整体属中等速度。"},
+    "expressiveness": {"v": 4, "why": "每层用 s/p/d（l≤2）方向因子点积收缩，显式获得 3 体角度信息，3 次迭代后体序更高，并能按总电荷/自旋区分电子态；但隐藏特征只保留标量，角分辨率不及高阶等变模型。"},
+    "longRange": {"v": 5, "why": "严格守恒的部分电荷 + 无截断静电 + 电荷依赖 D4 + 总电荷/自旋输入 + 全局注意力，几乎集齐了所有长程与电子态机制。"},
+    "scalability": {"v": 1, "why": "全局注意力、按分子归一化的电子嵌入和默认全对静电/D4 都要求整个体系在同一张图里，无区域分解，也无 LAMMPS/多 GPU 接口。"},
+    "physics": {"v": 5, "why": "保守力、C^∞ 截断与开关函数、原子能可加和、可学习 ZBL（r→0 回到裸核库仑）、严格旋转不变，外加渐近形式正确的静电与 D4。"},
+    "coverage": {"v": 4, "why": "官方输出能量、力、Hessian、部分电荷、偶极、D4 极化率/C6 与集成不确定度，并能按电荷/自旋态计算；但没有应力。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：原子、坐标，以及总电荷 Q 与自旋 S",
+      "plain": "除了原子序数 Z 和坐标 R，SpookyNet 还要两个“电子态”标量：总电荷 Q 和总磁矩 S（未成对电子数，0=单重态，2=三重态）。周期体系另给晶胞和每条边的镜像平移。坐标打开 requires_grad，后面的力和 Hessian 都靠自动微分。示例脚本对同一个卡宾 CH₂ 几何分别算单重态与三重态能量——普通局域力场做不到这一点。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\qquad Q\\ (\\text{total charge}),\\quad S\\ (\\text{unpaired electrons}),\\quad \\mathbf C,\\ \\mathbf o_{ij}\\ (\\text{optional PBC})",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet_calculator.py", "start": 156, "end": 167, "must": "requires_grad=True", "caption": "calculate：打包 Z、Q、S、R（可求导）与晶胞"},
+        {"repo": "SpookyNet", "file": "example.py", "start": 11, "end": 19, "must": "magmom=2", "caption": "示例：同一 CH₂ 几何分别以单重态（magmom=0）和三重态（magmom=2）计算"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：长程项用全对，网络只用 r_c 内的边",
+      "plain": "ASE 计算器按情况选邻居表：非周期体系、启用了静电/D4 且未设 lr_cutoff 时，直接列出全部 N(N−1) 个原子对，让长程项真正“无截断”；否则用 BallTree 或 ASE 周期邻居表在 r_c（或 lr_cutoff）+ 2×skin 内搜索。神经网络只取其中 r_ij < r_c 的子集。skin=0.3 Å 让邻居表在原子小幅移动时可复用。",
+      "math": "\\mathcal P_{\\rm LR}=\\{(i,j):i\\neq j\\}\\ \\ (\\text{non-periodic},\\ \\text{lr\\_cutoff}=\\text{None}),\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf o_{ij}\\mathbf C,\\qquad \\mathcal N(i)=\\{j:r_{ij}<r_c\\}",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet_calculator.py", "start": 142, "end": 149, "must": "self._nsquared_neighborlist(atoms)", "caption": "_update_neighborlists：周期 / 全对 N² / BallTree 三选一"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet_calculator.py", "start": 91, "end": 103, "must": "self.idx_i = idx_i[idx_i != idx_j]", "caption": "_nsquared_neighborlist：除自身外的所有原子对"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 563, "end": 583, "must": "Rj += offsets", "caption": "calculate_distances：加上周期镜像平移得到 r_ij 与向量 v_ij"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：指数 Bernstein 径向基 + p/d 方向因子 + C^∞ 截断",
+      "plain": "每条短程边给出三类几何量：距离 r、单位方向 p_ij（l=1，3 个分量）和 d_ij（l=2，5 个实球谐分量）。距离用 16 个“指数 Bernstein 多项式”展开——以 e^{−αr} 为变量的 Bernstein 基，α 可学习，近处分辨率高、远处自然衰减，并额外乘 e^{−αr} 加权。截断函数 exp(−r²/(r_c²−r²)) 在 r_c 处各阶导数都为零（C^∞），能量、力和 Hessian 都平滑。",
+      "math": "\\hat{\\mathbf r}_{ij}=\\frac{\\mathbf r_{ij}}{r_{ij}},\\quad \\mathbf d_{ij}=\\big(\\sqrt3\\hat x\\hat y,\\sqrt3\\hat x\\hat z,\\sqrt3\\hat y\\hat z,\\tfrac12(3\\hat z^2-1),\\tfrac{\\sqrt3}{2}(\\hat x^2-\\hat y^2)\\big);\\qquad f_{\\rm cut}(r)=\\exp\\!\\Big(-\\frac{r^2}{r_c^2-r^2}\\Big);\\qquad \\rho_k(r)=\\binom{K-1}{k}e^{-(K-1-k)\\alpha r}\\big(1-e^{-\\alpha r}\\big)^{k}e^{-\\alpha r}f_{\\rm cut}(r)",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 621, "end": 651, "must": "pij = vij[cutmask] / sr_rij.unsqueeze(-1)", "caption": "截断内的边：单位矢量 p_ij、l=2 实球谐 d_ij 与截断函数值"},
+        {"repo": "SpookyNet", "file": "spookynet/functional.py", "start": 19, "end": 29, "must": "torch.exp(-(x_ ** 2) / ((cutoff - x_) * (cutoff + x_)))", "caption": "cutoff_function：无穷阶光滑的截断"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/exponential_bernstein_polynomials.py", "start": 90, "end": 97, "must": "torch.log(-torch.expm1(alphar))", "caption": "指数 Bernstein 基（对数空间计算，可选 e^{−αr} 加权）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：元素（含电子组态）+ 总电荷 + 自旋",
+      "plain": "元素嵌入 = 自由可学习向量 + 电子组态（各轨道占据数）的线性映射，使化学上相近的元素天然相似。总电荷和自旋通过“注意力式电子嵌入”分发到原子：每个原子用自身嵌入生成 query，Q 或 S 生成 key/value，softplus 权重在整个分子内归一化，决定每个原子分到多少电子信息。正负电荷用两组权重区分，自旋只取 |S|。三者相加得到初始特征，所以同一几何在不同电荷/自旋下特征与能量都不同。",
+      "math": "\\mathbf e_{Z}=\\mathbf E_{Z}+W_c\\,\\mathbf c_{Z};\\qquad a_i=\\mathrm{softplus}\\Big(\\frac{(W_q\\mathbf e_{Z_i})\\cdot(W_k\\hat\\Psi)}{\\sqrt F}\\Big),\\ \\ \\mathbf e^{\\Psi}_i=\\mathrm{ResMLP}\\Big(\\frac{a_i}{\\sum_j a_j}W_v\\Psi\\Big),\\ \\ \\Psi\\in\\{(Q^{+},Q^{-}),|S|\\},\\ \\hat\\Psi=\\frac{\\Psi}{\\max(\\Psi,1)};\\qquad \\mathbf x^{(0)}_i=\\mathbf e_{Z_i}+\\mathbf e^{Q}_i+\\mathbf e^{S}_i",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/nuclear_embedding.py", "start": 77, "end": 86, "must": "self.config_linear(", "caption": "NuclearEmbedding：元素向量 + 电子组态线性映射"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/electronic_embedding.py", "start": 85, "end": 100, "must": "nn.functional.softplus(dot)", "caption": "ElectronicEmbedding：Q/S 作 key/value 的注意力分配"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 713, "end": 725, "must": "x = z + q + s", "caption": "初始特征 = 元素 + 电荷 + 自旋嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "局域交互：s/p/d 三通道消息，再点积收缩为标量",
+      "plain": "径向基经三个线性层得到 s、p、d 三种滤波器，分别乘邻居特征和方向因子（1、p_ij、d_ij）后对邻居求和。得到的 p、d 是随旋转变化的向量/二阶张量，但随即用两个不同投影做逐分量点积（Σ_m）收缩成标量——这等价于显式引入邻居对 (j,k) 的夹角（cosθ 与 P₂(cosθ)），而隐藏特征始终旋转不变。这正是它属于“不变 MPNN”而非等变网络的原因。",
+      "math": "\\mathbf s_i=\\mathbf x^{x}_i+\\sum_{j}(W_s\\boldsymbol\\rho_{ij})\\circ\\mathbf x^{s}_j,\\quad \\mathbf p^{m}_i=\\sum_{j}(W_p\\boldsymbol\\rho_{ij})\\,\\hat r^{m}_{ij}\\circ\\mathbf x^{p}_j,\\quad \\mathbf d^{m}_i=\\sum_{j}(W_d\\boldsymbol\\rho_{ij})\\,d^{m}_{ij}\\circ\\mathbf x^{d}_j;\\qquad \\mathbf l_i=\\mathrm{ResMLP}\\Big(\\mathbf s_i+\\sum_{m=1}^{3}P_1\\mathbf p^{m}_i\\circ P_2\\mathbf p^{m}_i+\\sum_{m=1}^{5}D_1\\mathbf d^{m}_i\\circ D_2\\mathbf d^{m}_i\\Big)",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/local_interaction.py", "start": 90, "end": 98, "must": "gp = self.radial_p(rbf).unsqueeze(-2) * pij.unsqueeze(-1)", "caption": "s/p/d 径向滤波器与原子特征分支"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/local_interaction.py", "start": 109, "end": 118, "must": "(pa * pb).sum(-2)", "caption": "对邻居求和（L=0/1/2），再把 p、d 点积收缩为标量"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "非局域交互：FAVOR+ 线性注意力覆盖整个体系",
+      "plain": "每个原子对体系中所有原子做自注意力，捕捉超出截断的电荷离域、共轭等“非局域”效应。精确 softmax 注意力是 O(N²)，SpookyNet 采用 Performer 的 FAVOR+：把 query/key 映射到 m=64 个正随机特征上，先算 Σ_j φ(k_j)v_jᵀ，再与每个 φ(q_i) 相乘，复杂度降为 O(N)。局域与非局域结果加回原特征后过残差块，构成一个模块，共 3 个模块。",
+      "math": "\\phi(\\mathbf u)=\\frac{1}{\\sqrt m}\\exp\\!\\Big(\\frac{\\boldsymbol\\omega^{\\top}\\mathbf u}{F^{1/4}}-\\frac{\\lVert\\mathbf u\\rVert^2}{2\\sqrt F}\\Big),\\qquad \\mathbf n_i=\\frac{\\phi(\\mathbf q_i)^{\\top}\\sum_{j}\\phi(\\mathbf k_j)\\,\\mathbf v_j^{\\top}}{\\phi(\\mathbf q_i)^{\\top}\\sum_{j}\\phi(\\mathbf k_j)}\\approx\\sum_j\\frac{e^{\\mathbf q_i\\cdot\\mathbf k_j/\\sqrt F}}{\\sum_{j'}e^{\\mathbf q_i\\cdot\\mathbf k_{j'}/\\sqrt F}}\\mathbf v_j;\\qquad \\mathbf x_i\\leftarrow\\mathrm{Res}(\\mathbf x_i+\\mathbf l_i+\\mathbf n_i)",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/attention.py", "start": 67, "end": 96, "must": "torch.exp(U - h - maximum)", "caption": "_phi：正随机特征映射（减最大值防溢出）"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/attention.py", "start": 130, "end": 153, "must": "return (Q @ (K.T @ V)) / norm", "caption": "_approximate_attention：先算 KᵀV，线性复杂度"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/interaction_module.py", "start": 131, "end": 135, "must": "x = self.residual_post(x + l + n)", "caption": "InteractionModule：局域 l + 非局域 n 合并"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：原子能 + 部分电荷（严格守恒）",
+      "plain": "每个模块都输出一份 y（经残差 MLP），全部累加成最终描述符 f；训练时可用 module dropout 随机丢弃后面模块的输出作正则。一个无偏置线性层同时输出原子能 E_i 和未修正电荷 q̃_i，再加元素相关的能量/电荷偏置。为保证电荷守恒，把 Q − Σq̃ 的“剩余电荷”平均分给所有原子，使 Σq_i 严格等于输入的总电荷 Q。",
+      "math": "\\mathbf f_i=\\sum_{t=1}^{3}\\mathbf y^{(t)}_i,\\qquad (E^{\\rm NN}_i,\\tilde q_i)=W_{\\rm out}\\mathbf f_i+(b^{E}_{Z_i},b^{q}_{Z_i}),\\qquad q_i=\\tilde q_i+\\frac{1}{N}\\Big(Q-\\sum_{j}\\tilde q_j\\Big)",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 730, "end": 759, "must": "f += y", "caption": "模块循环、module dropout、线性输出 (E_i, q_i)"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 761, "end": 771, "must": "Qleftover = Q.index_add(0, batch_seg, -qa)", "caption": "电荷守恒：剩余电荷均匀分摊"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "经验项②：部分电荷静电（短程阻尼 + 可选 Ewald）",
+      "plain": "用上一步的部分电荷计算库仑能。短距离处 1/r 会发散且已由神经网络负责，因此在 0.25 r_c 到 0.75 r_c 之间用 C^∞ 开关函数从阻尼形式 1/√(r²+1) 平滑过渡到真正的 1/r。默认 lr_cutoff=None 时对所有原子对求和、无截断；设置 lr_cutoff 后改用平移力形式，使能量和力在截断处同时归零。周期体系可手动开启 Ewald 求和（实空间 erfc + 倒空间高斯电荷），但倒空间只取晶胞对角元，仅适用于正交晶胞。",
+      "math": "E^{\\rm ele}=\\frac{k_e}{2}\\sum_{i}\\sum_{j\\neq i}q_iq_j\\Big[\\frac{f_{\\rm sw}(r_{ij})}{\\sqrt{r_{ij}^2+1}}+\\frac{1-f_{\\rm sw}(r_{ij})}{r_{ij}}\\Big],\\qquad f_{\\rm sw}=\\frac{e^{-1/(1-x)}}{e^{-1/x}+e^{-1/(1-x)}},\\ \\ x=\\frac{r-0.25\\,r_c}{0.5\\,r_c}",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/electrostatic_energy.py", "start": 180, "end": 202, "must": "pairwise = fac * (f * damped + (1 - f) * coulomb)", "caption": "_coulomb：阻尼/库仑平滑切换，可选 lr_cutoff 平移截断"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 323, "end": 329, "must": "cuton=0.25 * self.cutoff", "caption": "开关区间设为 0.25 r_c → 0.75 r_c"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/electrostatic_energy.py", "start": 119, "end": 141, "must": "torch.exp(-0.25 * k2 / self.alpha2) / k2", "caption": "Ewald 倒空间部分（box_length 取晶胞对角元）"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "经验项③：电荷依赖的 D4 色散",
+      "plain": "色散用 Grimme 的 D4：先由共价配位数 CN 给每个原子的参考态分配高斯权重，再按网络预测的部分电荷 q_i 缩放参考极化率（ζ 因子），得到电荷依赖的 C6——这是“物理模型吃 ML 输出”的地方。能量用 Becke–Johnson 阻尼的 r⁻⁶ 与 r⁻⁸ 两项；s6=1 固定以保证长程渐近正确，s8、a1、a2 与参考电荷缩放可随训练微调。D4 参数只覆盖到 Rn（Z=86）。",
+      "math": "\\zeta_{i,a}=\\exp\\!\\Big\\{g_a\\Big[1-\\exp\\Big(\\gamma_{Z_i}g_c\\Big(1-\\frac{z^{\\rm eff}_i+q^{\\rm ref}_{a}}{z^{\\rm eff}_i+q_i}\\Big)\\Big)\\Big]\\Big\\}W_{i,a}(\\mathrm{CN}_i),\\quad C_6^{ij}=\\sum_{a,b}\\zeta_{i,a}\\zeta_{j,b}C_6^{\\rm ref}(a,b);\\qquad E^{\\rm D4}=-\\frac12\\sum_{i\\neq j}C_6^{ij}\\Big[\\frac{s_6}{r_{ij}^6+R_0^6}+\\frac{s_8\\kappa_{ij}^2}{r_{ij}^8+R_0^8}\\Big],\\ \\ R_0=a_1\\kappa_{ij}+a_2",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/d4_dispersion_energy.py", "start": 254, "end": 276, "must": "qmod = iz + qa.view(-1, 1)", "caption": "ζ 因子：用 ML 部分电荷缩放参考态"},
+        {"repo": "SpookyNet", "file": "spookynet/modules/d4_dispersion_energy.py", "start": 283, "end": 315, "must": "pairwise = -c6ij * (s6 * oor6 + s8 * sqrt_r4r2ij ** 2 * oor8)", "caption": "C6 收缩 + BJ 阻尼 r⁻⁶/r⁻⁸（可选平移截断）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：神经网络 + ZBL 排斥 + 静电 + D4",
+      "plain": "总能是四类原子贡献之和。其中 ZBL 项是带可学习参数的屏蔽核排斥：Z_iZ_j/r 乘 4 个指数之和，系数归一化 Σc_k=1 保证 r→0 时回到裸核库仑排斥，并乘同一截断函数只在短程起作用——原子被压得很近时不会“穿透”。因为每一项都写成原子能，总能天然可加和、可按物理来源分解。",
+      "math": "E^{\\rm ZBL}_i=\\frac{k_e}{2}\\sum_{j}\\frac{Z_iZ_j}{r_{ij}}\\sum_{k=1}^{4}c_k\\,e^{-a_k(Z_i^{p}+Z_j^{p})\\,r_{ij}/d}\\,f_{\\rm cut}(r_{ij}),\\ \\ \\textstyle\\sum_k c_k=1;\\qquad E=\\sum_{i}\\big(E^{\\rm NN}_i+E^{\\rm ZBL}_i+E^{\\rm ele}_i+E^{\\rm D4}_i\\big)",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/modules/zbl_repulsion_energy.py", "start": 88, "end": 114, "must": "self.kehalf * f * zizj / rij", "caption": "ZBLRepulsionEnergy：可学习 ZBL 近核排斥"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 988, "end": 990, "must": "ea + ea_rep + ea_ele + ea_vdw", "caption": "energy：四项原子能按分子求和"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：总能对坐标的自动微分",
+      "plain": "力由总能对坐标一次反传得到，严格保守。梯度不仅穿过神经网络，还穿过部分电荷 q_i(R)、静电、电荷依赖的 D4 以及全局注意力——“电荷随构型变化”带来的力也被自动计入。训练时 create_graph=True，以便把力放进损失函数。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i},\\qquad \\frac{\\partial E}{\\partial\\mathbf r_i}\\ \\text{includes}\\ \\sum_k\\frac{\\partial (E^{\\rm ele}+E^{\\rm D4})}{\\partial q_k}\\frac{\\partial q_k}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 1051, "end": 1060, "must": "torch.autograd.grad(", "caption": "energy_and_forces：F = −∂E/∂R"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：偶极、电荷、Hessian、不确定度",
+      "plain": "forward() 一次返回能量、力、偶极 μ=Σq_i r_i，以及原子能、部分电荷和各物理项分量；偶极可在训练中监督电荷，也可对坐标求导得到 IR 强度。Hessian 通过对 3N 个力分量逐一反传得到（代码注释承认很昂贵），用于振动频率。开启 compute_d4_atomic 还能输出 D4 原子极化率和 C6；SpookyNetEnsemble 给出各量的均值与标准差。",
+      "math": "\\boldsymbol\\mu=\\sum_i q_i\\mathbf r_i,\\qquad H_{ab}=\\frac{\\partial^2E}{\\partial R_a\\partial R_b}\\ \\ (a,b=1,\\ldots,3N;\\ 3N\\ \\text{backward passes})",
+      "code": [
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 1245, "end": 1250, "must": "qa.view(-1, 1) * R", "caption": "偶极 = Σ q_i r_i"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 1133, "end": 1144, "must": "retain_graph=(idx < s)", "caption": "Hessian：逐行反传"},
+        {"repo": "SpookyNet", "file": "spookynet/spookynet_calculator.py", "start": 14, "end": 23, "must": "implemented_properties", "caption": "ASE 计算器：energy/forces/hessian/dipole/charges，默认 float32、skin=0.3"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "num_features", "value": "64", "note": "每个原子的标量特征维度", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 117, "end": 117, "must": "num_features=64"}},
+    {"name": "num_modules", "value": "3", "note": "交互模块（局域 + 非局域）个数", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 119, "end": 119, "must": "num_modules=3"}},
+    {"name": "num_basis_functions / basis_functions", "value": "16 / exp-bernstein（exp_weighting=True）", "note": "指数 Bernstein 径向基", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 118, "end": 133, "must": "num_basis_functions=16"}},
+    {"name": "ini_alpha (α)", "value": "0.9448630629184640 Å⁻¹（= 0.5 a₀⁻¹，可学习）", "note": "径向基中 e^{−αr} 的初始衰减率", "code": {"repo": "SpookyNet", "file": "spookynet/modules/exponential_bernstein_polynomials.py", "start": 38, "end": 41, "must": "ini_alpha: float = 0.9448630629184640"}},
+    {"name": "cutoff r_c", "value": "5.291772105638412 Å（10 a₀）", "note": "神经网络局域交互与 ZBL 的截断", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 134, "end": 134, "must": "cutoff=5.291772105638412"}},
+    {"name": "lr_cutoff / use_zbl_repulsion / use_electrostatics / use_d4_dispersion", "value": "None / True / True / True", "note": "三类物理项默认全开，长程项默认无截断", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 135, "end": 138, "must": "use_d4_dispersion=True"}},
+    {"name": "静电开关区间 (cuton, cutoff)", "value": "(0.25 r_c, 0.75 r_c) ≈ (1.32, 3.97) Å", "note": "阻尼 1/√(r²+1) → 1/r 的平滑过渡区", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 325, "end": 328, "must": "cutoff=0.75 * self.cutoff"}},
+    {"name": "FAVOR+ 随机特征数 m", "value": "64（= num_features）", "note": "近似 softmax 注意力的正随机特征个数", "code": {"repo": "SpookyNet", "file": "spookynet/modules/nonlocal_interaction.py", "start": 52, "end": 52, "must": "Attention(num_features, num_features, num_features)"}},
+    {"name": "D4 (s6, s8, a1, a2)", "value": "(1.0, 1.61679827, 0.44959224, 3.35743605)", "note": "s6 固定；s8/a1/a2 可训练（BJ 阻尼）", "code": {"repo": "SpookyNet", "file": "spookynet/modules/d4_dispersion_energy.py", "start": 19, "end": 22, "must": "s8: float = 1.61679827"}},
+    {"name": "ZBL 初值", "value": "d = 0.8854 a₀, p = 0.23, c = (0.1818, 0.5099, 0.2802, 0.02817), a = (3.2, 0.9423, 0.4028, 0.2016)", "note": "以标准 ZBL 参数初始化，经 softplus 后可学习", "code": {"repo": "SpookyNet", "file": "spookynet/modules/zbl_repulsion_energy.py", "start": 45, "end": 54, "must": "softplus_inverse(1 / (0.8854 * self.a0))"}},
+    {"name": "activation", "value": "swish α·x·σ(βx)，初值 α = 1.0、β = 1.702（逐特征可学习）", "note": "β = 1.702 使初始形状近似 GELU", "code": {"repo": "SpookyNet", "file": "spookynet/modules/swish.py", "start": 26, "end": 28, "must": "initial_beta: float = 1.702"}},
+    {"name": "module_keep_prob", "value": "1.0（代码默认）；仓库 parameters.pth 中为 0.9", "note": "训练时的 module dropout 保留概率", "code": {"repo": "SpookyNet", "file": "spookynet/spookynet.py", "start": 142, "end": 142, "must": "module_keep_prob=1.0"}}
+  ],
+  "speedNotes": [
+    "神经网络部分没有 CG 张量积：每条边只累加 1+3+5=9 组 64 维特征，p/d 收缩是逐通道乘加；但每个模块含十余个残差 MLP（pre/post、x/s/p/d、q/k/v、output），节点端 MLP 计算占比不小。",
+    "非局域交互用 FAVOR+（m=64 个随机特征）把注意力从 O(N²) 降到 O(N)；但批量训练多个分子时用 one-hot 掩码构造 N×N 矩阵，显存随批内总原子数平方增长。",
+    "静电与 D4 默认无截断：非周期体系的 ASE 计算器直接构建 N(N−1) 全对邻居表，大分子时成为瓶颈；D4 每对还要对 refc6[Z_i, Z_j, ref, ref′] 参考张量求和。设置 lr_cutoff 可改为截断邻居表。",
+    "力只需一次反传；Hessian 用 3N 次反传逐行求得，只适合小分子。",
+    "推理时 eval() 关闭参数梯度并缓存元素嵌入；计算器默认 float32、可用 GPU，skin=0.3 Å 复用邻居表；代码兼容 TorchScript。"
+  ],
+  "weakNotes": [
+    "神经网络截断只有 5.29 Å（10 a₀），但这不是长程能力的上限：静电与 D4 默认对所有原子对求和，FAVOR+ 注意力与 Q/S 嵌入让每个原子“看见”整个分子。",
+    "D4 色散内置于能量（s6=1 固定保证 r⁻⁶ 渐近正确），且 C6 随预测电荷变化——分子间作用、物理吸附、分子团簇的色散尾巴有物理保证。",
+    "总电荷 Q 与自旋 S 是输入：同一几何可给出中性/离子、单重/三重态等不同势能面；电荷守恒由均匀修正保证 Σq_i = Q。但没有显式电荷平衡（QEq）求解，远距离电荷转移只能靠“均匀分摊 + 全局注意力”近似。",
+    "周期体系要小心：lr_cutoff=None 时周期邻居表只到 r_c + 2·skin，静电/D4 会在该处被硬截断；应设置 lr_cutoff（平移力形式平滑归零）或手动开启 Ewald（需调用 set_kmax/set_alpha，且倒空间只取晶胞对角元，仅支持正交晶胞）。",
+    "仓库未说明自带 parameters.pth 的训练数据与参考泛函，使用前需自行确认适用范围或重新训练。"
+  ],
+  "downstreamNotes": [
+    "保守力 + C^∞ 截断与开关函数，能量任意阶光滑；官方 Hessian 与偶极输出可直接用于振动频率和 IR 光谱。",
+    "可区分电子态：同一构型比较单/三重态、阳/阴离子能量，可用于自旋态能隙、电离能/电子亲和能和带电体系的反应路径。",
+    "可学习 ZBL 近核排斥（r→0 回到裸核库仑）防止原子塌缩，高温/反应 MD 更稳定。",
+    "没有应力输出，不能直接做 NPT、状态方程或弹性常数；定位主要是分子与团簇体系。",
+    "SpookyNetEnsemble 给出能量、力、电荷、偶极、Hessian 的标准差，可用于主动学习的不确定度估计。"
+  ],
+  "strengths": ["总电荷与自旋作为输入，一个模型描述多个电子态", "物理项齐全：ZBL 排斥 + 守恒电荷静电 + 电荷依赖 D4", "FAVOR+ 线性注意力提供全局信息，复杂度 O(N)", "C^∞ 平滑、保守力，官方 Hessian/偶极/电荷输出"],
+  "weaknesses": ["无应力、无 LAMMPS/多 GPU 接口，难用于大规模周期材料", "全局注意力与默认全对静电/D4 破坏局域性，无法区域分解", "Ewald 需手动开启且仅支持正交晶胞", "只附带一个示例权重，没有大规模预训练基础模型"],
+  "pretrained": ["parameters.pth（仓库自带示例权重，架构超参与代码默认一致；训练数据未注明）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

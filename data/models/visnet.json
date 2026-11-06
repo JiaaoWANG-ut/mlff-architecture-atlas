@@ -1,0 +1,214 @@
+{
+  "id": "visnet",
+  "name": "ViSNet",
+  "fullName": "ViSNet: Vector-Scalar interactive graph neural Network（AI²BMD 的机器学习势）",
+  "year": 2024,
+  "authors": "Y. Wang, T. Wang, S. Li, X. He, M. Li, Z. Wang, N. Zheng, B. Shao, T.-Y. Liu",
+  "paper": {"title": "Enhancing geometric representations for molecules with equivariant vector-scalar interactive message passing", "venue": "Nature Communications 15, 313 (2024)；应用：AI²BMD, Nature 2024", "url": "https://www.nature.com/articles/s41467-023-43720-2"},
+  "repos": ["AI2BMD"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔等变 l≤2", "运行时几何计算 RGC", "键角 + 二面角", "AI²BMD 蛋白分片", "AMOEBA 极化溶剂 QM/MM", "保守力"],
+  "framework": "PyTorch + PyTorch Geometric（torch_cluster / torch_scatter），TorchScript 推理；AI²BMD 另用 ASE、OpenMM（取 MM 参数）、Tinker（AMOEBA）",
+  "license": "MIT",
+  "oneLiner": "ViSNet 给每个原子同时维护标量特征和 l≤2 的向量特征，并让二者在每层互相调制（ViS-MP）；它的 RGC 技巧把键角、二面角信息变成向量特征之间的简单内积，以线性代价用上三体、四体几何。AI²BMD 把蛋白切成二肽片段逐个交给 ViSNet，再用经典 MM 补片段间作用、用 AMOEBA 极化力场描述溶剂。",
+  "analogy": "想知道一个原子周围所有“三人夹角”，笨办法是把每三个人挨个量一遍；ViSNet 的办法是让中心原子先把指向所有邻居的方向“加成一支总箭头”，再让这支箭头和自己点积——所有两两夹角的余弦一次就被加总出来。AI²BMD 则像把一条长项链拆成一小段一小段（二肽）分别精细称重，扣掉重叠部分，段与段之间的远程吸引用经典公式补上，项链周围的水交给更便宜的极化力场。",
+  "arch": {
+    "geometry": "边向量 → 距离（ExpNorm 径向基 × 余弦截断）+ 方向（l=1,2 笛卡尔多项式实球谐，共 8 分量）；键角/二面角由 RGC 从向量特征内积运行时得到",
+    "equivariance": "E(3)：标量特征不变，8 分量向量特征按 l=1、l=2 规则随旋转变换；能量不变、力等变",
+    "lmax": "l ≤ 2（lmax=2 默认，可选 1）；向量特征形状 [N, 8, C]",
+    "bodyOrder": "每层：⟨v⃗_i, v⃗_i⟩ 注入键角（3 体），边更新中拒斥向量内积注入二面角（4 体）；多层叠加更高",
+    "layers": "9（num_layers 默认；最后一层不更新边特征）",
+    "cutoff": "5.0 Å（ViSNetBlock 默认），余弦截断；radius_graph 每原子最多 32 个邻居",
+    "receptiveField": "理论上 L × r_c（默认 9 × 5 Å）；AI²BMD 分片模式下 ML 部分被限制在单个二肽片段内",
+    "message": "类注意力：α_ij = SiLU(Σ q_i⊙k_j⊙dk_ij)·f_cut(r_ij)；标量消息 α_ij·v_j⊙dv_ij；向量消息 s¹⊙v⃗_j + s²·Y(r̂_ij)",
+    "readout": "LayerNorm / VecLayerNorm → 2 个 PaiNN 式门控等变块（C → C/2 → 1）→ 原子能 × std（+ Atomref）→ 求和 + mean",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂pos（derivative=True，torch.autograd.grad）；AI²BMD 组装时丢弃加帽氢上的力，片段力按原子索引累加",
+    "stress": "不支持：radius_graph 无晶胞/周期边界，代码无维里或应力输出",
+    "longRange": "ViSNet 本身无；AI²BMD 用 amber14 固定电荷 Coulomb + LJ（全原子对、无截断，或 PME）补片段间作用，溶剂用 Tinker AMOEBA-BIO-2018（Ewald、互极化）",
+    "dispersion": "模型内无显式色散项；片段间由 LJ 12-6 描述，蛋白–溶剂由 AMOEBA vdW（12 Å 截断）描述",
+    "chargeSpin": "无：输入只有 z、pos、batch",
+    "otherOutputs": "无（本仓库只有能量 + 力，输出头为 EquivariantScalar）",
+    "strictlyLocal": false,
+    "complexity": "≈ O(L·E·C²·(lmax+1)²)（边上 dk/dv/s_proj 与 8 分量向量的 w_src/w_trg 投影）+ O(L·N·C²)；RGC 免去 O(N·M²)/O(N·M³) 的三元组/四元组枚举",
+    "accel": "TorchScript（torch.jit.script）；AI²BMD 按设备策略把片段分配到多 GPU、子进程异步推理；溶剂由 Tinker-GPU 计算；仓库中无 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "没有 CG 张量积，单层计算与 PaiNN/TorchMD-ET 同类；但默认 9 层 × 256 通道 × 8 个向量分量，且每条边上有多组 C×C 线性层，整体属中等速度。"},
+    "expressiveness": {"v": 4, "why": "l≤2 等变向量特征 + RGC 显式注入键角（3 体）与二面角（4 体）信息，表达力强；但不是 ACE/MACE 那样的完备高体序基。"},
+    "longRange": {"v": 3, "why": "ViSNet 本身只有消息传递感受野；AI²BMD 用固定电荷 Coulomb + LJ 补片段间作用、AMOEBA 极化力场描述溶剂，但都是经典 MM、非学习的。"},
+    "scalability": {"v": 2, "why": "模型本身无 PBC、无空间分解或 LAMMPS 接口；AI²BMD 靠二肽分片在多 GPU 上并行推理来覆盖整蛋白，但片段间 MM 非键默认是全原子对计算。"},
+    "physics": {"v": 3, "why": "原子能求和 + autograd 保守力、余弦截断；但无 ZBL 近程排斥，邻居数上限 32，且向量消息的门 s_proj 带偏置，邻居越过 r_c 时向量消息不严格趋零。"},
+    "coverage": {"v": 1, "why": "本仓库只输出能量与力，没有应力、偶极、电荷等官方输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：蛋白 → 二肽片段 + ACE-NME 重叠片段（AI²BMD 分片）",
+      "plain": "AI²BMD 默认不把整条蛋白直接喂给 ViSNet，而是按残基切块：含 ACE/NME 封端在内共 N 个残基的链被切成 N−2 个二肽（每个氨基酸带上前后两个“帽”）和 N−3 个 ACE-NME 重叠片段。切断处补氢：沿原化学键方向、按固定键长放置，再用一个小型 MM 势（键、角、二面角、vdW、静电项）优化加帽氢的位置。每个片段最后以 (z, pos, batch) 的形式交给 ViSNet，因此网络只需学会“二肽大小”的化学环境。",
+      "math": "\\text{protein}\\to\\{D_k\\}_{k=1}^{N_{\\text{res}}-2}\\cup\\{C_k\\}_{k=1}^{N_{\\text{res}}-3},\\qquad \\mathbf r_{\\text{H}}=\\mathbf r_{A}+b_{\\text{H}}\\,\\frac{\\mathbf r_{X}-\\mathbf r_{A}}{\\lVert\\mathbf r_{X}-\\mathbf r_{A}\\rVert}",
+      "code": [
+        {"file": "src/Fragmentation/basefrag.py", "start": 64, "end": 74, "must": "num_dipeptides = num_residue - 2", "caption": "get_fragments_index：N 个残基 → N−2 个二肽、N−3 个 ACE-NME"},
+        {"file": "src/Fragmentation/distancefrag.py", "start": 43, "end": 52, "must": "direction * prot.all_hydrogen_radii", "caption": "加帽氢：沿原键方向按固定半径放置"},
+        {"file": "src/Calculators/visnet_calculator.py", "start": 47, "end": 58, "must": "e, f = self.model(self.collate(frag_data))", "caption": "片段打包成 z/pos/batch 送入 ViSNet，返回能量与力"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：radius_graph（5 Å、含自环、最多 32 个邻居）",
+      "plain": "在每个片段（visnet 模式下则是整个分子）内，用 torch_cluster 的 radius_graph 找出距离小于 r_c 的原子对，并保留自环；每个原子最多保留 32 个邻居。自环的长度被置零，之后不参与方向编码。这里没有晶胞和周期镜像——ViSNet 在本仓库中只处理孤立分子/片段，这也是它不输出应力的原因。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\lVert\\mathbf r_j-\\mathbf r_i\\rVert<r_c\\,\\}\\cup\\{i\\},\\qquad |\\mathcal N(i)|\\le 32",
+      "code": [
+        {"file": "src/ViSNet/model/utils.py", "start": 259, "end": 276, "must": "edge_index = radius_graph(", "caption": "Distance.forward：半径图 + 边向量 + 边长（自环长度为 0）"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：指数-高斯径向基 × 余弦截断；方向 → l≤2 笛卡尔球谐",
+      "plain": "距离先变换为 e^{−αr}（α=5/r_c），再在其上铺 32 个高斯（ExpNorm 径向基），并整体乘以余弦截断函数，使贡献在 r→r_c 时平滑降为零。单位方向向量被展开成 l=1（x,y,z）和 l=2（5 个二次多项式）共 8 个分量的实球谐——直接用笛卡尔多项式写出，无需 e3nn 或 Clebsch–Gordan 系数。这 8 个数在旋转下按已知规则变换，是向量特征等变性的来源。",
+      "math": "e_k(r)=f_{\\text{cut}}(r)\\,\\exp\\!\\big[-\\beta_k\\,(e^{-\\alpha r}-\\mu_k)^2\\big],\\ \\alpha=\\tfrac{5}{r_c},\\quad f_{\\text{cut}}(r)=\\tfrac12\\big[\\cos(\\pi r/r_c)+1\\big]\\,\\Theta(r_c-r)\\qquad \\mathbf Y(\\hat{\\mathbf r})=\\big(x,\\,y,\\,z,\\,\\sqrt3xz,\\,\\sqrt3xy,\\,y^2-\\tfrac{x^2+z^2}{2},\\,\\sqrt3yz,\\,\\tfrac{\\sqrt3}{2}(z^2-x^2)\\big)",
+      "code": [
+        {"file": "src/ViSNet/model/utils.py", "start": 16, "end": 19, "must": "torch.cos(distances * math.pi / self.cutoff)", "caption": "CosineCutoff 余弦截断"},
+        {"file": "src/ViSNet/model/utils.py", "start": 53, "end": 57, "must": "torch.exp(self.alpha * (-dist))", "caption": "ExpNormalSmearing：指数-高斯径向基 × 截断"},
+        {"file": "src/ViSNet/model/utils.py", "start": 131, "end": 145, "must": "sh_2_2 = y2 - 0.5 * x2z2", "caption": "Sphere：l=1、2 实球谐的笛卡尔多项式（8 分量）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：元素 + 邻居元素 → 标量 h_i；边特征 f_ij；向量特征置零",
+      "plain": "每个原子先查表得到元素嵌入（默认 256 维）；再把邻居的另一套元素嵌入按“径向基→线性层×截断”加权求和，与自身拼接后线性混合（NeighborEmbedding），相当于先做一次只看距离的消息传递。每条边还有自己的标量特征 f_ij = (h_i+h_j)⊙W·e(r_ij)，后面用来调制注意力、承载二面角信息。向量特征 v⃗_i（8×C）初始为零，方向信息由第一层消息注入。",
+      "math": "h_i^{(0)}=W_c\\Big[E(Z_i)\\,\\Big\\Vert\\,\\sum_{j\\ne i}E'(Z_j)\\odot W_d\\,\\mathbf e(r_{ij})\\,f_{\\text{cut}}(r_{ij})\\Big],\\qquad f_{ij}^{(0)}=(h_i+h_j)\\odot W_e\\,\\mathbf e(r_{ij}),\\qquad \\vec v_i^{(0)}=\\mathbf 0\\in\\mathbb R^{8\\times C}",
+      "code": [
+        {"file": "src/ViSNet/model/utils.py", "start": 304, "end": 313, "must": "x_neighbors = self.combine(torch.cat([x, x_neighbors], dim=1))", "caption": "NeighborEmbedding：截断加权的邻居元素嵌入"},
+        {"file": "src/ViSNet/model/utils.py", "start": 336, "end": 337, "must": "(x_i + x_j) * self.edge_proj(edge_attr)", "caption": "EdgeEmbedding：边标量特征"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 118, "end": 122, "must": "vec = torch.zeros(", "caption": "向量特征初始化为 0，形状 [N, (lmax+1)²−1, C]"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "ViS-MP ①：类注意力的标量消息 + 向量消息",
+      "plain": "每层先对 h 做 LayerNorm，生成多头（默认 8 头）的 q、k、v；边特征 f_ij 生成 dk、dv。注意力权重 α_ij = SiLU(q_i·k_j·dk_ij) 再乘余弦截断，远处邻居的标量消息平滑消失。标量消息是 α_ij·v_j⊙dv_ij；向量消息则用由标量消息算出的门 s¹、s² 去缩放邻居向量 v⃗_j，再加上沿键方向的 Y(r̂_ij)——标量决定向量怎么长，这是“向量-标量交互”的一半。",
+      "math": "\\alpha_{ij}=\\mathrm{SiLU}\\Big(\\sum_{c\\in\\text{head}}q_{i}\\,k_{j}\\,dk_{ij}\\Big)f_{\\text{cut}}(r_{ij}),\\quad m_{ij}=\\alpha_{ij}\\,v_j\\odot dv_{ij},\\quad [s^{1}_{ij},s^{2}_{ij}]=\\mathrm{SiLU}(W_s m_{ij}+b_s)\\qquad \\vec m_{ij}=s^{1}_{ij}\\odot\\vec v_j+s^{2}_{ij}\\,\\mathbf Y(\\hat{\\mathbf r}_{ij}),\\quad dk_{ij}=\\mathrm{SiLU}(W_{dk}f_{ij}),\\ dv_{ij}=\\mathrm{SiLU}(W_{dv}f_{ij})",
+      "code": [
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 241, "end": 245, "must": "dk = self.act(self.dk_proj(f_ij))", "caption": "节点 q/k/v 与边 dk/dv"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 276, "end": 288, "must": "vec_j = vec_j * s1.unsqueeze(1) + s2.unsqueeze(1) * d_ij.unsqueeze(2)", "caption": "message：注意力 × 截断；向量消息 = 门控邻居向量 + 门控球谐方向"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 297, "end": 307, "must": "vec = scatter(vec, index, dim=self.node_dim, dim_size=dim_size)", "caption": "aggregate：标量、向量消息分别求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "ViS-MP ②：RGC 键角——向量特征的自内积",
+      "plain": "RGC（runtime geometry calculation，运行时几何计算）的第一招：v⃗_i 本身就是“各邻居方向的加权和”，把它经两种线性投影后做内积，展开正好是所有邻居对 (j,k) 的方向内积之和，而这 8 分量球谐的内积恰为 cosθ_jik + P₂(cosθ_jik)。于是只用 O(N) 次内积就拿到了键角（三体）信息，不必像 DimeNet 那样枚举 O(N·M²) 个三元组。这个角度标量被聚合消息算出的 o² 门控后加到 h_i 上（向量→标量），o¹ 则缩放 v⃗_i 的第三个投影，再加上向量消息。",
+      "math": "\\vec v_i=\\sum_{j}w_{ij}\\,\\mathbf Y(\\hat{\\mathbf r}_{ij})\\ \\Rightarrow\\ \\langle\\vec v_i,\\vec v_i\\rangle=\\sum_{j,k\\in\\mathcal N(i)}w_{ij}w_{ik}\\big[\\cos\\theta_{jik}+P_2(\\cos\\theta_{jik})\\big]\\qquad [o^1_i,o^2_i,o^3_i]=W_o\\sum_j m_{ij},\\quad \\Delta h_i=\\langle U_1\\vec v_i,U_2\\vec v_i\\rangle\\odot o^2_i+o^3_i,\\quad \\Delta\\vec v_i=o^1_i\\odot U_3\\vec v_i+\\sum_j\\vec m_{ij}",
+      "code": [
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 247, "end": 250, "must": "vec_dot = (vec1 * vec2).sum(dim=1)", "caption": "RGC：向量投影的逐通道内积 → 键角信息"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 271, "end": 274, "must": "dx = vec_dot * o2 + o3", "caption": "标量/向量的更新量"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 125, "end": 137, "must": "vec = vec + dvec", "caption": "逐层残差叠加（最后一层不更新边特征）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "ViS-MP ③：RGC 二面角——键两端“拒斥向量”的内积",
+      "plain": "第二招针对二面角：对键 i–j，把 i 端的向量特征（投影后）减去沿 Y(r̂_ij) 的分量（vector rejection），剩下的是 i 的其他邻居在“垂直于键”方向上的投影；j 端同样处理（方向取反）。两者内积编码了以 i–j 为轴的二面角信息（四体）。它经门控后加到边特征 f_ij 上，下一层再通过 dk/dv 影响注意力与消息。每条边只做一次内积，代价 O(E)，不必枚举四元组。",
+      "math": "\\mathbf w_{ij}=\\mathrm{Rej}_{\\mathbf Y_{ij}}(W_{t}\\vec v_i),\\quad \\mathbf w_{ji}=\\mathrm{Rej}_{-\\mathbf Y_{ij}}(W_{s}\\vec v_j),\\quad \\mathrm{Rej}_{\\mathbf d}(\\vec u)=\\vec u-\\langle\\vec u,\\mathbf d\\rangle\\,\\mathbf d\\qquad \\Delta f_{ij}=\\mathrm{SiLU}(W_f f_{ij})\\odot\\langle\\mathbf w_{ij},\\mathbf w_{ji}\\rangle",
+      "code": [
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 206, "end": 209, "must": "return vec - vec_proj * d_ij.unsqueeze(2)", "caption": "vector_rejection：去掉沿键方向的分量"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 290, "end": 295, "must": "w_dot = (w1 * w2).sum(dim=1)", "caption": "edge_update：两端拒斥向量内积 → 边特征增量"},
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 266, "end": 269, "must": "df_ij = self.edge_updater(", "caption": "forward 中调用边更新（最后一层结果被丢弃）"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：两个门控等变块把向量信息折回原子能",
+      "plain": "最后对 h 做 LayerNorm、对 v⃗ 做 VecLayerNorm（默认类型 none，即不归一化），再经过两个 PaiNN 式门控等变块：把向量投影后取范数（旋转不变）与标量拼接，经 MLP 得到新标量和“门”，门再去缩放向量。第一块把通道数从 C 减半，第二块输出 1 个标量，即原子能 ε_i。这样最后一层的向量特征也能影响能量。",
+      "math": "[\\,h'_i,\\ g_i\\,]=\\mathrm{MLP}\\big(h_i\\,\\Vert\\,\\lVert W_1\\vec v_i\\rVert\\big),\\quad \\vec v'_i=g_i\\odot W_2\\vec v_i\\qquad \\varepsilon_i=\\mathcal G_2\\big(\\mathcal G_1(h_i,\\vec v_i)\\big)_{\\text{scalar}}",
+      "code": [
+        {"file": "src/ViSNet/model/visnet_block.py", "start": 139, "end": 142, "must": "vec = self.vec_out_norm(vec)", "caption": "输出前归一化"},
+        {"file": "src/ViSNet/model/output_modules.py", "start": 52, "end": 62, "must": "vec1 = torch.norm(self.vec1_proj(v), dim=-2)", "caption": "GatedEquivariantBlock"},
+        {"file": "src/ViSNet/model/output_modules.py", "start": 113, "end": 128, "must": "scalar_activation=True,", "caption": "EquivariantScalar：C → C/2 → 1"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "能量：原子能 × std（+ Atomref）求和 + mean",
+      "plain": "原子能先乘以训练集统计得到的 std；若 ckpt 启用 Atomref 先验，再加上逐元素参考能；然后按分子（batch）求和，最后加一个整体常数 mean（每个分子加一次）。能量写成原子贡献之和，保证了对体系大小的可加性。",
+      "math": "E=\\mu+\\sum_{i}\\big[\\sigma\\,\\varepsilon_i+E_{\\text{ref}}(Z_i)\\big]",
+      "code": [
+        {"file": "src/ViSNet/model/visnet.py", "start": 139, "end": 149, "must": "out = scatter(x, data['batch'], dim=0, reduce=self.reduce_op)", "caption": "ViSNet.forward：缩放、先验、求和、平移"},
+        {"file": "src/ViSNet/model/priors.py", "start": 86, "end": 87, "must": "return x + self.atomref(z)", "caption": "Atomref 先验：逐元素参考能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "derivative=True 时，前向开始先把 pos 设为可求导，结束后对能量调用 torch.autograd.grad 得到 −∂E/∂r。因此 ViSNet 的力是保守的，与能量严格一致。create_graph=False 表明推理时不保留二阶图，仓库不直接提供 Hessian。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"file": "src/ViSNet/model/visnet.py", "start": 135, "end": 137, "must": "data['pos'].requires_grad_(True)", "caption": "坐标设为可求导"},
+        {"file": "src/ViSNet/model/visnet.py", "start": 151, "end": 165, "must": "return out, -dy", "caption": "autograd 求力"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "AI²BMD 组装：Σ 二肽 − Σ ACE-NME",
+      "plain": "所有片段按设备策略分配到多块 GPU 并行推理。蛋白的近程/成键部分能量 = 全部二肽能量之和减去全部 ACE-NME 重叠片段能量之和（扣掉被相邻二肽重复计算的肽键区域）。力同样“加二肽、减 ACE-NME”，用 select_index 去掉人为加帽氢上的力，再按原子编号累加回蛋白。注意：加帽氢的力被直接丢弃而非链式传回母体原子，所以组装后的力只近似等于组装能量的负梯度。",
+      "math": "E_{\\text{DL}}=\\sum_{k}E_{\\text{ViSNet}}(D_k)-\\sum_{k}E_{\\text{ViSNet}}(C_k),\\qquad \\mathbf F_i^{\\text{DL}}=\\sum_{k:\\,i\\in D_k}\\mathbf F_i^{(D_k)}-\\sum_{k:\\,i\\in C_k}\\mathbf F_i^{(C_k)}",
+      "code": [
+        {"file": "src/Calculators/bonded.py", "start": 64, "end": 77, "must": "partitions[idx].append(fragments[start:end])", "caption": "片段按设备分区，多 GPU 线程并行推理"},
+        {"file": "src/Calculators/combiner.py", "start": 11, "end": 21, "must": "torch.sum(dipeptides_energies) - torch.sum(acenmes_energies)", "caption": "能量：二肽和 − ACE-NME 和"},
+        {"file": "src/Calculators/combiner.py", "start": 37, "end": 39, "must": "torch.cat([dipeptides_forces, -acenmes_forces])[select_index]", "caption": "力：ACE-NME 取反、丢掉加帽氢、按原子累加"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程与溶剂：片段间 MM 非键 + AMOEBA 极化溶剂（减法 QM/MM）",
+      "plain": "不在同一个二肽内的原子对由 MM 非键项补上：默认 'mm' 模式用 OpenMM 从 amber14 力场取出的固定电荷与 LJ 参数，对所有这样的原子对（无截断）计算 Coulomb + 12-6 LJ；也可选 'pme'。默认带溶剂时，整个体系再用 Tinker 的 AMOEBA-BIO-2018 极化多极力场计算（12 Å 截断、Ewald、互极化），按减法 QM/MM 组合：全体系 MM 能量 + 蛋白 ML 能量 − 蛋白单独的 MM 能量。于是蛋白–水的静电与极化由 AMOEBA 给出，而不是由 DFT 训练的 ViSNet 给出。",
+      "math": "E_{\\text{prot}}=E_{\\text{DL}}+\\tfrac12\\sum_{(i,j)\\notin\\text{same }D_k}\\Big[4\\epsilon_{ij}\\Big(\\tfrac{\\sigma_{ij}^{12}}{r_{ij}^{12}}-\\tfrac{\\sigma_{ij}^{6}}{r_{ij}^{6}}\\Big)+\\tfrac{k_e\\,q_iq_j}{r_{ij}}\\Big]\\qquad E_{\\text{tot}}=E_{\\text{AMOEBA}}(\\text{all})+E_{\\text{prot}}-E_{\\text{AMOEBA}}(\\text{prot})",
+      "code": [
+        {"file": "src/Calculators/nonbonded.py", "start": 45, "end": 61, "must": "energy_lj = 4 * epsij * (c12 - c6)", "caption": "MMNonBondedCalculator：片段间 LJ + Coulomb（amber14 参数）"},
+        {"file": "src/Calculators/qmmm.py", "start": 67, "end": 79, "must": "energy = mm2_e + qm_e - mm1_e", "caption": "AsyncQMMM：减法 QM/MM（mm2 = 全体系，mm1 = 仅蛋白）"},
+        {"file": "src/Calculators/tinker_async.py", "start": 127, "end": 145, "must": "polarization mutual", "caption": "Tinker key：AMOEBA-BIO-2018、12 Å 截断、Ewald、互极化"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "lmax", "value": "2（可选 1）", "note": "向量特征含 l=1、2 共 8 分量。本表 ViSNet 超参均为 ViSNetBlock 构造默认值；发布 ckpt 的实际超参由 load_model 从 ckpt['hyper_parameters'] 读取，仓库文本未列出", "code": {"file": "src/ViSNet/model/visnet_block.py", "start": 22, "end": 38, "must": "lmax: int=2,"}},
+    {"name": "num_layers", "value": "9", "note": "ViS-MP 层数（最后一层不更新边特征）"},
+    {"name": "hidden_channels", "value": "256", "note": "标量/向量通道数 C"},
+    {"name": "num_heads", "value": "8", "note": "注意力头数（head_dim = C/8）"},
+    {"name": "num_rbf / rbf_type", "value": "32 / expnorm（trainable_rbf=False）", "note": "指数-高斯径向基"},
+    {"name": "cutoff", "value": "5.0 Å", "note": "余弦截断半径"},
+    {"name": "max_num_neighbors", "value": "32", "note": "radius_graph 每原子邻居上限（loop=True 含自环）"},
+    {"name": "activation / attn_activation", "value": "silu / silu", "note": "MLP 与注意力激活函数"},
+    {"name": "vecnorm_type", "value": "none", "note": "向量 LayerNorm 类型（可选 rms / max_min）"},
+    {"name": "--ckpt-type", "value": "2ef43f29ec78fa5fef0b3de832bfada9（另可选 de11d1421ccda37ffab07d7403c8f5bb）", "note": "AI²BMD 默认 ViSNet 权重，以文件 md5 命名", "code": {"file": "src/AIMD/arguments.py", "start": 47, "end": 56, "must": "default=\"2ef43f29ec78fa5fef0b3de832bfada9\""}},
+    {"name": "--mode / --fragment-longrange-calc", "value": "fragment / mm", "note": "默认分片模式；片段间长程用 MM 全对计算（可选 pme）", "code": {"file": "src/AIMD/arguments.py", "start": 125, "end": 141, "must": "default=\"fragment\""}},
+    {"name": "AMOEBA 溶剂（Tinker key）", "value": "cutoff 12、vdw-cutoff 12、ewald-cutoff 7.0、polarization mutual、polar-eps 0.01", "note": "AMOEBA-BIO-2018 参数文件 amoebabio18.prm", "code": {"file": "src/Calculators/tinker_async.py", "start": 127, "end": 145, "must": "ewald-cutoff 7.0"}}
+  ],
+  "speedNotes": [
+    "主要开销在边上：每层对每条边做 dk/dv（C×C）、s_proj（C×2C）线性层，边更新还要对 8 分量向量做 w_src/w_trg 投影，近似 ∝ E·8·C²；没有 CG 张量积，常数比球谐张量积类模型小。",
+    "RGC 的价值在复杂度：键角信息来自节点上的 ⟨U₁v⃗_i, U₂v⃗_i⟩（O(N)），二面角来自每条边一次内积（O(E)），避免了 DimeNet/GemNet 式 O(N·M²)、O(N·M³) 的三元组/四元组枚举。",
+    "推理用 torch.jit.script 编译；AI²BMD 用 DeviceStrategy 把所有片段分批分配到多块 GPU（子进程异步服务），--chunk-size 控制每批原子数以节省显存。",
+    "分片后每次 ViSNet 调用只处理一个小片段，ML 部分代价 ∝ 残基数；但 'mm' 模式的片段间非键项对所有跨片段原子对计算，是 O(N²)；溶剂部分交给 Tinker-GPU 的 AMOEBA（Ewald）。",
+    "力需要对能量再做一次反传（create_graph=False，不保留二阶图）。"
+  ],
+  "weakNotes": [
+    "ViSNet 截断 5 Å（默认），9 层后理论感受野较大；但在 AI²BMD 默认的 fragment 模式下每次只看一个二肽，非相邻残基之间的相互作用全部来自 MM。",
+    "片段间非键 = amber14 固定电荷 Coulomb + LJ 12-6（OpenMM 生成参数，NoCutoff 全对计算），没有极化与电荷转移；可选 PME。",
+    "溶剂用 Tinker AMOEBA-BIO-2018 极化多极力场（Ewald、互极化 polar-eps 0.01、vdW 截断 12 Å），按减法 QM/MM 与蛋白 ML 能量组合，因此蛋白–水的极化与氢键由 AMOEBA 而非 DFT 描述。",
+    "训练数据：README 称 Protein Unit Dataset 约 2000 万个二肽构象（DFT 级别，README 未写明泛函）；AIMD-Chig 数据集为 M06-2X/6-31G*。模型无总电荷/自旋输入，质子化态固定。",
+    "README 自述局限：训练集中质子迁移（proton hopping）样本很少，易因分布外构型导致模拟崩溃；暂不能很好处理二硫键；仅支持单链、标准氨基酸、ACE/NME 中性封端。"
+  ],
+  "downstreamNotes": [
+    "主要用途是蛋白质显式溶剂 MD（默认 300 K、1 fs 步长，输出 ASE .traj 轨迹）；README 也建议用 AI²BMD 对已有轨迹做重加权来计算性质。",
+    "visnet 模式：自行训练 ViSNet 后可不分片、直接对整个分子做 MD，用于蛋白以外的分子（训练代码在 ViSNet 分支，本克隆未包含）。",
+    "ViSNet 的力保守，适合 MD 与几何优化；但仓库不提供 Hessian、应力，且无 PBC，声子、弹性常数、晶体材料等场景不适用。",
+    "分片模式丢弃加帽氢上的力而未链式回传，组装力与组装能量梯度只近似一致，长时间 NVE 能量守恒需留意。",
+    "没有偶极/极化率输出，红外/拉曼光谱需另建模型。"
+  ],
+  "strengths": ["RGC 以线性代价利用键角与二面角信息", "无 CG 张量积，实现简单、可 TorchScript 编译", "AI²BMD 分片让整蛋白 MD 获得接近 DFT 的局部精度", "与 AMOEBA 极化溶剂结合，溶剂化与长程静电有物理模型兜底", "保守力，适合长时间 MD"],
+  "weaknesses": ["分片模式下片段间作用退化为固定电荷 MM", "无 PBC 与应力，不适合周期材料", "无电荷/自旋输入，质子转移等分布外构型易崩溃", "默认 9 层 × 256 通道，边上线性层较重", "截断处平滑性不严格（向量消息的门带偏置）"],
+  "pretrained": ["visnet-uni-2ef43f29ec78fa5fef0b3de832bfada9.ckpt（AI²BMD 默认，用于二肽片段推理）", "visnet-uni-de11d1421ccda37ffab07d7403c8f5bb.ckpt（备选 ckpt）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

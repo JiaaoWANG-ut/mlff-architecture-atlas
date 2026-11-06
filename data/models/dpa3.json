@@ -1,0 +1,206 @@
+{
+  "id": "dpa3",
+  "name": "DPA-3",
+  "fullName": "DPA-3: A Graph Neural Network for the Era of Large Atomistic Models（DeePMD-kit dpa3 描述符，RepFlow / 线图序列消息传递）",
+  "year": 2025,
+  "authors": "D. Zhang, A. Peng, C. Cai, …, L. Zhang, H. Wang",
+  "paper": {"title": "A Graph Neural Network for the Era of Large Atomistic Models", "venue": "npj Comput. Mater. 2026（arXiv:2506.01686, 2025）", "url": "https://arxiv.org/abs/2506.01686"},
+  "repos": ["deepmd-kit"],
+  "family": "invariant-mpnn",
+  "tags": ["线图序列 LiGS", "节点-边-角三重表示", "不变 MPNN（DeePMD 谱系）", "大原子模型 LAM / OpenLAM", "保守力 + LAMMPS 多 GPU"],
+  "framework": "PyTorch（DeePMD-kit；另有 TensorFlow / JAX / Paddle / NumPy-dpmodel 后端）",
+  "license": "LGPL-3.0-or-later",
+  "oneLiner": "在“原子图”和它的线图“键图”上同时做消息传递：每层一起更新原子（节点）、键（边）、键角（角）三种旋转不变特征——角的信息先修正边，边的信息再汇聚到原子；最后由原子特征经拟合网络给出原子能，力和维里靠自动微分得到。",
+  "analogy": "像一个班同时开三种会：“个人会”（每个原子）、“同桌会”（每一对相邻原子=一根键）、“三人小组会”（共用一个原子的两根键夹成的角）。小组会先把“角度怎么样”告诉同桌会，同桌会再把结论汇报给个人；会开十几轮后，每个原子都对周围的几何形状了如指掌。",
+  "arch": {
+    "geometry": "距离 r_ij（1/r·s(r) 或直接 r 初始化边）、键角 cosθ_jik（仅角截断内）、h_ij = s(r)·r_ij/r² 方向向量（经 GᵀG 对称化收缩成不变量）",
+    "equivariance": "E(3) 不变：输出只依赖距离与夹角；方向信息仅在节点对称化 GᵀG 中出现并被收缩为标量",
+    "lmax": "无球谐；角度以 cosθ/√π 直接输入角嵌入，角分辨率由 MLP 隐式学习；对称化只用一阶向量 h_ij",
+    "bodyOrder": "每层显式 3 体（j–i–k 键角）；多层边↔角↔节点反复传递后有效体序随层数增长",
+    "layers": "nlayers 代码默认 6；发布模型 6–24 层（DPA-3.1-3M 为 16 层，DPA-3.1-MPtrj 为 24 层）",
+    "cutoff": "边 e_rcut = 6.0 Å（5.0 Å 起平滑）；角 a_rcut = 4.0 Å（3.5 Å 起平滑）",
+    "receptiveField": "约 L × e_rcut（如 16 层 × 6 Å 的理论上界），信息需逐层接力",
+    "message": "边 ← MLP[n_i‖n_j‖e_ij] + Σ_k s_ij s_ik·MLP[a_ijk‖n_i‖e_ij‖e_ik]/√a_sel；角 ← MLP[a‖n_i‖e_ij‖e_ik]；节点 ← 自 MLP + GᵀG 对称化 + Σ_j s_ij·MLP[n_i‖n_j‖e_ij]/e_sel",
+    "readout": "最终节点特征 n_iᴸ（可选拼接类型嵌入）→ 各元素共享的拟合 MLP（示例 [240,240,240] + ResNet）+ 每元素能量偏置 → E_i",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R：对含周期镜像的扩展坐标做 torch.autograd.grad，再按 mapping 把 ghost 原子上的力 scatter_reduce 回本体原子",
+    "stress": "维里 Ξ = Σ_{i∈ext} F_i ⊗ r_i（扩展坐标外积，无需应变求导）；ASE 计算器中 σ = −(Ξ+Ξᵀ)/(2V)",
+    "longRange": "无内置长程静电；有效作用范围仅为 L 层消息传递的感受野",
+    "dispersion": "无显式色散项，只能在 6 Å 边截断内从训练数据隐式学习",
+    "chargeSpin": "可选 add_chg_spin_ebd：总电荷（−100…99）与自旋多重度（0…99）各查表嵌入，经 MLP 混合后加到所有原子的初始节点嵌入上（全局条件，不算库仑）",
+    "otherOutputs": "原子能、原子维里；同一描述符可接偶极/极化率（用 repflows 输出的等变 rot_mat）、DOS、通用 property 拟合头；Hessian（make_hessian_model）；自旋（虚拟原子）模型",
+    "strictlyLocal": false,
+    "complexity": "O(N·e_sel·C²) 的边/节点 MLP + O(N·a_sel²·C_a·C) 的角 MLP（C 为特征宽度）；角项随角邻居数平方增长，通常主导",
+    "accel": "optim_update 拆分线性层、角消息压缩 a_compress_rate、use_dynamic_sel 去填充、float32；LAMMPS 中 border_op 逐层 MPI 交换 ghost 节点特征（支持 CUDA-aware MPI 多 GPU）；不支持查表压缩"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "没有球谐张量积、全是 MLP 与矩阵乘，但角特征按 a_sel² 增长且发布模型有 16–24 层，又不支持 DeePMD 传统查表压缩，整体与 MACE 类同档。"},
+    "expressiveness": {"v": 4, "why": "显式三体键角 + 深层线图消息传递，精度高；但隐藏特征全是标量，角分辨率靠 cosθ+MLP，没有高阶等变张量。"},
+    "longRange": {"v": 2, "why": "只有 L×e_rcut 的消息传递感受野，没有内置静电或色散；电荷/自旋只是全局嵌入。"},
+    "scalability": {"v": 4, "why": "虽是消息传递，但 LAMMPS 接口用 border_op 逐层交换 ghost 节点特征，支持 MPI 多 GPU 空间分解；比严格局域模型多了每层通信。"},
+    "physics": {"v": 4, "why": "保守力、边和角都乘平滑开关函数、能量为原子能之和（广延）、可外接 ZBL 近程表；但 smooth_edge_update 默认关闭时角→边更新在填充处并不严格平滑。"},
+    "coverage": {"v": 4, "why": "能量/力/维里/原子维里之外，框架官方支持 Hessian、偶极、极化率、DOS、通用性质与自旋模型，但多数需自行训练对应拟合头。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、元素、晶胞 → 扩展出周期镜像（ghost）原子",
+      "plain": "输入是 N 个原子的坐标、元素类型与晶胞。DeePMD-kit 先把截断范围内需要的周期镜像原子复制出来，得到“扩展坐标”，并记录每个镜像对应哪个本体原子（mapping）。随后对扩展坐标打开 requires_grad——力和维里都要对它求导。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3}\\ \\Rightarrow\\ \\{\\mathbf r_{i'}\\}_{i'\\in\\mathrm{ext}},\\ \\ \\mathrm{map}:\\ i'\\mapsto i",
+      "code": [
+        {"file": "deepmd/pt/model/model/make_model.py", "start": 178, "end": 196, "must": "extend_input_and_build_neighbor_list(", "caption": "forward_common：扩展 ghost 原子并建邻居表"},
+        {"file": "deepmd/pt/model/model/make_model.py", "start": 429, "end": 442, "must": "requires_grad_(True)", "caption": "forward_common_lower：扩展坐标设为可求导，调用原子模型"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：按距离排序，取最近的 e_sel 个（≤ e_rcut）",
+      "plain": "对每个中心原子计算到所有扩展原子的距离，用 topk 取最近的若干个，超出 e_rcut 的位置填 −1。DPA-3 的边邻居表是固定长度 e_sel（默认 120）的“带填充”张量；角邻居表直接取其前 a_sel 个并再用更小的 a_rcut 过滤。",
+      "math": "\\mathcal N_e(i)=\\mathrm{topk}_{\\,e_{\\rm sel}}\\{\\,j:\\ r_{ij}<r_e\\,\\},\\qquad \\mathcal N_a(i)=\\{\\,j\\in\\mathcal N_e(i)_{[:a_{\\rm sel}]}:\\ r_{ij}<r_a\\,\\}",
+      "code": [
+        {"file": "deepmd/pt/utils/nlist.py", "start": 121, "end": 150, "must": "torch.topk(rr, top_k, largest=False)", "caption": "build_neighbor_list：按距离 topk 选邻居"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：平滑开关 s(r) 与两套截断（边 6 Å / 角 4 Å）",
+      "plain": "每条边计算 1/r 与 r_ij/r² 并乘以开关函数 s(r)：r 小于平滑起点时 s=1，到截断处平滑降到 0（默认五次多项式，二阶导连续；也可选指数开关）。边用 e_rcut=6 Å，角用更小的 a_rcut=4 Å 再算一套开关 a_sw——因为角的数量随邻居数平方增长，必须缩小范围控制成本。",
+      "math": "s(r)=u^3(-6u^2+15u-10)+1,\\ u=\\frac{r-r_s}{r_c-r_s};\\quad s_{\\exp}(r)=e^{-e^{20(r-r_s)/r_s}};\\qquad \\tilde{\\mathbf R}_{ij}=s(r_{ij})\\Big[\\frac{1}{r_{ij}},\\ \\frac{\\mathbf r_{ij}}{r_{ij}^{2}}\\Big]",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/env_mat.py", "start": 39, "end": 55, "must": "compute_smooth_weight(length, ruct_smth, rcut)", "caption": "_make_env_mat：1/r、r/r² 乘开关函数"},
+        {"file": "deepmd/pt/utils/preprocess.py", "start": 15, "end": 31, "must": "vv = uu2 * uu * (-6 * uu2 + 15 * uu - 10) + 1", "caption": "多项式开关与指数开关"},
+        {"file": "deepmd/pt/model/descriptor/repflows.py", "start": 465, "end": 501, "must": "_, a_diff, a_sw = prod_env_mat(", "caption": "边（e_rcut）与角（a_rcut）各算一次环境矩阵与开关"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：类型→节点，距离→边，cosθ→角（可选电荷/自旋）",
+      "plain": "元素类型查表得到 n_dim 维的节点特征；若开启 add_chg_spin_ebd，体系总电荷和自旋多重度也各查一张表、经 MLP 混合后加到每个原子上。边特征由（归一化的）1/r·s(r)（或直接用 r）经一层线性层得到；角特征由同一中心原子两根键的夹角余弦 cosθ/√π 经一层无偏置线性层得到。三种特征都只含标量，天然旋转不变。",
+      "math": "\\mathbf n_i^{0}=\\phi\\big(\\mathrm{T}(Z_i)\\,[+\\,\\mathrm{MLP}(\\mathrm{emb}(Q)\\|\\mathrm{emb}(S))]\\big),\\quad \\mathbf e_{ij}^{0}=\\phi(W_e\\,\\tilde r_{ij}),\\quad \\mathbf a_{ijk}^{0}=W_a\\,\\frac{\\cos\\theta_{jik}}{\\sqrt\\pi}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/dpa3.py", "start": 583, "end": 609, "must": "chg_ebd = self.chg_embedding(charge + 100)", "caption": "类型嵌入 + 可选电荷/自旋全局嵌入"},
+        {"file": "deepmd/pt/model/descriptor/repflows.py", "start": 518, "end": 532, "must": "cosine_ij = torch.matmul(normalized_diff_i, normalized_diff_j)", "caption": "边输入与键角余弦"},
+        {"file": "deepmd/pt/model/descriptor/repflows.py", "start": 568, "end": 575, "must": "angle_ebd = self.angle_embd(angle_input)", "caption": "边嵌入与角嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "RepFlow 层 ①：节点更新（自更新 + 对称化 + 边→节点消息）",
+      "plain": "节点特征收到三条消息：自身 MLP；“对称化”项——把边特征（及邻居节点特征）乘上方向向量 h_ij 求和得到 3×d 的矩阵 G，再算 GᵀG，方向被收缩掉只留下不变量（DeePMD-se 描述符的老思路）；以及对所有邻居的 MLP[n_i‖n_j‖e_ij] 按开关加权求和。三条消息按 res_residual 方式以可学习的小权重加回残差。",
+      "math": "\\mathbf n_i^{l+1}=\\mathbf n_i^{l}+r_1\\phi(W_1\\mathbf n_i^l)+r_2\\phi\\big(W_2[\\mathbf D_i(\\mathbf e)\\|\\mathbf D_i(\\mathbf n)]\\big)+r_3\\frac{1}{N_e}\\sum_{j}s_{ij}\\,\\phi\\big(W_3[\\mathbf n_i\\|\\mathbf n_j\\|\\mathbf e_{ij}]\\big),\\qquad \\mathcal G_i(\\mathbf x)=\\frac{1}{\\sqrt{N_e}}\\sum_j\\mathbf h_{ij}(s_{ij}\\mathbf x_{ij})^{\\top},\\ \\mathbf D_i=\\tfrac13\\,\\mathcal G_i^{<\\top}\\mathcal G_i",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 812, "end": 849, "must": "node_sym = self._compute_node_sym(", "caption": "节点：自 MLP + 对称化 + 边消息 → list_update"},
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 420, "end": 430, "must": "h2g2m = h2g2[..., :axis_neuron]", "caption": "_cal_grrg：GᵀG 收缩成旋转不变量（axis_neuron=4）"},
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 1131, "end": 1166, "must": "torch.sum(node_edge_update, dim=-2) / self.nnei", "caption": "边→节点消息：开关加权后对邻居求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "RepFlow 层 ②：边更新（自更新 + 角→边消息）",
+      "plain": "这是“线图”思想的核心：在键图里，键是节点、键角是边。每条键 ij 先用 MLP[n_i‖n_j‖e_ij] 自我更新；再把所有以 i 为顶点、含 ij 的键角 a_ijk 的信息（拼上 n_i、e_ij、e_ik）过 MLP，用两根键的开关 s_ij·s_ik 加权对 k 求和、除以 √a_sel，再过一层线性层——于是键“知道”了它与周围其它键的夹角。",
+      "math": "\\mathbf e_{ij}^{l+1}=\\mathbf e_{ij}^{l}+r_1\\phi\\big(W_4[\\mathbf n_i\\|\\mathbf n_j\\|\\mathbf e_{ij}]\\big)+r_2\\phi\\Big(W_6\\frac{1}{\\sqrt{N_a}}\\sum_{k}s^{a}_{ij}s^{a}_{ik}\\,\\phi\\big(W_5[\\mathbf a_{ijk}\\|\\mathbf n_i\\|\\mathbf e_{ij}\\|\\mathbf e_{ik}]\\big)\\Big)",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 851, "end": 895, "must": "self._compute_edge_angle_reduction(", "caption": "边自更新 + 角消息 → 边"},
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 1359, "end": 1368, "must": "a_sw.unsqueeze(-2).unsqueeze(-1)", "caption": "角→边：s_ij·s_ik 加权求和 / √a_sel"},
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 645, "end": 659, "must": "torch.split(matrix, [node_dim, node_dim, edge_dim])", "caption": "optim_update：拆分线性层，先算节点再 gather，省去重复计算"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "RepFlow 层 ③：角更新、残差合并与跨 GPU 通信",
+      "plain": "角特征用 MLP[a_ijk‖n_i‖e_ij‖e_ik] 自我更新。默认“并行”模式下三种特征都用本层旧值计算消息，然后各自按 u ← u + Σ r_m·u_m 合并（r_m 初值 0.1 的可学习残差权重）。层与层之间，并行 LAMMPS 运行时用 border_op 把相邻进程的 ghost 原子节点特征交换过来，所以消息传递模型也能做空间分解多 GPU 模拟。",
+      "math": "\\mathbf a_{ijk}^{l+1}=\\mathbf a_{ijk}^{l}+r_a\\,\\phi\\big(W_7[\\mathbf a_{ijk}\\|\\mathbf n_i\\|\\mathbf e_{ij}\\|\\mathbf e_{ik}]\\big),\\qquad u\\leftarrow u+\\sum_m r_m\\odot u_m",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 897, "end": 914, "must": "angle_self_update = self._compute_angle_update(", "caption": "角自更新"},
+        {"file": "deepmd/pt/model/descriptor/repflow_layer.py", "start": 1435, "end": 1453, "must": "for ii, vv in enumerate(self.n_residual):", "caption": "res_residual：可学习残差权重合并"},
+        {"file": "deepmd/pt/model/descriptor/repflows.py", "start": 618, "end": 643, "must": "torch.ops.deepmd.border_op(", "caption": "并行模式：逐层 MPI 交换 ghost 节点特征"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：最终节点特征 → 拟合网络 → 原子能",
+      "plain": "L 层之后的节点特征 n_iᴸ 就是原子 i 的不变描述符（可选再拼上类型嵌入）。所有元素共用一个拟合 MLP（mixed_types），输出再加上该元素的能量偏置 b_Z（由训练集统计得到），就是原子能 E_i。",
+      "math": "E_i=\\mathcal F_\\theta\\big(\\mathbf n_i^{L}\\,[\\|\\,\\mathrm{T}(Z_i)]\\big)+b_{Z_i}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/dpa3.py", "start": 621, "end": 622, "must": "torch.cat([node_ebd, node_ebd_inp], dim=-1)", "caption": "可选拼接类型嵌入"},
+        {"file": "deepmd/pt/model/task/fitting.py", "start": 1041, "end": 1055, "must": "self.bias_atom_e[atype]", "caption": "_forward_common：共享拟合网络 + 元素偏置"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和",
+      "plain": "体系总能就是所有本体原子能之和，保证广延性（体系加倍、能量加倍），也使模型能在任意原子数的体系间迁移。",
+      "math": "E=\\sum_{i=1}^{N}E_i",
+      "code": [
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 172, "end": 186, "must": "model_ret[kk_redu] = torch.sum(vv.to(redu_prec), dim=atom_axis)", "caption": "fit_output_to_model_output：原子能求和"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对扩展坐标的自动微分，再折回本体原子",
+      "plain": "力不是网络直接预测的，而是总能对扩展坐标的负梯度（一次反向传播）。周期镜像原子上的“力”再按 mapping 累加回对应的本体原子。因此力场严格保守，NVE 分子动力学能量守恒。",
+      "math": "\\mathbf F_{i'}=-\\frac{\\partial E}{\\partial\\mathbf r_{i'}}\\ (i'\\in\\mathrm{ext}),\\qquad \\mathbf F_i=\\sum_{i':\\,\\mathrm{map}(i')=i}\\mathbf F_{i'}",
+      "code": [
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 78, "end": 88, "must": "torch.autograd.grad(", "caption": "task_deriv_one：F = −∂E/∂r"},
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 427, "end": 443, "must": "torch.scatter_reduce(", "caption": "communicate_extended_output：ghost 力折回本体原子"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "维里与应力：力 ⊗ 扩展坐标",
+      "plain": "DeePMD 不用“虚拟应变”求导，而是利用扩展坐标（含所有镜像）直接计算维里：每个扩展原子的力与其坐标做外积再求和。由于能量只依赖相对坐标，这与对晶胞求导等价；ASE 接口再取对称部分除以体积得到应力，可用于晶胞弛豫与状态方程。",
+      "math": "\\Xi_{\\alpha\\beta}=\\sum_{i'\\in\\mathrm{ext}}F_{i'\\alpha}\\,r_{i'\\beta},\\qquad \\boldsymbol\\sigma=-\\frac{\\Xi+\\Xi^{\\top}}{2V}",
+      "code": [
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 89, "end": 98, "must": "extended_virial = torch.einsum(", "caption": "原子维里 = F ⊗ r"},
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 444, "end": 465, "must": "new_ret[kk_derv_c] = torch.scatter_reduce(", "caption": "折回本体原子并求和得总维里"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多性质：等变 rot_mat → 偶极 / 极化率等",
+      "plain": "repflows 最后还输出一个等变矩阵 rot_mat（边特征按开关加权乘方向向量求和，d_e×3）。偶极、极化率等张量性质的拟合头用它把不变的网络输出“转回”三维方向，从而得到正确旋转的矢量/张量；同一框架还能做 Hessian、DOS 与任意标量性质拟合。",
+      "math": "\\boldsymbol\\mu_i=\\mathbf g_i^{\\top}\\mathcal R_i,\\qquad \\mathcal R_i=\\frac{1}{\\sqrt{N_e}}\\sum_j s_{ij}\\,\\mathbf e_{ij}\\,\\mathbf h_{ij}^{\\top}\\in\\mathbb R^{d_e\\times3}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/repflows.py", "start": 664, "end": 685, "must": "rot_mat = torch.permute(h2g2, (0, 1, 3, 2))", "caption": "repflows 输出等变 rot_mat"},
+        {"file": "deepmd/pt/model/task/dipole.py", "start": 211, "end": 213, "must": "torch.bmm(out, gr)", "caption": "DipoleFittingNet：不变输出 × rot_mat → 偶极矢量"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "nlayers", "value": "6（代码默认）；DPA-3.1-3M 16、DPA3-v2-OpenLAM 9、DPA-3.1-MPtrj 24（Matbench Discovery YAML）", "note": "RepFlow 层数", "code": {"file": "deepmd/dpmodel/descriptor/dpa3.py", "start": 224, "end": 233, "must": "nlayers: int = 6"}},
+    {"name": "n_dim / e_dim / a_dim", "value": "128 / 64 / 64（默认）；DPA-3.1-3M 128/64/32；DPA3-v2-OpenLAM 256/128/32", "note": "节点 / 边 / 角特征宽度"},
+    {"name": "e_rcut / e_rcut_smth", "value": "6.0 / 5.0 Å（官方示例用 5.3 Å 配合指数开关）", "note": "边截断与平滑起点", "code": {"file": "deepmd/dpmodel/descriptor/dpa3.py", "start": 224, "end": 233, "must": "e_rcut: float = 6.0"}},
+    {"name": "a_rcut / a_rcut_smth", "value": "4.0 / 3.5 Å（DPA-3.1-MPtrj 的 a_rcut 为 4.5 Å）", "note": "角截断与平滑起点", "code": {"file": "deepmd/dpmodel/descriptor/dpa3.py", "start": 224, "end": 233, "must": "a_rcut: float = 4.0"}},
+    {"name": "e_sel / a_sel", "value": "120 / 20（默认；示例 a_sel=30）", "note": "固定长度边/角邻居表上限"},
+    {"name": "axis_neuron", "value": "4", "note": "对称化 GᵀG 中取的子矩阵列数", "code": {"file": "deepmd/dpmodel/descriptor/dpa3.py", "start": 236, "end": 251, "must": "axis_neuron: int = 4"}},
+    {"name": "update_style / update_residual", "value": "res_residual / 0.1（const 初始化）", "note": "残差合并方式与初始权重"},
+    {"name": "fitting_net neuron", "value": "[240, 240, 240] + resnet_dt（官方示例）；代码默认 [128, 128, 128]", "note": "原子能拟合 MLP", "code": {"file": "examples/water/dpa3/input_torch.json", "start": 40, "end": 46, "must": "resnet_dt"}},
+    {"name": "activation / precision", "value": "示例 silut:10.0 / float32（代码默认 silu / float64；文档称 DPA3 均用 float32）", "note": "激活函数与数值精度", "code": {"file": "deepmd/pt/model/descriptor/dpa3.py", "start": 114, "end": 126, "must": "add_chg_spin_ebd: bool = False"}},
+    {"name": "smooth_edge_update / use_exp_switch / use_dynamic_sel", "value": "默认 False / False / False；官方示例前两者设 True", "note": "平滑角→边更新、指数开关、动态邻居", "code": {"file": "examples/water/dpa3/input_torch.json", "start": 10, "end": 33, "must": "use_exp_switch"}},
+    {"name": "参数量", "value": "DPA-3.1-3M-FT 3,268,838；DPA3-v2-OpenLAM 7,021,990（Matbench Discovery）", "note": "发布模型规模"}
+  ],
+  "speedNotes": [
+    "FLOPs 的大头在角通道：每个中心原子有 a_sel×a_sel 个角（默认 20×20），每层都要对它们做 MLP 再对 k 求和；所以角只在更小的 a_rcut=4 Å 内建立，边才用 6 Å。",
+    "optim_update（默认开启）把拼接输入的线性层拆成“中心节点 / 邻居节点 / 边”三块：先对 N 个节点做矩阵乘再按邻居表 gather，避免对 N×e_sel 条边重复计算；a_compress_rate 还能把进入角 MLP 的节点/边维度压缩。",
+    "use_dynamic_sel 把固定 e_sel/a_sel 的填充张量换成只含截断内真实邻居的扁平边/角索引，可放心设大 sel 而不浪费算力（需 smooth_edge_update=True）。",
+    "没有球谐张量积，全是稠密 MLP 与矩阵乘，GPU 友好且官方用 float32；但 DPA3 不支持 DeePMD 传统的查表压缩（enable_compression 直接报错），16–24 层的发布模型远慢于压缩后的 se_e2_a。",
+    "力与维里来自同一次 autograd 反传；LAMMPS 并行时每层还要用 border_op 交换一次 ghost 节点特征，层数越多通信越多。"
+  ],
+  "weakNotes": [
+    "单层边只看 e_rcut=6 Å、角只看 a_rcut=4 Å；L 层后能量依赖范围理论上可达 L×6 Å，但信息需逐层接力，截断以外的 r⁻⁶ 色散尾巴与 r⁻¹ 静电没有显式描述。",
+    "没有内置电荷平衡、静电或色散项；可选的 add_chg_spin_ebd 只把体系总电荷与自旋多重度作为全局嵌入加到节点上，并不计算库仑相互作用。",
+    "Matbench Discovery 的 MPtrj 版本基于 PBE/PBE+U 数据，不含 vdW 修正：层状材料层间结合、分子晶体、物理吸附需谨慎；OpenLAM 版本为多领域数据混合预训练，泛函随数据源而异。",
+    "带电缺陷、电极/电解质界面、离子液体等由长程静电主导的体系容易失败；DeePMD-kit 可叠加 ZBL 近程排斥表（use_srtab），但不解决长程问题。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 平滑开关（五次多项式二阶导连续，或指数开关）适合 MD 与声子；Matbench Discovery κ_SRME：DPA-3.1-3M-FT 0.4695，DPA3-v2-OpenLAM 0.688，DPA-3.1-MPtrj 0.6503。",
+    "Matbench Discovery 稳定性预测 F1：DPA-3.1-3M-FT 0.864（全测试集）/ 0.884（unique prototypes），DPA3-v2-OpenLAM 0.869；几何优化 RMSD 0.0693（DPA-3.1-3M-FT）。",
+    "ASE 计算器给出应力，可做晶胞弛豫、状态方程与弹性常数；make_hessian_model 提供 Hessian，可用于振动/声子分析。",
+    "作为大原子模型可微调，同一描述符可接偶极/极化率/DOS/通用性质拟合头；dpa-adapt 工具以 DPA-3.1-3M 为默认预训练骨干做下游性质拟合。"
+  ],
+  "strengths": ["线图消息传递显式引入三体键角，精度高，可加深到 24 层", "全 MLP/矩阵乘、无张量积，GPU 友好", "保守力 + 平滑截断，适合 MD 与声子", "DeePMD-kit 生态：多后端、LAMMPS 多 GPU、预训练/微调与多种拟合头"],
+  "weaknesses": ["无内置长程静电与色散", "角特征随角邻居数平方增长，内存与计算开销大", "不支持 DeePMD 查表压缩，比压缩版 se_e2_a 慢得多", "隐藏特征全为标量，角分辨率受 cosθ + MLP 限制"],
+  "pretrained": ["DPA-3.1-3M（dp pretrained / DeepPot 内置名）", "DPA-3.2-5M", "DPA-3.3-1M", "DPA3-Omol-Large", "Matbench Discovery 提交：DPA3-v1/v2-MPtrj、DPA3-v1/v2-OpenLAM、DPA-3.1-MPtrj、DPA-3.1-3M-FT"],
+  "mbdKeys": ["dpa3-v1-mptrj", "dpa3-v1-openlam", "dpa3-v2-mptrj", "dpa3-v2-openlam", "dpa-3.1-3m-ft", "dpa-3.1-mptrj"],
+  "arenaKeys": []
+}

@@ -1,0 +1,209 @@
+{
+  "id": "equiformer-v3",
+  "name": "EquiformerV3",
+  "fullName": "EquiformerV3: Scaling Efficient, Expressive, and General SE(3)-Equivariant Graph Attention Transformers",
+  "year": 2026,
+  "authors": "Y.-L. Liao, A. J. Hoffman, S. C. Shen, A. Duval, S. W. Norwood, T. Smidt",
+  "paper": {"title": "EquiformerV3: Scaling Efficient, Expressive, and General SE(3)-Equivariant Graph Attention Transformers", "venue": "arXiv 2026 (2604.09130)", "url": "https://arxiv.org/abs/2604.09130"},
+  "repos": ["equiformer_v3"],
+  "family": "spherical-equivariant",
+  "tags": ["SE(3) 等变图注意力", "eSCN 式 SO(2) 卷积", "S2 网格 SwiGLU（多体）", "包络平滑注意力", "直接预训练 → 梯度微调", "DeNS 去噪"],
+  "framework": "PyTorch + e3nn + PyG（基于 fairchem 分支）",
+  "license": "MIT（代码与检查点）",
+  "oneLiner": "第三代 SE(3) 等变图注意力 Transformer：沿用 EquiformerV2 的“旋转到边坐标系 + SO(2) 卷积”注意力，新增多项式包络让注意力在截断处平滑归零、用 S2 网格上两路信号逐点相乘（SwiGLU 式）高效提升体序，并支持对能量求导得到保守的力与应力——Matbench Discovery 提交的就是梯度版（targets: EFS_G）。",
+  "analogy": "像一场“一对一面谈”：每个原子见每个邻居前，先把自己的坐标系转到“正对对方”（旋转到边坐标系），这样只需关心绕连线的转动，谈话成本大降；注意力决定更该听谁的；快走出截断半径的邻居，声音会被“音量旋钮”（包络）慢慢调到零，而不是突然消失——于是能量曲面是光滑的，可以放心对它求导得到力。",
+  "arch": {
+    "geometry": "边向量 → 距离（K=64/10 个高斯基 + 多项式包络 p=5）+ 方向（旋转矩阵 → Wigner-D，把特征转到边坐标系，无显式球谐）",
+    "equivariance": "SE(3) 等变：Wigner-D 旋转 + SO(2) 线性严格等变；S2 网格上的逐点非线性为离散采样，近似等变",
+    "lmax": "L_max=4（MBD 模型；另有 L_max=6 配置）；旋转后只保留 |m| ≤ m_max=2",
+    "bodyOrder": "无显式上限：消息拼接源/靶特征，S2 网格逐点乘积≈自张量积，每层都提升体序，7 层后很高",
+    "layers": "7 个 Transformer 块（MBD 模型；类默认 12）",
+    "cutoff": "6 Å，max_neighbors=300（MBD 模型）；类默认 12 Å / 20 邻居（OC20 设定）",
+    "receptiveField": "7 × 6 Å ≈ 42 Å（形式上）",
+    "message": "[x_j‖x_i]⊙径向权重(距离+两端元素) → Wigner 旋转 → SO(2) 线性 → 门控 S2-SwiGLU → SO(2) 线性 → 多头注意力加权 → 逆旋转 → 求和",
+    "readout": "末层 merge LayerNorm → 取 l=0 标量 → MLP(128→512→1, SiLU) → 原子能直接求和",
+    "forces": "both",
+    "forcesDetail": "梯度模式 F = −∂E/∂r（autograd），MBD 发布模型即此模式（targets: EFS_G）；直接模式用额外等变注意力头输出 l=1 向量，用于 DeNS 直接预训练与 OC20",
+    "stress": "梯度模式：对称应变 displacement 技巧，σ = (1/V)∂E/∂ε，与力一次反传得到；直接模式另有 rank-2 应力头",
+    "longRange": "无（仅 7 层消息传递带来的半局域感受野）",
+    "dispersion": "无；训练数据为 PBE/PBE+U 级别，仓库未提供 D3 外挂",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "无（仅 E/F/S；DeNS 的去噪预测只在训练时使用）",
+    "strictlyLocal": false,
+    "complexity": "每层逐边：Wigner 旋转 O(M·L³·C) + SO(2) 线性 O(M·m_max·L²·C²) + 边上 S2 网格激活；节点 FFN 走 S2 网格；梯度求力再 ×2–3",
+    "accel": "AMP(float16)、可选 torch.compile、逐块梯度检查点与 _mem 省显存激活、按边数负载均衡；推理经 fairchem OCPCalculator(ASE)，仓库中未见 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 1, "why": "约 30M 参数、7 层 L=4 注意力，每条边都要旋转 + SO(2) 线性 + S2 网格激活，梯度模式还要整网反传，属于最慢的一档。"},
+    "expressiveness": {"v": 5, "why": "L_max=4 等变特征 + 多头注意力 + S2 网格乘积（多体）+ 7 层深度，容量与角分辨率都很高。"},
+    "longRange": {"v": 2, "why": "没有静电/色散项，只有 7 层 × 6 Å 消息传递的感受野。"},
+    "scalability": {"v": 1, "why": "只能整图推理，7 层消息传递 halo 很大，无空间分解/LAMMPS 并行；README 提到部分声子结构会 GPU 显存溢出。"},
+    "physics": {"v": 4, "why": "梯度版为保守力、包络让注意力与嵌入在截断处平滑归零、能量为原子能之和；但无 ZBL 近程排斥，S2 网格非线性只近似等变，300 邻居硬截断在极致密结构中可能不连续。"},
+    "coverage": {"v": 2, "why": "官方只输出能量、力、应力，没有 Hessian、偶极、电荷、磁矩等专门输出头。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞；选择直接/梯度模式",
+      "plain": "输入是原子坐标、原子序数、晶胞与周期性。同一个类有两种前向：direct_prediction=True 时力由专门的输出头直接预测（用于预训练）；False 时走梯度模式，先把坐标设为可求导，力和应力都由能量求导得到。Matbench Discovery 提交的模型用的是梯度模式。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3}\\qquad \\text{gradient mode: } \\mathbf r_i\\ \\text{requires grad}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 663, "end": 668, "must": "outputs = self._forward_gradient(data)", "caption": "forward：按 direct_prediction 选直接法或梯度法"},
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 594, "end": 595, "must": "data.pos.requires_grad = True", "caption": "梯度模式：坐标可求导"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 内最多 300 个邻居（含周期镜像）",
+      "plain": "用 fairchem 的 radius_graph_pbc 在线建图：找出距离小于 r_c 的原子对，并记录跨越周期边界的晶胞平移。MBD 模型用 r_c=6 Å、max_neighbors=300，几乎等于“截断半径内全部邻居”；只有在极致密结构中超过 300 个邻居时才会硬截断（这一点不连续）。训练 MPtrj 时按结构逐个建图（use_pbc_single）以省显存。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\},\\qquad r_c=6,\\ \\ |\\mathcal N(i)|\\le 300",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 597, "end": 608, "must": "enforce_max_neighbors_strictly=self.enforce_max_neighbors_strictly", "caption": "调用 generate_graph"},
+        {"file": "src/fairchem/core/models/base.py", "start": 122, "end": 142, "must": "radius_graph_pbc(", "caption": "radius_graph_pbc + get_pbc_distances：边索引、距离与边向量"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：高斯基 + 多项式平滑包络",
+      "plain": "距离用 K 个等间距高斯函数展开（MBD 模型 K=64 或 10，宽度为间距的 2 倍），再和两端元素嵌入一起喂给径向 MLP。另外单独算一个多项式包络 u(r)，它在 r_c 处值与一、二阶导都为零。V3 把这个包络乘到注意力权重和初始嵌入上——这是相对 V2 的关键改动之一（V2 代码中没有包络），保证邻居进出截断球时能量连续光滑。",
+      "math": "\\phi_k(r)=\\exp\\!\\Big(-\\frac{(r-\\mu_k)^2}{2(2\\Delta)^2}\\Big),\\ \\mu_k=k\\Delta,\\ \\Delta=\\frac{r_c}{K-1};\\qquad u(d)=1-21d^{5}+35d^{6}-15d^{7},\\ d=\\frac{r}{r_c}<1",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 388, "end": 405, "must": "edge_envelope_weight = self.envelope_func(edge_distance)", "caption": "_forward_edge：旋转矩阵、Wigner-D、包络、径向基"},
+        {"file": "experimental/models/equiformer_v3/envelope.py", "start": 14, "end": 30, "must": "torch.where(d_scaled < 1, env_val, torch.zeros_like(d_scaled))", "caption": "PolynomialEnvelope（p=5）"},
+        {"file": "experimental/models/equiformer_v3/radial_function.py", "start": 4, "end": 20, "must": "torch.exp(self.coeff * torch.pow(dist, 2))", "caption": "GaussianSmearing 高斯径向基"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向编码：把每条边转到“边坐标系”（Wigner-D）",
+      "plain": "对每条边构造一个旋转矩阵，把边方向转到 y 轴；绕边轴的第三个角由随机向量决定，但 SO(2) 线性对它严格等变（S2 网格激活为近似等变），所以结果几乎与之无关。由旋转矩阵得到各 l 的 Wigner-D 矩阵，用它把节点特征转进/转出边坐标系。梯度模式下，若边几乎平行于 y 轴（Euler 角奇点），就不对旋转反传（借鉴 eSEN 的 rotation mask），避免力出现数值爆炸。",
+      "math": "\\hat{\\mathbf r}_{ij}\\mapsto(\\alpha,\\beta,\\gamma),\\quad \\mathbf D_{ij}=\\bigoplus_{l\\le L}D^{(l)}(\\alpha,\\beta,\\gamma),\\qquad \\tilde x_{ij}=\\mathbf D_{ij}\\,x,\\ \\ x=\\mathbf D_{ij}^{-1}\\tilde x_{ij}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/edge_rot_mat.py", "start": 11, "end": 35, "must": "norm_x = edge_vec_0 / (edge_vec_0_distance.view(-1, 1))", "caption": "init_edge_rot_mat：边方向 + 极点处的 rotation mask"},
+        {"file": "experimental/models/equiformer_v3/so3.py", "start": 380, "end": 424, "must": "alpha, beta = o3.xyz_to_angles(x)", "caption": "旋转矩阵 → Euler 角 → 分块 Wigner-D"},
+        {"file": "experimental/models/equiformer_v3/so3.py", "start": 344, "end": 355, "must": "wigner_inv = torch.transpose(wigner, 1, 2).contiguous()", "caption": "set_wigner：只保留 |m|≤m_max 的行，并把 m 排序并入矩阵"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素嵌入 + 边度数嵌入",
+      "plain": "每个原子的特征是 (L+1)² × 128 的等变张量。l=0 部分放元素嵌入；再把“距离 + 两端元素”经径向 MLP 得到的 m=0 系数乘上包络，逆旋转回全局坐标系后对邻居求和（除以平均度数），作为初始的各 l 方向特征——相当于一开始就告诉原子“周围邻居朝哪些方向分布”。",
+      "math": "x_i^{(0)}=\\big[E(Z_i)\\big]_{l=0}+\\frac{1}{\\bar d}\\sum_{j\\in\\mathcal N(i)}u(r_{ij})\\,\\mathbf D_{ij}^{-1}\\big[W(\\phi(r_{ij}),Z_i,Z_j)\\big]_{m=0}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 415, "end": 441, "must": "x[:, 0, :] = atom_embedding", "caption": "_forward_embedding"},
+        {"file": "experimental/models/equiformer_v3/input_block.py", "start": 81, "end": 112, "must": "x_edge_m0 = x_edge_m0 * edge_envelope_weight", "caption": "EdgeDegreeEmbedding：包络 × 径向 → 逆旋转 → 求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "注意力 ①：边坐标系里的 SO(2) 卷积生成消息",
+      "plain": "对每条边把源、靶原子特征拼接，乘以径向权重（同一 l 的各 m 共享权重），旋转到边坐标系。在这个坐标系里，球谐只剩 m=0，完整的 CG 张量积退化为“同 m 分量之间的 2×2 复数式线性变换”（SO(2) 线性），代价从 O(L⁶) 降到 O(L³)。第一层 SO(2) 线性还额外输出 m=0 标量，用作注意力 logits 和门控。",
+      "math": "\\tilde m_{ij}=\\mathbf D_{ij}\\big(R(r_{ij},Z_i,Z_j)\\odot[x_j\\Vert x_i]\\big),\\qquad \\begin{pmatrix}y_{+m}\\\\y_{-m}\\end{pmatrix}=\\begin{pmatrix}W^{m}_{r}&-W^{m}_{i}\\\\W^{m}_{i}&W^{m}_{r}\\end{pmatrix}\\begin{pmatrix}\\tilde m_{+m}\\\\\\tilde m_{-m}\\end{pmatrix},\\ |m|\\le m_{\\max}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/transformer_block.py", "start": 268, "end": 309, "must": "x_message, x_m0_extra = self.so2_linear_1(x_message)", "caption": "EquivariantGraphAttention：拼接 → 径向权重 → 旋转 → SO(2) 线性 → 激活 → SO(2) 线性"},
+        {"file": "experimental/models/equiformer_v3/so2_ops.py", "start": 46, "end": 60, "must": "x_m_r = x_r.narrow(1, 0, 1) - x_i.narrow(1, 1, 1)", "caption": "SO2MLinear：±m 分量的“复数乘法”"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "注意力 ②：带包络的多头 softmax，逆旋转后求和",
+      "plain": "m=0 标量经 LayerNorm 和 SmoothLeakyReLU 后与每个头的可学习向量点积得到 logits。softmax 的指数项先乘包络 u(r) 再归一化，归一化后又乘一次 u(r)：截断边缘的邻居在分子分母里都平滑消失，权重不会因邻居进出而跳变。加权后的值向量逆旋转回全局坐标系，对邻居求和，再经一个 SO(3) 线性投影。",
+      "math": "a_{ij}^{h}=\\mathbf w_h^{\\top}\\,\\mathrm{SLReLU}\\big(\\mathrm{LN}(s_{ij}^{h})\\big),\\qquad \\alpha_{ij}^{h}=u(r_{ij})\\,\\frac{u(r_{ij})\\,e^{a_{ij}^{h}}}{\\sum_{k\\in\\mathcal N(i)}u(r_{ik})\\,e^{a_{ik}^{h}}+\\epsilon},\\qquad \\Delta x_i=W_{\\text{proj}}\\sum_{j}\\alpha_{ij}^{h}\\,\\mathbf D_{ij}^{-1}\\,v_{ij}^{h}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/transformer_block.py", "start": 311, "end": 344, "must": "exp_rescale=edge_envelope_weight", "caption": "注意力权重 × 值 → rotate_inv → reduce_edge → proj"},
+        {"file": "experimental/models/equiformer_v3/softmax.py", "start": 64, "end": 79, "must": "out = out * exp_rescale", "caption": "GraphSoftmax：用包络缩放指数项"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "S2 网格 SwiGLU 激活与 FFN：用逐点乘积提升体序",
+      "plain": "等变特征不能直接套 SiLU。V3 把 l>0 特征投影到球面网格（注意力 14×8、FFN 14×14），分成两半后逐点相乘再投影回来，并用 sigmoid 标量门控；l=0 部分走 SwiGLU。代码注释指出，网格上的逐点相乘等价于特征的自张量积，即一次就把体序翻倍，比 V2 的逐点 SiLU 更有“多体”表达力。每个块是 Pre-Norm Transformer：x ← x + GA(LN(x))，x ← x + FFN(LN(x))。",
+      "math": "\\mathrm{Act}(x,s)=\\sigma(s_g)\\odot\\mathcal F^{-1}\\big[\\mathcal F(x)_{1}\\odot\\mathcal F(x)_{2}\\big]+\\big[\\mathrm{SwiGLU}(s)\\big]_{l=0};\\qquad x\\leftarrow x+\\mathrm{GA}(\\mathrm{LN}(x)),\\ \\ x\\leftarrow x+\\mathrm{FFN}(\\mathrm{LN}(x))",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/activation.py", "start": 446, "end": 471, "must": "x_grid = x_grid_1 * x_grid_2", "caption": "SeparableGateS2Activation_SwiGLU_Merge（注意力内）"},
+        {"file": "experimental/models/equiformer_v3/transformer_block.py", "start": 554, "end": 563, "must": "output_grid = output_grid_1 * output_grid_2", "caption": "GatedSwiGLUGridMLP：FFN 的网格 MLP"},
+        {"file": "experimental/models/equiformer_v3/transformer_block.py", "start": 711, "end": 755, "must": "outputs = self.ffn(outputs)", "caption": "TransBlockV3.forward：两个残差子层"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：merge LayerNorm → l=0 标量 → MLP 原子能",
+      "plain": "7 个块之后做一次等变 LayerNorm：V3 的 merge LayerNorm 只对 l=0 去均值，再用所有 l 合在一起（各 l 等权）的 RMS 统一缩放，避免高 l 分量失衡。之后只取旋转不变的 l=0 通道，经 128→512→1 的 SiLU MLP 得到每个原子的能量贡献。",
+      "math": "\\mathrm{LN}(x)_{lm}=\\gamma_l\\,\\frac{x_{lm}-\\delta_{l0}\\bar x_{0}}{\\sqrt{\\sum_{l'}\\frac{1}{(L+1)(2l'+1)}\\sum_{m'}\\langle x_{l'm'}^2\\rangle_c+\\epsilon}},\\qquad \\varepsilon_i=W_2\\,\\mathrm{SiLU}\\big(W_1\\,\\mathrm{LN}(x_i)_{l=0}+b_1\\big)+b_2",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 481, "end": 485, "must": "x_scalar = x.narrow(1, 0, 1)", "caption": "最终 LayerNorm，取 l=0 标量"},
+        {"file": "experimental/models/equiformer_v3/layer_norm.py", "start": 251, "end": 278, "must": "feature_norm = (feature_norm + self.eps).pow(-0.5)", "caption": "EquivariantMergeLayerNorm"},
+        {"file": "experimental/models/equiformer_v3/output_block.py", "start": 58, "end": 69, "must": "self.act = torch.nn.SiLU()", "caption": "ScalarFeedForwardNetwork 能量头"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和 + 归一化与元素参考能",
+      "plain": "原子能用 index_add 对每个结构求和；发布配置把 avg_num_nodes 设为 1，即不再除以平均原子数，保证能量广延。训练时目标先减去元素参考能（npz 文件）并按 rmsd=0.6274 缩放，推理时做反变换。",
+      "math": "E=s\\sum_{i=1}^{N}\\varepsilon_i+\\sum_{i}E_{\\mathrm{ref}}(Z_i),\\qquad s=\\mathrm{rmsd}=0.6274",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 628, "end": 633, "must": "energy.index_add_(0, data.batch, node_energy.view(-1))", "caption": "能量求和"},
+        {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 43, "end": 72, "must": "element_references:", "caption": "OAM 微调配置：归一化 rmsd 与元素参考能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：梯度模式自动微分（直接头只用于预训练）",
+      "plain": "官方流程分两步：先用直接力头 + DeNS（给坐标加噪、把力编码进输入、让网络预测噪声）做直接预训练；再去掉能量头，切换到梯度模式微调。最终模型的力是能量对坐标的负梯度，严格保守，适合 NVE 分子动力学和声子；代价是反传约等于再做一次前向，显存也更大。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}\\qquad(\\text{direct pre-training: }\\mathbf F_i=[\\mathrm{GA}_{\\text{force}}(x)]_{i,\\,l=1})",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 651, "end": 658, "must": "energy.sum(), data.pos, create_graph=self.training", "caption": "梯度模式：F = −∂E/∂r"},
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 531, "end": 543, "must": "forces = forces.narrow(1, 1, 3)", "caption": "直接模式：力头输出取 l=1 分量"},
+        {"file": "experimental/models/equiformer_v3/equiformer_v3_dens.py", "start": 497, "end": 508, "must": "force_embedding = force_sh * force_norm", "caption": "DeNS：把力编码成球谐嵌入（仅训练）"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对虚拟对称应变求导",
+      "plain": "引入全零的 3×3 位移张量并对称化，让坐标和晶胞同时随之形变；能量对坐标和应变一次反传，分别得到力和维里，维里除以体积即应力。这样力与应力来自同一个能量，彼此自洽，可用于变胞弛豫和弹性常数。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 570, "end": 593, "must": "symmetric_displacement = 0.5 * (", "caption": "对称位移作用于坐标和晶胞"},
+        {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 635, "end": 649, "must": "stress = virial / volume.view(-1, 1, 1)", "caption": "一次 autograd 得到力与应力"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "max_radius / max_neighbors", "value": "6.0 Å / 300（严格截断）", "note": "截断半径与最大邻居数（类默认 12 Å / 20）", "code": {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 150, "end": 151, "must": "max_radius"}},
+    {"name": "num_radial_basis", "value": "64（OAM）/ 10（MP）", "note": "高斯基个数", "code": {"file": "experimental/configs/omat24/mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@10_max-neighbors@300_attn-grid@14-8_ffn-grid@14_pt-reg-dens-no-stress-strict-max-r@0.75-ft-no-reg_lr@0-5e-5-epochs@10-bs@64x8-wd@1e-3-beta2@0.95.yml", "start": 144, "end": 146, "must": "num_radial_basis"}},
+    {"name": "num_layers", "value": "7", "note": "Transformer 块数", "code": {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 155, "end": 156, "must": "num_layers"}},
+    {"name": "num_channels", "value": "128", "note": "每个 (l,m) 分量的通道数"},
+    {"name": "lmax / mmax", "value": "4 / 2", "note": "最高阶 l；旋转后保留的 |m|", "code": {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 164, "end": 165, "must": "mmax"}},
+    {"name": "注意力", "value": "8 头；α 通道 64；value 16/头；hidden 32", "note": "num_heads / attn_alpha_channels / attn_value_channels / attn_hidden_channels", "code": {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 157, "end": 160, "must": "num_heads"}},
+    {"name": "ffn_hidden_channels", "value": "512", "note": "FFN 网格 MLP 与能量头隐藏宽度"},
+    {"name": "S2 网格分辨率", "value": "注意力 [14, 8]；FFN [14, 14]", "note": "球面采样点数，决定非线性的等变精度与开销", "code": {"file": "experimental/configs/omat24/salex_mptrj/experiments/gradient/equiformer_v3_grad-finetune_N@7_L@4_attn-hidden@32_rbf@64_max-neighbors@300_attn-grid@14-8_ffn-grid@14_attn-eps@1e-8_lr@0-5e-5-warmup@0.1-epochs@2-mptrj-salex-ratio@8-bs@256-wd@1e-3-beta2@0.98-eps@1e-6_pt-reg-dens-ft-no-reg-lr@1e-4.yml", "start": 166, "end": 167, "must": "attn_grid_resolution_list"}},
+    {"name": "包络", "value": "多项式 p=5", "note": "use_envelope=True，作用于注意力与边度数嵌入", "code": {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 264, "end": 267, "must": "exponent=5"}},
+    {"name": "高斯基宽度", "value": "2 × 间距", "note": "GaussianSmearing(0, r_c, K, 2.0)", "code": {"file": "experimental/models/equiformer_v3/equiformer_v3.py", "start": 252, "end": 257, "must": "GaussianSmearing("}},
+    {"name": "参数量", "value": "约 30.3M（MP: 30278113；OAM: 30333409）", "note": "Matbench Discovery 元数据"}
+  ],
+  "speedNotes": [
+    "开销集中在边上：每层每条边都要做 Wigner-D 旋转（L=4 共 25 个分量 × 拼接后 2C 通道）、两次 SO(2) 线性和一次 S2 网格（14×8）SwiGLU 激活，7 层累加；6 Å 内邻居多时边数很大。",
+    "相对完整 CG 张量积的提速来自 eSCN 技巧：旋转到边坐标系后只保留 |m|≤2，SO(2) 线性只在同 m 分量间混合；V3 还把 m 排序并入 Wigner 矩阵省掉一次矩阵乘，可选 use_add_merge 再省一半旋转。",
+    "梯度模式要对整个网络反传（create_graph 训练时还要二阶图），推理耗时约前向的 2–3 倍、显存显著增加；README 提到 κ 计算中个别结构会 GPU 显存溢出，需改用 CPU。",
+    "省显存/提速手段：AMP float16（Wigner 与注意力权重）、逐块梯度检查点、_mem 版激活、可选 torch.compile、按边数做负载均衡。",
+    "训练代价（Matbench Discovery 元数据）：MP 版 16×H100×66.9 h，OAM 版 32×H100×177.3 h。"
+  ],
+  "weakNotes": [
+    "单层截断 6 Å，7 层后形式感受野约 42 Å，但没有任何显式长程项；r⁻⁶ 色散尾巴与 r⁻¹ 静电只能靠学到的半局域效应近似。",
+    "训练数据 MPtrj / OMat24 / sAlex 为 PBE/PBE+U 级别，基本不含 vdW；层状材料层间结合、分子晶体、物理吸附会偏弱，仓库未提供 D3 外挂（可自行在 ASE 中叠加 DFT-D3）。",
+    "没有总电荷/自旋输入，也没有电荷平衡或 Ewald 静电：带电缺陷、离子液体、电化学界面等需要真正长程静电的体系不在设计范围内。",
+    "没有 ZBL 等近程排斥先验；Matbench Discovery 双原子测试中 OAM 版的 force_jump=641.9、energy_jump=14.25，明显高于 MP 版的 28.9 / 0.8444（越低越平滑），提示远离训练分布的短程区域可能不光滑。"
+  ],
+  "downstreamNotes": [
+    "声子/热导：保守力 + 包络平滑，Matbench Discovery κ_SRME：MP 版 0.2753、OAM 版 0.1178（越低越好），κ 失败率与虚频率均为 0。",
+    "几何优化：MBD 用 FIRE + FrechetCellFilter（fmax 0.02，≤500 步）；结构 RMSD：MP 版 0.0701、OAM 版 0.0595；稳定性发现 F1：0.848 / 0.912（全测试集）。",
+    "应力来自同一能量的应变导数，可直接用于变胞弛豫、状态方程与弹性常数。",
+    "NVE/长时间 MD 应使用梯度微调后的保守模型；只做过直接预训练的检查点力不保守，会有能量漂移。",
+    "无偶极、极化率、磁矩、电荷等输出头；光谱、磁性等任务需要另加读出头再训练。"
+  ],
+  "strengths": ["S2 网格逐点乘积（≈自张量积）高效提升体序", "包络让注意力在截断处平滑，梯度版力/应力保守，声子表现好", "eSCN 式 SO(2) 卷积 + m_max=2 截断，远比完整 CG 张量积便宜", "MIT 许可，训练/评测配置与 MBD 检查点完整公开"],
+  "weaknesses": ["约 30M 参数 + 7 层注意力 + 反传求力，推理慢、显存大", "无色散、静电与电荷/自旋输入", "只输出 E/F/S，无 Hessian 等专用接口", "只能整图推理，无 LAMMPS/空间分解并行", "训练流程复杂（DeNS 直接预训练 → 去能量头 → 梯度微调），算力需求高"],
+  "pretrained": ["EquiformerV3+DeNS-MP（MPtrj，L_max=4，7 层，约 30.3M 参数）", "EquiformerV3+DeNS-OAM（OMat24 预训练 → MPtrj+sAlex 微调，L_max=4）", "HuggingFace: mirror-physics/equiformer_v3（官方检查点页面）"],
+  "mbdKeys": ["equiformer-v3-mp", "equiformer-v3-oam"],
+  "arenaKeys": []
+}

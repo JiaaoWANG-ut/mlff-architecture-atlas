@@ -1,0 +1,213 @@
+{
+  "id": "sevennet",
+  "name": "SevenNet",
+  "fullName": "SevenNet: Scalable EquiVariance-Enabled Neural Network",
+  "year": 2024,
+  "authors": "Y. Park, J. Kim, S. Hwang, S. Han",
+  "paper": {"title": "Scalable Parallel Algorithm for Graph Neural Network Interatomic Potentials in Molecular Dynamics Simulations", "venue": "J. Chem. Theory Comput. 20(11), 4857–4868 (2024)", "url": "https://doi.org/10.1021/acs.jctc.4c00190"},
+  "repos": ["SevenNet"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变（NequIP 式）", "球谐张量积卷积", "LAMMPS 多 GPU 空间分解", "多保真度 / 多任务", "CUDA D3 色散"],
+  "framework": "PyTorch + e3nn（可选 FlashTP / cuEquivariance / OpenEquivariance / LunaTP 内核）；LAMMPS C++/CUDA 接口",
+  "license": "MIT（LAMMPS pair_e3gnn / pair_d3 源文件按 LAMMPS 惯例为 GPL；Matbench 记录早期版本为 GPL-3.0）",
+  "oneLiner": "以 NequIP 的球谐张量积卷积为核心的等变消息传递势：把自连接里元素相关的张量积换成线性层大幅减参，并为消息传递网络专门设计了 LAMMPS 空间分解并行（每层交换 ghost 原子特征、反向逐层回传梯度）；MF/Omni 版本再加一个“任务/泛函”标签，让同一网络同时学多种 DFT 设定。",
+  "analogy": "像一支分区作业的传话队伍：整块材料被切成许多区域，每块交给一张 GPU；每传一轮话（一层卷积）之前，相邻区域先互相抄送“边界原子的最新笔记”（ghost 特征），然后各自继续算。多保真度则像给答案盖一个“按 PBE 口径还是 r²SCAN 口径”的印章——同一个人、同一套知识，只是最后按不同口径报数。",
+  "arch": {
+    "geometry": "边向量 r_ij（模型直接输入并对其求导）→ 长度：8 个可训练 Bessel × 截断包络（XPLOR 或多项式 p=6）；方向：实球谐 Y_l^m（l ≤ l_max）",
+    "equivariance": "等变（e3nn irreps + CG 张量积）；MF-ompa / Omni 区分宇称（O(3)），SevenNet-0 / l3i5 的 is_parity=False 只保证 SO(3)",
+    "lmax": "SevenNet-0 为 2；l3i5 / MF-ompa / Omni 为 3（边球谐与隐藏特征共用）；代码默认 1",
+    "bodyOrder": "每层消息对邻居特征线性（2 体 + 角度），体序靠多层堆叠 + 门控非线性逐层提升（同 NequIP）",
+    "layers": "5（SevenNet-0 / l3i5 / MF-ompa / Omni）；Omni-i8 为 8、Omni-i12 为 12；代码默认 3",
+    "cutoff": "5 Å（SevenNet-0 / l3i5）；6 Å（MF-ompa / Omni）；Nano 有 4.5–6 Å 四档；代码默认 4.5 Å",
+    "receptiveField": "T × r_c：5×5=25 Å（SevenNet-0）、5×6=30 Å（MF-ompa）、12×6=72 Å（Omni-i12）",
+    "message": "Σ_j MLP(e(r_ij)) ⊙ [W₁h_j ⊗_CG Y(r̂_ij)] / n̄（uvu 路径，除以平均邻居数）→ W₂ + 自连接（linear 或 nequip）→ Gate",
+    "readout": "最后一层只留 128×0e → 两个无偏置线性层（128→64→1）→ 逐元素（多保真度时逐任务）scale/shift → 求和",
+    "forces": "conservative",
+    "forcesDetail": "一次 autograd 得到 f_ij = ∂E/∂r_ij，按边起点加、终点减 scatter 成 F = −∂E/∂R；LAMMPS 并行版逐层反传 + reverse_comm",
+    "stress": "σ = (1/V) Σ_边 r_ij ⊗ f_ij，与力共用同一次反传；可输出逐原子维里（compute_atomic_virial）",
+    "longRange": "无静电 / 电荷模块，仅靠 T × r_c 的消息传递感受野",
+    "dispersion": "官方 CUDA 版 Grimme D3（BJ / zero 阻尼，默认 PBE 参数）：SevenNetD3Calculator、LAMMPS pair_style d3、TorchSim SevenNetD3Model",
+    "chargeSpin": "无总电荷 / 自旋输入；MF / Omni 多一个任务（modal）one-hot 作为全局条件",
+    "otherOutputs": "原子能、逐原子维里（stresses）；同一结构在不同任务（PBE+U / r²SCAN / ωB97M-V 等）下的 E/F/S",
+    "strictlyLocal": false,
+    "complexity": "O(T·N·M·C·P_TP)：每层每条边一次 uvu 张量积；P_TP 随 l_max 增长（文档称 l3i5 比 SevenNet-0 慢约 4 倍）",
+    "accel": "FlashTP（文档称最高约 4×）/ cuEquivariance / OpenEquivariance / LunaTP；LAMMPS e3gnn、e3gnn/parallel（多 GPU）、ML-IAP；ASE、TorchSim；CUDA D3"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "基础模型 5 层（Omni-i12 为 12 层）、l_max=3，每层每条边都做球谐张量积，属深层等变网络；SevenNet-0（l_max=2、0.84M 参数）与蒸馏版 Nano 快得多，FlashTP/cuEq 内核可进一步提速。"},
+    "expressiveness": {"v": 4, "why": "严格等变 + l_max=3 角分辨率 + 5–12 层堆叠，精度高；但与 NequIP 一样每层只做 2 体张量积，体序靠堆层而非像 MACE 那样单层显式构造。"},
+    "longRange": {"v": 3, "why": "无静电、无电荷输入；官方提供 CUDA 加速的 D3 外挂（ASE / LAMMPS / TorchSim），外加 25–72 Å 的消息传递感受野。"},
+    "scalability": {"v": 4, "why": "为消息传递势专门设计的空间分解并行（e3gnn/parallel）：每层前向交换 ghost 特征、反向回传 ghost 梯度，可多 GPU 跑大体系；但非严格局域，每层都要通信，不及 Allegro / NEP 类。"},
+    "physics": {"v": 4, "why": "保守力（对边向量自动微分）、平滑截断包络、原子能求和保证广延性、张量积严格等变；但没有 ZBL 近核排斥，且 is_parity=False 的模型只保证 SO(3) 等变。"},
+    "coverage": {"v": 2, "why": "官方输出能量、原子能、力、应力与逐原子维里，外加多保真度任务通道；没有偶极、电荷、磁矩等额外读出头。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "输入与邻居图：ASE 原子 → 带周期平移的边列表",
+      "plain": "SevenNetCalculator 收到 ASE Atoms 后，用 matscipy（未安装时退回 ASE）的 neighbour_list 找出所有距离小于 r_c 的有向原子对，直接得到边索引 (i, j)、边向量 r_ij = r_j − r_i + S·C 与晶胞体积；非周期方向会把晶胞人为放大，避免与自己的镜像成边。多保真度模型还要附上任务名 modal。注意 SevenNet 的模型以边向量（而不是坐标）为输入，后面的力和应力都对这些边向量求导。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/calculator.py", "start": 234, "end": 249, "must": "unlabeled_atoms_to_graph(atoms, self.cutoff, with_shift=False)", "caption": "SevenNetCalculator.calculate：Atoms → 图（可附 modal）→ 模型"},
+        {"repo": "SevenNet", "file": "sevenn/train/dataload.py", "start": 32, "end": 61, "must": "neighbour_list(", "caption": "matscipy 近邻表（非周期方向放大晶胞）"},
+        {"repo": "SevenNet", "file": "sevenn/train/dataload.py", "start": 102, "end": 123, "must": "KEY.EDGE_VEC: edge_vec", "caption": "unlabeled_atoms_to_graph：边索引、边向量、体积"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 可训练 Bessel × 截断包络；方向 → 球谐",
+      "plain": "每条边的长度展开为 8 个正弦型 Bessel 函数（频率以 nπ/r_c 为初值，默认可训练），再乘以截断包络：SevenNet-0 与 MF-ompa 用 XPLOR 开关函数（r < r_on=4.5/5.5 Å 时恒为 1，之后平滑降到 0），l3i5 用 p=6 的多项式包络。方向用 e3nn 实球谐 Y_l^m（l ≤ l_max，component 归一化）编码；球谐在旋转下按 Wigner-D 矩阵精确变换，这是等变性的来源。",
+      "math": "e_n(r)=\\frac{2}{r_c}\\frac{\\sin(k_nr)}{r}\\,f_{\\text{cut}}(r),\\ k_n\\overset{\\text{init}}{=}\\frac{n\\pi}{r_c};\\quad f_{\\text{XPLOR}}=\\frac{(r_c^2-r^2)^2(r_c^2+2r^2-3r_{\\text{on}}^2)}{(r_c^2-r_{\\text{on}}^2)^3}\\ (r\\ge r_{\\text{on}});\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l\\le l_{\\max}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/edge_embedding.py", "start": 86, "end": 103, "must": "torch.sin(self.coeffs * ur)", "caption": "BesselBasis：可训练频率的 Bessel 基"},
+        {"repo": "SevenNet", "file": "sevenn/nn/edge_embedding.py", "start": 150, "end": 160, "must": "(r_cut_sq - r_sq) ** 2", "caption": "XPLORCutoff：r_on 之后平滑降到 0"},
+        {"repo": "SevenNet", "file": "sevenn/nn/edge_embedding.py", "start": 207, "end": 217, "must": "self.cutoff_function(r).unsqueeze(-1)", "caption": "EdgeEmbedding.forward：径向基 × 包络 + 球谐"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "元素嵌入：one-hot(Z) → 128 维标量通道",
+      "plain": "原子序数先按 type_map 映射为类型编号再变成 one-hot，一个无偏置线性层把它变成初始特征 h⁽⁰⁾（128×0e，只有标量）。同一个 one-hot 还被保存为节点属性 a_i（供 nequip 式自连接做张量积）和类型索引（供逐元素 scale/shift 查表）。",
+      "math": "h_i^{(0)}=W_{\\text{emb}}\\,\\mathrm{onehot}(Z_i)\\in\\mathbb R^{128}\\ (0e),\\qquad a_i=\\mathrm{onehot}(Z_i)",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 532, "end": 555, "must": "'onehot_to_feature_x': IrrepsLinear(", "caption": "one-hot → 线性嵌入（初始 irreps 为 128x0e）"},
+        {"repo": "SevenNet", "file": "sevenn/nn/node_embedding.py", "start": 44, "end": 53, "must": "torch.nn.functional.one_hot(inp, self.num_classes)", "caption": "OnehotEmbedding：同时保存节点属性与类型索引"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "多保真度：把“任务 / 泛函”标签拼进线性层",
+      "plain": "MF-0 / MF-ompa / Omni 把训练数据的来源（如 mpa、omat24、matpes_r2scan、omol25_low）编码成 modality one-hot。patch_modality 把它插在元素嵌入之后，并让选定的 IrrepsLinear（MF-ompa：每层卷积前后的 self_interaction_1/2 与读出第一层）在输入端拼接这串 one-hot。由于拼进去的是 0e 标量，等价于给每个任务学一组只加在标量通道上的偏置；再配合按“任务 × 元素”查表的能量平移。张量积与径向 MLP 等主体参数由所有数据共享，不同 DFT 设定之间的系统差由这些少量参数吸收。",
+      "math": "\\mathrm{Lin}\\big([\\,h_i\\Vert\\mathrm{onehot}(m)\\,]\\big)=W h_i+\\mathbf b_m\\ (\\text{仅 }0e),\\qquad E_i=s_{Z_i}\\,\\hat E_i+\\mu_{m,Z_i}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 206, "end": 240, "must": "module.set_num_modalities(num_modal)", "caption": "patch_modality：插入任务 one-hot，选择哪些线性层带任务输入"},
+        {"repo": "SevenNet", "file": "sevenn/nn/linear.py", "start": 65, "end": 100, "must": "batch_modality_onehot[batch]", "caption": "IrrepsLinear：输入端拼接任务 one-hot（多出 N×0e）"},
+        {"repo": "SevenNet", "file": "sevenn/nn/scale.py", "start": 375, "end": 390, "must": "self.shift[modal_indices, atom_indices]", "caption": "ModalWiseRescale：按（任务, 元素）查表的 shift"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：NequIP 式球谐张量积卷积",
+      "plain": "核心与 NequIP 相同：先用线性层 W₁ 混合特征，再在每条边上把邻居特征 h_j 与方向球谐 Y(r̂_ij) 做 Clebsch–Gordan 张量积，只保留落在目标 irreps 里的路径（l > l_max 的被丢弃）；每条路径、每个通道的权重由“Bessel 边嵌入 → MLP [8→64→64→路径数]（SiLU）”逐边生成（uvu 模式）。消息按中心原子 scatter 求和后除以平均邻居数（SevenNet-0 为 35.99）。并行模式下先把 ghost 原子特征拼到 x 后面，聚合后再切回本地原子。开启 cuEquivariance 时，gather–张量积–scatter 被融合成一个 SegmentedPolynomial GPU 内核（FlashTP / OpenEquivariance 同理替换此模块）。",
+      "math": "m_{i,c\\,l_3m_3}=\\frac{1}{\\bar n}\\sum_{j\\in\\mathcal N(i)}\\sum_{l_1l_2}w^{(l_1l_2\\to l_3)}_{c}(r_{ij})\\sum_{m_1m_2}C^{l_3m_3}_{l_1m_1,l_2m_2}\\,(W_1h_j)_{c\\,l_1m_1}\\,Y_{l_2}^{m_2}(\\hat{\\mathbf r}_{ij}),\\qquad w=\\mathrm{MLP}\\big(e(r_{ij})\\big)",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/convolution.py", "start": 61, "end": 95, "must": "instructions.append((i, j, k, 'uvu', True))", "caption": "枚举 l_x ⊗ l_filter → l_out 路径（uvu），径向 MLP 输出全部路径权重"},
+        {"repo": "SevenNet", "file": "sevenn/nn/convolution.py", "start": 118, "end": 141, "must": "message = self.convolution(x[edge_src], data[self.key_filter], weight)", "caption": "IrrepsConvolution.forward：逐边张量积 → scatter → 除以 n̄（并行时拼接 ghost）"},
+        {"repo": "SevenNet", "file": "sevenn/nn/cue_helper.py", "start": 107, "end": 124, "must": "cuet.SegmentedPolynomial(poly, method=tp_method)", "caption": "cuEquivariance：融合 gather + 张量积 + scatter"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：线性自连接 + Gate 门控（与 NequIP 的主要差别）",
+      "plain": "卷积结果经线性层 W₂ 升维到 Gate 所需的 irreps，再加上自连接 SC。NequIP 原版（以及 MF-ompa 的 self_connection_type: nequip）用“特征 ⊗ 元素 one-hot”的全连接张量积，含大量元素相关参数；SevenNet-0 / l3i5 换成普通线性层（linear），Matbench 模型卡称参数从约 1624 万（GNoME 式）降到 84 万。最后是 e3nn Gate：标量通道直接过 SiLU（偶）/ tanh（奇），l>0 通道乘以额外标量算出的门值——只缩放大小、不改方向，仍然等变。",
+      "math": "h_i'=W_2\\,m_i+\\mathrm{SC}(h_i),\\quad \\mathrm{SC}=W_{\\text{sc}}h_i\\ (\\text{linear})\\ \\text{或}\\ \\mathrm{FCTP}(h_i,a_i)\\ (\\text{nequip});\\qquad h_i^{(t+1)}=\\sigma\\big(h'_{i,0}\\big)\\oplus\\sigma_g(g_i)\\,h'_{i,l>0}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/interaction_blocks.py", "start": 36, "end": 76, "must": "block[f'{t}_equivariant_gate'] = gate_layer", "caption": "一个交互块：SC intro → W₁ → 卷积 → W₂ → SC outro → Gate"},
+        {"repo": "SevenNet", "file": "sevenn/nn/self_connection.py", "start": 100, "end": 114, "must": "data[KEY.SELF_CONNECTION_TEMP] = self.linear(x)", "caption": "SelfConnectionLinearIntro：线性自连接（SevenNet-0 / l3i5）"},
+        {"repo": "SevenNet", "file": "sevenn/nn/equivariant_gate.py", "start": 26, "end": 49, "must": "self.gate = Gate(", "caption": "EquivariantGate：标量激活 + 门控 l>0 通道"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "逐层堆叠与读出：最后一层只留标量",
+      "plain": "交互块重复 T 次（5 层；Omni-i12 为 12 层），各层输出 irreps 由 l_max 与 irreps_manual 决定；最后一层强制 lmax_node=0、只保留偶宇称，即只输出 128 个 0e 标量。读出是两个无偏置线性层（128→64→1），中间没有激活，把这些旋转不变量变成每个原子的（缩放前）能量。与 MACE 的逐层读出不同，只读最后一层。",
+      "math": "E_i^{\\text{NN}}=W_b\\,W_a\\,h_i^{(T)},\\qquad h_i^{(T)}\\in\\mathbb R^{128}\\ (0e),\\ W_a:128\\to64,\\ W_b:64\\to1",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 591, "end": 634, "must": "if t == num_convolution_layer - 1:", "caption": "逐层构建交互块；最后一层只输出偶宇称标量"},
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 103, "end": 124, "must": "hidden_irreps = Irreps([(irreps_x.dim // 2, (0, 1))])", "caption": "init_feature_reduce：两级线性读出"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：逐元素 scale / shift + 求和",
+      "plain": "原子能按元素做 E_i ← s_Z·E_i + μ_Z（SevenNet-0：shift 取逐元素参考能、scale 取 1.730，均不训练；多保真度模型的 shift 还随任务变），再由 AtomReduce 按结构求和。能量写成原子能之和保证了广延性。紧接着模型末尾挂上 ForceStressOutputFromEdge，用同一张计算图求力和应力。",
+      "math": "E=\\sum_{i}\\Big(s_{Z_i}E_i^{\\text{NN}}+\\mu_{Z_i}\\Big)\\qquad(\\text{多保真度：}\\mu_{m,Z_i})",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/scale.py", "start": 182, "end": 190, "must": "data[self.key_output] = inp * scale + shift", "caption": "SpeciesWiseRescale：逐元素 scale/shift"},
+        {"repo": "SevenNet", "file": "sevenn/nn/linear.py", "start": 127, "end": 139, "must": "output.scatter_reduce_(0, data[KEY.BATCH], src, reduce='sum')", "caption": "AtomReduce：原子能 → 总能"},
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 636, "end": 650, "must": "'rescale_atomic_energy': init_shift_scale(config)", "caption": "读出 → 缩放平移 → 求和 → 力/应力模块"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对边向量自动微分，再按边两端回收",
+      "plain": "AtomGraphSequential 在前向开始时就对边向量 r_ij 打开 requires_grad。总能算完后，ForceStressOutputFromEdge 用一次 torch.autograd.grad 得到每条边的 f_ij = ∂E/∂r_ij；由于 r_ij = r_j − r_i + S·C，把 f_ij 按边的起点加、终点减 scatter 回原子，正好是 −∂E/∂r。力因此严格保守；以边为中间变量的好处是同一份 f_ij 还能直接给出应力和逐原子维里，也天然适配 LAMMPS 中“边在本进程、端点可能是 ghost 原子”的情形。",
+      "math": "\\mathbf f_{ij}=\\frac{\\partial E}{\\partial\\mathbf r_{ij}},\\qquad \\mathbf F_k=-\\frac{\\partial E}{\\partial\\mathbf r_k}=\\sum_{j}\\mathbf f_{kj}-\\sum_{i}\\mathbf f_{ik}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/sequential.py", "start": 157, "end": 169, "must": "data[self.key_grad].requires_grad_(True)", "caption": "_preprocess：类型/任务映射，并对边向量打开梯度"},
+        {"repo": "SevenNet", "file": "sevenn/nn/force_output.py", "start": 171, "end": 195, "must": "data[self.key_force] = pf - nf", "caption": "ForceStressOutputFromEdge：∂E/∂r_ij → 原子力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力与逐原子维里：Σ r_ij ⊗ f_ij",
+      "plain": "同一份 f_ij 与边向量做外积（xx, yy, zz, xy, yz, zx 六个分量），按边的终点原子累加得到逐原子维里（compute_atomic_virial 时以 stresses 输出），再对整个结构求和、除以体积得到应力；非周期体系体积取 1e-3 下限防止除零。计算器最后取负号并重排成 ASE 的 Voigt 顺序。不需要额外的应变变量，一次反传同时得到力、应力和原子维里（部署给 LAMMPS 串行版时则改用对坐标与晶胞施加虚拟应变的写法）。",
+      "math": "\\boldsymbol\\sigma=\\frac{1}{V}\\sum_{(i,j)}\\mathbf r_{ij}\\otimes\\mathbf f_{ij}\\ \\Big(=\\frac1V\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big),\\qquad \\mathbf W_k=-\\sum_{i}\\mathbf r_{ik}\\otimes\\mathbf f_{ik}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/nn/force_output.py", "start": 197, "end": 237, "must": "torch.neg(sout) / volume.unsqueeze(-1)", "caption": "边维里 → 逐原子维里 → 结构应力"},
+        {"repo": "SevenNet", "file": "sevenn/calculator.py", "start": 208, "end": 232, "must": "results['stresses'] = virial", "caption": "output_to_results：能量、原子能、力、应力（Voigt）、原子维里"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "并行 MD：逐层 ghost 通信的空间分解（e3gnn/parallel）",
+      "plain": "消息传递的难点在于：T 层后原子 i 依赖 T·r_c 内的原子，若只靠加宽 ghost 区，冗余计算随层数暴涨。SevenNet 把模型在每个 self_interaction_1 处切成 T 段（每段重建边嵌入；ghost 原子的初始特征只依赖元素，可本地算出）。在 LAMMPS 中，每段前向之前由 comm_brick 把邻居进程上 ghost 原子的最新节点特征 forward_comm 过来；能量算完后按层倒序反传，每层把对 ghost 特征的梯度 reverse_comm 回其所属进程，与本地梯度相加后继续向前一层传，同时累加 ∂E/∂r_ij，最后由 LAMMPS 组装力与维里。这样每张 GPU 只需保存自己子域的图，可多 GPU 跑大体系 MD。",
+      "math": "\\mathbf h^{(t)}_{\\text{ghost}}\\leftarrow\\mathbf h^{(t)}_{\\text{owner}}\\ (\\text{forward\\_comm}),\\qquad \\frac{\\partial E}{\\partial\\mathbf h^{(t)}_{\\text{owner}}}\\mathrel{+}=\\frac{\\partial E}{\\partial\\mathbf h^{(t)}_{\\text{ghost}}}\\ (\\text{reverse\\_comm}),\\qquad \\mathbf f_{ij}=\\sum_{t}\\frac{\\partial E}{\\partial\\mathbf r^{(t)}_{ij}}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/model_build.py", "start": 456, "end": 465, "must": "del layers_list[-1]['force_output']", "caption": "_to_parallel_model：按层切段，力交给 LAMMPS 端计算"},
+        {"repo": "SevenNet", "file": "sevenn/pair_e3gnn/pair_e3gnn_parallel.cpp", "start": 358, "end": 390, "must": "comm_brick->forward_comm(this);", "caption": "前向：每段之前交换 ghost 原子特征"},
+        {"repo": "SevenNet", "file": "sevenn/pair_e3gnn/pair_e3gnn_parallel.cpp", "start": 404, "end": 441, "must": "comm_brick->reverse_comm(this);", "caption": "反向：逐段 autograd，ghost 梯度回传并累加 dE/dr"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程 / 弱相互作用：官方 CUDA D3 外挂",
+      "plain": "SevenNet 本体没有任何静电或色散项。官方提供 GPU 版 Grimme D3（从原始 Fortran 代码移植，CUDA + FP32）：ASE 中 SevenNetD3Calculator 用 SumCalculator 把 SevenNet 与 D3Calculator 的能量/力/应力相加（默认 BJ 阻尼、PBE 参数，vdw_cutoff = 9000 au²，即约 95 Bohr；cn_cutoff = 1600 au²，即 40 Bohr）；LAMMPS 中 pair_style d3 与 e3gnn 通过 pair/hybrid 叠加；TorchSim 有 SevenNetD3Model。D3 部分不提供逐原子应力。",
+      "math": "E_{\\text{tot}}=E_{\\text{SevenNet}}+E_{\\text{D3}},\\qquad E_{\\text{D3(BJ)}}=-\\sum_{i<j}\\sum_{n=6,8}s_n\\frac{C_n^{ij}}{r_{ij}^{\\,n}+(a_1R_0^{ij}+a_2)^{n}}",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/calculator.py", "start": 313, "end": 334, "must": "super().__init__([sevennet_calc, d3_calc])", "caption": "SevenNetD3Calculator：SevenNet + D3 求和"},
+        {"repo": "SevenNet", "file": "sevenn/calculator.py", "start": 260, "end": 268, "must": "vdw_cutoff: float = 9000", "caption": "D3 默认参数：damp_bj、pbe、截断（单位 au²）"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff r_c", "value": "5.0 Å（SevenNet-0 / l3i5）；6.0 Å（MF-ompa / Omni）；代码默认 4.5 Å", "note": "截断半径（与 Matbench 模型卡 graph_construction_radius 一致）", "code": {"repo": "SevenNet", "file": "sevenn/presets/mf_ompa_fine_tune.yaml", "start": 2, "end": 5, "must": "cutoff: 6.0"}},
+    {"name": "num_convolution_layer", "value": "5（SevenNet-0 / l3i5 / MF-ompa / Omni）；Omni-i8 为 8、Omni-i12 为 12；代码默认 3", "note": "交互块层数", "code": {"repo": "SevenNet", "file": "sevenn/presets/sevennet-0.yaml", "start": 2, "end": 15, "must": "num_convolution_layer: 5"}},
+    {"name": "lmax", "value": "2（SevenNet-0）；3（l3i5 / MF-ompa / Omni）；代码默认 1", "note": "边球谐与隐藏特征最高阶", "code": {"repo": "SevenNet", "file": "sevenn/presets/sevennet-l3i5.yaml", "start": 4, "end": 15, "must": "lmax: 3"}},
+    {"name": "irreps（各层特征）", "value": "SevenNet-0：128x0e+64x1e+32x2e；l3i5 再加 32x3e；MF-ompa 中间层奇偶宇称都有（如 128x0e+64x1o+64x1e+32x2o+32x2e+32x3o+32x3e）；首尾层 128x0e", "note": "irreps_manual 手工指定", "code": {"repo": "SevenNet", "file": "sevenn/presets/mf_ompa_fine_tune.yaml", "start": 6, "end": 12, "must": "128x0e+64x1o+64x1e+32x2o+32x2e+32x3o+32x3e"}},
+    {"name": "is_parity", "value": "False（SevenNet-0 / l3i5）；True（MF-ompa）；代码默认 True", "note": "是否区分奇偶宇称（False 时只保证 SO(3) 等变）", "code": {"repo": "SevenNet", "file": "sevenn/presets/mf_ompa_fine_tune.yaml", "start": 13, "end": 17, "must": "is_parity: true"}},
+    {"name": "radial basis × cutoff", "value": "8 个 Bessel（频率可训练）× XPLOR（r_on = 4.5 Å：SevenNet-0；5.5 Å：MF-ompa）或多项式 p=6（l3i5）", "note": "径向编码与平滑截断", "code": {"repo": "SevenNet", "file": "sevenn/presets/sevennet-0.yaml", "start": 17, "end": 23, "must": "cutoff_on: 4.5"}},
+    {"name": "weight_nn_hidden_neurons", "value": "[64, 64]（SiLU）", "note": "Bessel 边嵌入 → 张量积逐边权重", "code": {"repo": "SevenNet", "file": "sevenn/_const.py", "start": 112, "end": 134, "must": "KEY.CONVOLUTION_WEIGHT_NN_HIDDEN_NEURONS: [64, 64]"}},
+    {"name": "conv_denominator", "value": "avg_num_neigh（SevenNet-0 为 35.989574）", "note": "聚合后除以平均邻居数（可选 sqrt_avg_num_neigh）", "code": {"repo": "SevenNet", "file": "sevenn/pretrained_potentials/SevenNet_0__11Jul2024/pre_train.yaml", "start": 21, "end": 30, "must": "conv_denominator: 35.989574"}},
+    {"name": "self_connection_type", "value": "linear（SevenNet-0 / l3i5）；nequip（MF-ompa：特征 ⊗ 元素 one-hot 全连接张量积）", "note": "SevenNet 相对 NequIP 的主要减参手段", "code": {"repo": "SevenNet", "file": "sevenn/presets/mf_ompa_fine_tune.yaml", "start": 37, "end": 43, "must": "self_connection_type: nequip"}},
+    {"name": "modality 开关（MF-ompa）", "value": "use_modal_self_inter_intro / outro / output_block = true；node_embedding = false；另设 use_modal_wise_shift = true", "note": "任务 one-hot 拼进哪些线性层", "code": {"repo": "SevenNet", "file": "sevenn/presets/mf_ompa_fine_tune.yaml", "start": 37, "end": 43, "must": "use_modal_output_block: true"}},
+    {"name": "shift / scale", "value": "SevenNet-0：逐元素参考能 / 1.730（per_atom_energy_std）；MF-ompa：逐任务 × 逐元素 shift", "note": "原子能缩放与平移（不训练）", "code": {"repo": "SevenNet", "file": "sevenn/pretrained_potentials/SevenNet_0__11Jul2024/pre_train.yaml", "start": 70, "end": 74, "must": "scale: 1.730"}},
+    {"name": "参数量", "value": "SevenNet-0 842,440；l3i5 1,171,144；MF-ompa 25,734,966；Omni-i12 54,921,363", "note": "Matbench Discovery 模型卡（Omni-i12 训练：8×H200，每卡 800 h）", "code": {"repo": "matbench-discovery", "file": "models/sevennet/sevennet-omni-i12.yml", "start": 67, "end": 73, "must": "model_params: 54921363"}}
+  ],
+  "speedNotes": [
+    "FLOPs 主要花在每层每条边的 CG 张量积（uvu）与径向 MLP 上；SevenNet-0（l_max=2、5 层、0.84M 参数）是官方推理最快的老模型，文档称 l3i5（l_max=3）约慢 4 倍；Omni-i12 有 12 层、约 5490 万参数。",
+    "相对 NequIP 的减参：SevenNet-0 / l3i5 把自连接里“特征 ⊗ 元素 one-hot”的全连接张量积换成线性层（Matbench 模型卡：约 1624 万 → 84 万参数）；MF-ompa 仍用 nequip 式自连接。",
+    "张量积内核可换：FlashTP（文档称最高约 4×）、cuEquivariance（gather–TP–scatter 融合）、OpenEquivariance、LunaTP；文档称约 10³ 原子以下 FlashTP + LAMMPS Torch 更快，更大体系 cuEquivariance + ML-IAP 更快。",
+    "多保真度参数只是几个线性层上拼接的任务 one-hot，MF-0 文档称推理开销可忽略；蒸馏得到的 SevenNet-Nano（105k 参数、3 层、l_max=2）文档称比教师模型快一个数量级以上。",
+    "力、应力、原子维里共用一次对边向量的反传；D3 用 CUDA + FP32 实现以免拖慢 GPU 上的势函数，但文档说明它暂不支持多 GPU / 多核并行。"
+  ],
+  "weakNotes": [
+    "截断 5 Å（SevenNet-0 / l3i5）或 6 Å（MF-ompa / Omni），5 层消息传递使感受野约 25–30 Å，Omni-i12 的 12 层可达 72 Å；但网络中没有显式 r⁻⁶ 色散或 r⁻¹ 静电项，感受野外的长程尾巴完全缺失。",
+    "SevenNet-0 / l3i5 只用 MPtrj，MF-ompa 用 MPtrj + sAlex + OMat24（PBE/PBE+U），几乎不含 vdW：层状材料、分子晶体、物理吸附应叠加官方 CUDA D3（SevenNetD3Calculator 或 LAMMPS pair_style d3，默认 BJ 阻尼 + PBE 参数）。",
+    "Omni 的 13 个任务覆盖 PBE(+U)、RPBE、PBEsol、PBE0、r²SCAN、ωB97M(-V)、PBE-D3（odac23）等；选 omol25_low（ωB97M-V）或 odac23（PBE-D3）这类标签本身已含色散的任务时，再叠加 D3 会重复计算。",
+    "没有总电荷 / 自旋输入，也没有电荷平衡或 Ewald 静电；带电缺陷、离子液体、电化学界面风险较大（omol25_high 任务只是“高自旋构型”的数据集标签，并非自旋输入）。",
+    "没有 ZBL 近核排斥先验，极短距离行为完全依赖训练数据：Matbench Discovery 双原子测试中 l3i5 排除了 He–He、Omni-i12 排除了 Bi–Bi（原因记为 exploding errors）。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 平滑截断 → 适合声子与热导率：Matbench Discovery κ_SRME 为 SevenNet-0 0.762、l3i5 0.5496、MF-ompa 0.3171、Omni-i12 0.1917。",
+    "稳定性预测与几何优化：Matbench Discovery 全测试集 F1 = 0.719（SevenNet-0）/ 0.751（l3i5）/ 0.884（MF-ompa）/ 0.887（Omni-i12）；弛豫结构 RMSD 0.0848（SevenNet-0）、0.0639（MF-ompa）、0.0618（Omni-i12）。",
+    "大体系 MD 是 SevenNet 的主打：LAMMPS e3gnn/parallel 多 GPU 空间分解（文档推荐 CUDA-aware OpenMPI），另有 ML-IAP、ASE 与 TorchSim 批量 MD / 弛豫接口。",
+    "多保真度 / 多任务：同一个 Omni 模型可切到 r²SCAN 或 ωB97M-V 任务做更高精度预测；官方还提供带遗忘抑制（经验回放 + EWC / reEWC）的微调框架，适合在小数据上继续学习。",
+    "原生应力与逐原子维里 → NPT MD、状态方程、弹性常数；没有偶极 / 极化率 / 磁矩读出头，红外 / 拉曼光谱与磁性体系需另行扩展。"
+  ],
+  "strengths": ["LAMMPS 多 GPU 空间分解并行，专为消息传递势设计，适合大体系 MD", "NequIP 式严格等变，线性自连接大幅减参（SevenNet-0 仅 0.84M 参数）", "多保真度 / 多任务：一个 Omni 模型覆盖 PBE(+U)、r²SCAN、ωB97M-V 等 13 个任务", "Omni-i12 在 Matbench Discovery 上 κ_SRME 0.1917、F1 0.887", "加速生态完善：FlashTP / cuEq / OpenEquivariance / LunaTP、CUDA D3、TorchSim"],
+  "weaknesses": ["5–12 层 l_max=3 张量积，推理比 2 层的 MACE、严格局域的 Allegro 更慢", "每层都要 ghost 特征通信，并行效率受通信限制", "无静电、无电荷/自旋输入，色散只能外挂 D3", "无 ZBL 近核排斥；is_parity=False 的模型只保证 SO(3) 等变", "除 E/F/S/原子维里外没有额外性质输出"],
+  "pretrained": ["SevenNet-0（11Jul2024，MPtrj；ASE 默认模型）", "SevenNet-l3i5（MPtrj，l_max=3）", "SevenNet-MF-0（MP 的 PBE(+U) + r²SCAN）", "SevenNet-MF-ompa（MPtrj + sAlex + OMat24；任务 mpa / omat24）", "SevenNet-omat（OMat24）", "SevenNet-Omni / Omni-i8 / Omni-i12（15 个开放数据集、13 个任务）", "SevenNet-Nano（由 Omni mpa 蒸馏；截断 4.5 / 5.0 / 5.5 / 6.0 Å）"],
+  "mbdKeys": ["sevennet-0", "sevennet-l3i5", "sevennet-mf-ompa", "sevennet-omni-i12"],
+  "arenaKeys": ["SevenNet"]
+}

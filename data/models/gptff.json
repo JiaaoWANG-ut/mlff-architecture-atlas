@@ -1,0 +1,195 @@
+{
+  "id": "gptff",
+  "name": "GPTFF",
+  "fullName": "GPTFF: Graph-based Pretrained Transformer Force Field",
+  "year": 2024,
+  "authors": "F. Xie, T. Lu, S. Meng, M. Liu",
+  "paper": {"title": "GPTFF: A high-accuracy out-of-the-box universal AI force field for arbitrary inorganic materials", "venue": "Science Bulletin 2024", "url": "https://www.sciencedirect.com/science/article/pii/S2095927324006327"},
+  "repos": ["GPTFF"],
+  "family": "invariant-mpnn",
+  "tags": ["不变 MPNN", "三体键角（M3GNet 式）", "全晶胞 Transformer（v2）", "求和后 MLP 读出", "无机 + 有机分子预训练"],
+  "framework": "PyTorch（近邻表/三体枚举为 Cython + C++）",
+  "license": "GPL-3.0",
+  "oneLiner": "M3GNet/CHGNet 风格的不变图网络：5 Å 内的原子对是边，先用 3.5 Å 内的键角更新边、再用门控卷积更新原子；v2 在每层后加一个覆盖整个晶胞的 Transformer 自注意力，最后把全部原子特征求和、过 MLP 得到总能，力和应力靠自动求导。",
+  "analogy": "像一个班级开讨论会：每人先和 5 米内的同学两两交流（边），挨得很近的三人小组还会讨论彼此的站位夹角（三体）；v2 版每轮讨论后再开一次全班大会（自注意力），谁都能听到所有人的意见；最后把全班意见汇总成一份报告（求和 + MLP），给出全班的“总能量”。",
+  "arch": {
+    "geometry": "边长 r_ij（16 个正弦 Bessel 基，键 r_c=5 Å）+ 键角 cosθ_jik（仅 ≤3.5 Å 的短键对，线性嵌入）；无球谐/方向向量特征",
+    "equivariance": "E(3) 不变（只用距离与夹角余弦）；Transformer 无位置编码，对原子置换等变",
+    "lmax": "无球谐（全为 l=0 标量）；角度只以 cosθ 一个标量线性嵌入",
+    "bodyOrder": "显式三体（j–i–k 键对）；3 层消息传递后有效体序更高",
+    "layers": "3（n_layers=3：每层 = 三体边更新 → 边更新 → 原子卷积 [→ v2 的 1 层 Transformer 编码器]）",
+    "cutoff": "键 5.0 Å；三体（键角）3.5 Å；没有平滑截断包络",
+    "receptiveField": "局域消息传递 3×5 Å≈15 Å；但读出“全胞求和→MLP”使能量非局域；v2 每层自注意力覆盖整个模拟胞",
+    "message": "三体：σ(W₁t)⊙SiLU(W₂t)⊙B_j e(r_ij)⊙B_k e(r_ik)⊙(a·cosθ+b) 累加到边 ij；原子：门控 MLP(h_i,h_j,e_ij)⊙W_r e(r_ij) 对邻居求和（残差）",
+    "readout": "原子特征对全晶胞求和 → 两层 SiLU 全连接 → 线性输出总能，再加元素参考能 Σ E_ref(Z_i)",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R：对坐标 torch.autograd.grad；需要应力时与应力在同一次反传中得到",
+    "stress": "零应变 ε（requires_grad）同时作用于坐标与晶胞；σ = (1/V)∂E/∂ε × 160.2 → GPa",
+    "longRange": "无显式长程项（无 Ewald/电荷）；v2 的全局注意力可跨截断混合全胞信息，但不是物理形式的长程势",
+    "dispersion": "无内置色散，也无官方 D3 外挂",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "仅能量、力、应力；另有批量能量推理 API；无 Hessian/偶极/电荷/磁矩",
+    "strictlyLocal": false,
+    "complexity": "边/原子更新 O(N·M·C²)；三体 O(N·m²·C²)（m 为 3.5 Å 内邻居数）；v2 注意力 O(N²·C)；C=64",
+    "accel": "C++/Cython 胞列表近邻 + 三体枚举（CPU）；ASE 计算器、批量能量推理、TorchSim 接口；训练用 AMP；暂无 LAMMPS（README 称以后支持）"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "仅 3 层、64 维标量特征、约 35 万参数，没有张量积，建图用 C++；但三体键对 ∝ N·m²，v2 的全晶胞注意力 ∝ N²，且 ASE 路径每步在 CPU 上重建图。"},
+    "expressiveness": {"v": 3, "why": "显式三体键角 + 3 层门控消息传递，强于纯距离模型；但只有不变标量、角度只以 cosθ 线性嵌入，角分辨率与体序不及高阶等变模型。"},
+    "longRange": {"v": 2, "why": "无色散、静电、电荷输入，也无官方 D3 外挂；v2 的全晶胞注意力能混合全胞信息，但不含 1/r 或 r⁻⁶ 这类物理长程形式。"},
+    "scalability": {"v": 1, "why": "能量是“全胞求和后再过 MLP”（v2 还有全局注意力），无法分解为原子能，因而无法做空间分解；无 LAMMPS / 多 GPU，只能整图计算。"},
+    "physics": {"v": 2, "why": "保守力、严格旋转/平移不变；但没有平滑截断包络（线性层偏置使消息在 r_c 处不归零）、求和后的非线性读出使广延性不受结构保证、无 ZBL 近程排斥。"},
+    "coverage": {"v": 2, "why": "官方只输出能量、力、应力（另有批量能量推理）；无 Hessian、偶极、电荷、磁矩等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、元素、晶胞（外加一个“虚拟应变”）",
+      "plain": "ASE 的 Atoms 被读成三样东西：笛卡尔坐标、原子序数 Z（整数索引，后面查嵌入表）和 3×3 晶胞。需要力和应力时，坐标被设为可求导，并额外创建一个全零、可求导的 3×3 应变张量 ε——力和应力都是之后对它们求导得到的。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\qquad \\boldsymbol\\varepsilon=\\mathbf 0_{3\\times3}\\ (\\text{requires\\_grad})",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 83, "end": 86, "must": "crystal.get_atomic_numbers()", "caption": "custom_graph.transform：读取坐标、晶胞、原子序数"},
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 273, "end": 281, "must": "strain = torch.zeros_like(lattice, dtype=torch.float32).requires_grad_(True)", "caption": "get_efs：坐标与零应变张量打开 requires_grad"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "建图：5 Å 内的有向键 + 3.5 Å 内的键对（三体）",
+      "plain": "C++ 胞列表（cell list）在周期边界下找出所有距离 ≤ 5 Å 的原子对，每条有向边 i→j 记录周期平移。然后只保留 ≤ 3.5 Å 的短键，把同一中心原子 i 的每两条不同短键 (i→j, i→k) 组成有序键对，代表键角 j–i–k。三体数 ∝ N·m²（m 为 3.5 Å 内邻居数），这是 M3GNet/CHGNet 式三体图的典型代价。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j+\\mathbf S_{ij}\\mathbf C-\\mathbf r_i\\rVert\\le r_c=5\\,\\},\\qquad \\mathcal T(i)=\\{\\,(j,k):\\ j\\ne k,\\ r_{ij}\\le r_a,\\ r_{ik}\\le r_a=3.5\\,\\}",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 95, "end": 103, "must": "find_neighbors(coords, lattice, self.r_cut", "caption": "近邻表（r_cut=5）与三体键对（a_cut=3.5）"},
+        {"repo": "GPTFF", "file": "gptff/utils_/source/utils.cc", "start": 183, "end": 196, "must": "if ((dist_r <= cutoff) && !zero_self_edge)", "caption": "C++ 胞列表：距离 ≤ cutoff 且非自身即为边"},
+        {"repo": "GPTFF", "file": "gptff/utils_/source/utils.cc", "start": 72, "end": 94, "must": "if (j != k)", "caption": "cal_tp：同一中心原子的短键两两（j≠k）组成键对"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何特征：距离 → 正弦 Bessel 基；夹角 → cosθ",
+      "plain": "每个距离被展开成 16 个正弦基 sin(nπr/r_c)/r（n=0…15，n=0 项恒为 0）：键用 r_c=5 Å，三体里的两条短键用 r_c=3.5 Å。夹角只以 cosθ_jik 这一个标量出现（两条键向量的点积）。这些量只依赖相对位置，所以能量天然对平移、旋转、镜像不变。代码里没有额外的平滑截断包络：基函数在 r_c 处为 0，但后续线性层带偏置，邻居跨过截断时消息未必严格归零。",
+      "math": "e_n(r)=\\sqrt{\\tfrac{2}{r_c}}\\,\\frac{\\sin(n\\pi r/r_c)}{r},\\ n=0,\\dots,15,\\ r_c\\in\\{5,\\,3.5\\};\\qquad \\cos\\theta_{jik}=\\frac{\\mathbf r_{ij}\\cdot\\mathbf r_{ik}}{r_{ij}\\,r_{ik}}",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 46, "end": 53, "must": "torch.sin(filters * (torch.pi / float(rcut)) * d_ij) / d_ij", "caption": "ebf：正弦 Bessel 径向基（无包络）"},
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 54, "end": 66, "must": "triple_a_jik = (triple_vec_ij * triple_vec_ik).sum(dim=1)", "caption": "边向量、距离与夹角余弦（可对坐标/应变求导）"},
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 392, "end": 397, "must": "self._radial_basis(triple_dist_ij.unsqueeze(-1), 3.5)", "caption": "键用 5 Å、三体用 3.5 Å 的径向基"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：元素 → 64 维向量；边 → 两端原子 + 距离",
+      "plain": "原子序数通过 nn.Embedding(95, 64) 查表得到初始原子特征（max_norm 限制嵌入向量的范数）。初始边特征把两端原子的嵌入和距离基拼接后过线性层，再逐通道乘以由距离基线性生成的“径向滤波”向量。",
+      "math": "h_i^{(0)}=\\mathrm{Emb}(Z_i)\\in\\mathbb R^{64},\\qquad e_{ij}^{(0)}=W_{e}\\big[h_i\\,\\|\\,h_j\\,\\|\\,W_b\\,\\mathbf e(r_{ij})\\big]\\odot W_r\\,\\mathbf e(r_{ij})",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 358, "end": 363, "must": "nn.Embedding(95, atom_fea_len, max_norm=True)", "caption": "元素嵌入表与边初始化线性层"},
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 403, "end": 410, "must": "edge_ij = self.w_eij(edge_ij) * self.w_r(bonds_dist)", "caption": "初始边特征 = 线性(拼接) ⊙ 径向滤波"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：三体更新 —— 把键角写进边",
+      "plain": "对每个键对 (i→j, i→k)，把三个原子特征和两条边特征拼起来过 SiLU 线性层，再以“sigmoid 门 × SiLU”的门控形式，与两条短键的径向基投影、cosθ 的线性嵌入逐通道相乘，最后把属于同一条边 i→j 的所有键对贡献加回 e_ij。这样边特征就知道了“邻居们围成什么角度”，与 M3GNet/CHGNet 的三体机制同类。",
+      "math": "t_{ijk}=\\mathrm{SiLU}\\big(W_f[h_i\\|h_j\\|h_k\\|e_{ij}\\|e_{ik}]\\big),\\qquad e_{ij}\\leftarrow e_{ij}+\\sum_{k\\ne j}\\sigma(W_1t_{ijk})\\odot\\mathrm{SiLU}(W_2t_{ijk})\\odot B_j\\mathbf e(r_{ij})\\odot B_k\\mathbf e(r_{ik})\\odot(\\mathbf a\\cos\\theta_{jik}+\\mathbf b)",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 99, "end": 115, "must": "edge_ij = torch.index_add(edge_ij, 0, bond_pair_target, atom_fea_ik)", "caption": "ThreeBody.forward：门控三体消息累加到边 i→j"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：边更新 + 门控图卷积更新原子",
+      "plain": "边更新：把 (h_i, h_j, e_ij) 拼接，经“SiLU ⊙ sigmoid”门控和一层 SiLU 线性层，再乘径向滤波，以残差加回 e_ij。原子更新（ConvLayer）：同样的拼接先过 SiLU 线性层再门控，乘径向滤波后对所有邻居 j 求和、加回 h_i。每层依次做 三体 → 边 → 原子，共 3 层，感受野逐层扩大到约 3×5 Å。",
+      "math": "e_{ij}\\leftarrow e_{ij}+\\mathrm{SiLU}\\big(W_3[\\mathrm{SiLU}(W_1x_{ij})\\odot\\sigma(W_2x_{ij})]\\big)\\odot W_r\\mathbf e(r_{ij}),\\qquad h_i\\leftarrow h_i+\\sum_{j\\in\\mathcal N(i)}\\mathrm{SiLU}(U_1g_{ij})\\odot\\sigma(U_2g_{ij})\\odot U_r\\mathbf e(r_{ij}),\\ \\ g_{ij}=\\mathrm{SiLU}(U_fx_{ij}),\\ x_{ij}=[h_i\\|h_j\\|e_{ij}]",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 134, "end": 140, "must": "edge_ij = self.swish(self.W_3(edge_ij)) * self.W_r(bonds_r)", "caption": "EdgeUpdate：门控边更新"},
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 164, "end": 171, "must": "atom_fea = torch.index_add(atom_fea, 0, nbr_i, nbr_all.float())", "caption": "ConvLayer：门控消息 × 径向滤波，对邻居求和（残差）"},
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 412, "end": 425, "must": "for edge_func, conv, three in zip(self.edge_updates, self.convs, self.three):", "caption": "tModLodaer（v1）：每层 三体 → 边 → 原子"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ③（仅 v2）：全晶胞 Transformer 自注意力",
+      "plain": "启用 transformer_activate（gptff_v2）时，每层图卷积后先做 LayerNorm，再把同一结构的全部原子特征 pad 成序列，送入 1 层标准 PyTorch TransformerEncoder（2 头、前馈 256、GELU），输出 LayerNorm 后残差加回。注意力没有位置/距离编码，不破坏旋转与置换对称性，但让每个原子一次“看到”模拟胞内所有原子——这是名字里“Transformer”的来源，也使能量不再局域。v1 和分子模型不使用该模块。",
+      "math": "h\\leftarrow\\mathrm{LN}_1\\big(\\mathrm{Conv}(h,e)\\big),\\qquad h_i\\leftarrow h_i+\\mathrm{LN}_2\\Big(\\mathrm{TF}\\big(\\{h_j\\}_{j\\in\\text{cell}}\\big)_i\\Big),\\quad \\mathrm{Attn}=\\mathrm{softmax}\\Big(\\frac{QK^{\\top}}{\\sqrt{d_k}}\\Big)V",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 225, "end": 237, "must": "nn.TransformerEncoderLayer(d_model=atom_fea_len, nhead=2, dim_feedforward=256", "caption": "TransformerBlock：1 层编码器，2 头，前馈 256"},
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 326, "end": 332, "must": "atom_fea = norm2(transformer(atom_fea_list, masks))[~masks, :] + atom_fea", "caption": "tModLodaer_t（v2）：卷积 → LN → 按结构 pad → 自注意力 → LN → 残差"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：先对全晶胞求和，再过 MLP",
+      "plain": "3 层之后，把一个结构里所有原子的 64 维特征直接相加得到“晶体特征”，再经两层 SiLU 全连接和一个线性层输出一个标量。与 MACE/M3GNet“每个原子先出能量再求和”不同，这里非线性 MLP 作用在总和之上，所以能量不能分解为原子能之和，广延性（体系加倍 → 能量加倍）不由结构保证，力也会通过 MLP 的梯度与整个晶胞耦合。",
+      "math": "H=\\sum_{i=1}^{N}h_i^{(3)},\\qquad E_{\\text{NN}}=\\mathbf w_o^{\\top}\\,\\mathrm{SiLU}\\big(W_2\\,\\mathrm{SiLU}(W_1H+\\mathbf b_1)+\\mathbf b_2\\big)+b_o",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 427, "end": 435, "must": "cry_fea = torch.index_add(cry_fea, 0, atom_batch_index, atom_fea)", "caption": "求和池化 → fc1/fc2(SiLU) → fc_out"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：网络输出 + 元素参考能",
+      "plain": "总能 = 网络输出 + Σ_i E_ref(Z_i)。参考能是按元素查表的常数（“inorganic”/“molecular”两套，也可自定义），先把孤立元素的大部分能量剥离，网络只需学结合部分。训练时能量损失用每原子能量 E/N 的 Huber 损失，再加力和应力的 Huber 损失。",
+      "math": "E=E_{\\text{NN}}+\\sum_{i=1}^{N}E_{\\text{ref}}(Z_i),\\qquad \\mathcal L=w_E\\,\\mathrm{Huber}\\big(\\tfrac{E}{N}\\big)+w_F\\,\\mathrm{Huber}(\\mathbf F)+w_S\\,\\mathrm{Huber}(\\boldsymbol\\sigma)",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 216, "end": 228, "must": "return energy.view(-1) + ref_energy", "caption": "_model_energy：网络输出 + 参考能"},
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 105, "end": 107, "must": "ref_energy = np.sum(self.atom_refs[atom_fea])", "caption": "按元素累加参考能"},
+        {"repo": "GPTFF", "file": "gptff/trainer/trainer.py", "start": 211, "end": 224, "must": "loss = CFG.w1 * e_loss + CFG.w2 * f_loss + CFG.w3 * s_loss", "caption": "训练损失：每原子能量 + 力 + 应力（Huber）"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "力 = −∂E/∂r_i，由 torch.autograd.grad 对坐标一次反传得到，所以是保守力（NVE 下能量守恒）。由于读出是“求和后 MLP”（v2 还有全局注意力），每个原子的力原则上依赖整个晶胞，而不只是约 15 Å 内的邻居。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 250, "end": 271, "must": "force_pred = torch.autograd.grad(ener_pred, coords, torch.ones_like(ener_pred)", "caption": "get_ef：autograd 求力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对虚拟应变求导",
+      "plain": "把零应变 ε 同时作用于坐标和晶胞（r→r(1+ε)，C→C(1+ε)），距离与夹角随之变化；能量对 ε 求导再除以体积就是应力，乘 160.2 换算为 GPa。力和应力在同一次反传中得到。ASE 计算器返回 GPa（README 标注），TorchSim 接口默认 eV/Å³。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\qquad \\boldsymbol\\sigma=\\frac{160.2}{V}\\,\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}\\ \\ (\\text{GPa})",
+      "code": [
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 45, "end": 52, "must": "lattices = torch.matmul(lattice, eye + strain)", "caption": "应变同时作用于晶胞与坐标"},
+        {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 281, "end": 297, "must": "stress_pred = 1. / volumes[:, None, None] * stress_pred * 160.21766208", "caption": "get_efs：一次反传得到力与应力（GPa）"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "r_cut（键截断）", "value": "5.0 Å", "note": "近邻图半径；键的径向基 r_c 也是 5.0", "code": {"repo": "GPTFF", "file": "gptff/model/mpredict.py", "start": 72, "end": 72, "must": "r_cut=5.0, a_cut=3.5"}},
+    {"name": "a_cut（三体截断）", "value": "3.5 Å", "note": "只有 ≤3.5 Å 的短键参与键角", "code": {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 394, "end": 397, "must": "self._radial_basis(triple_dist_ik.unsqueeze(-1), 3.5)"}},
+    {"name": "径向基个数", "value": "16（n=0…15，n=0 项恒为 0）", "note": "正弦 Bessel 基，无平滑包络", "code": {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 57, "end": 58, "must": "torch.arange(16, dtype=torch.float32)"}},
+    {"name": "node / edge_feature_len", "value": "64 / 64", "note": "原子与边特征维度（根 config.json、分子模型 config 与 v1/v2 检查点 cfg 一致）", "code": {"repo": "GPTFF", "file": "config.json", "start": 9, "end": 10, "must": "\"node_feature_len\": 64"}},
+    {"name": "n_layers", "value": "3", "note": "三体 + 边 + 原子更新的层数", "code": {"repo": "GPTFF", "file": "config.json", "start": 11, "end": 11, "must": "\"n_layers\": 3"}},
+    {"name": "Transformer（仅 v2）", "value": "每层 1 个编码器层，nhead=2，dim_feedforward=256，GELU", "note": "检查点 cfg 中 transformer_activate=True 时启用", "code": {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 228, "end": 229, "must": "nhead=2, dim_feedforward=256"}},
+    {"name": "读出 MLP", "value": "64→64→64→1（SiLU）", "note": "作用在全晶胞求和特征上", "code": {"repo": "GPTFF", "file": "gptff/model/model.py", "start": 375, "end": 379, "must": "self.fc_out = nn.Linear(atom_fea_len, 1)"}},
+    {"name": "参数量", "value": "v1 约 35 万（351,745）；v2 约 50 万（502,465）", "note": "统计 pretrained/inorganic/*.pth 的 state_dict 元素数，与按代码逐层计算一致"},
+    {"name": "损失", "value": "Huber；w_E/w_F/w_S = 1/1/1（根 config）；分子 force_v1 为 1/5/0", "note": "能量按每原子 E/N 计", "code": {"repo": "GPTFF", "file": "gptff/trainer/trainer.py", "start": 217, "end": 224, "must": "ener_pred = ener_pred.view(-1) / n_atoms"}},
+    {"name": "优化器", "value": "AdamW，lr=1e-3，weight_decay=1e-4，余弦退火（min_lr=5e-6）", "note": "根 config.json 默认；训练用 AMP 混合精度", "code": {"repo": "GPTFF", "file": "gptff/trainer/trainer.py", "start": 106, "end": 117, "must": "min_lr=5e-6"}}
+  ],
+  "speedNotes": [
+    "模型很小：3 层、64 维特征、约 35 万参数（v2 约 50 万），每条边/每个三体只做几次 64 宽的线性层和逐元素门控，没有球谐张量积。",
+    "三体项按“同一中心原子 3.5 Å 内的所有有序键对”枚举，数量 ∝ N·m²，致密体系中是主要的显存/FLOPs 来源之一。",
+    "v2 每层在整个晶胞上做自注意力（按 batch 内最大原子数 pad），代价 ∝ N²：小晶胞可忽略，大超胞会成为瓶颈。",
+    "ASE 路径下近邻表与三体列表由 C++/Cython 在 CPU 上每步重建再拷到 GPU；README 提供 predict_energies_batched 批量能量推理与 TorchSim 接口以提高吞吐。",
+    "力/应力由一次 autograd 反传得到（约为前向的 2–3 倍）；训练需对力再反传（create_graph=True），使用 AMP，GPU 训练时注意力强制走 MATH 内核。"
+  ],
+  "weakNotes": [
+    "键截断 5 Å、三体 3.5 Å，3 层消息传递 → 局域部分约 15 Å；没有 D3 色散、没有 Ewald 静电，也没有电荷/自旋输入。",
+    "训练数据：无机模型用 Atomly 无机材料数据集，分子模型用 OpenGEM26（README）；仓库未注明 DFT 泛函与是否含色散修正，弱相互作用精度完全取决于这些数据。",
+    "v2 的注意力让原子“看到”整个模拟胞，但注意力不含距离信息、不感知周期镜像，也不是 1/r 或 r⁻⁶ 形式，不能当作物理长程项。",
+    "层状材料层间结合、分子晶体、物理吸附缺少截断外的 r⁻⁶ 尾巴；带电缺陷、离子液体、界面电荷转移没有显式静电，官方未提供修正。",
+    "截断处无平滑包络，原子跨越 5 Å / 3.5 Å 时能量可能有小跳变；对能量差本就很小的弱相互作用和长时间 NVE 守恒不利。"
+  ],
+  "downstreamNotes": [
+    "README 给出结构优化（FIRE + FrechetCellFilter 变胞、BFGS 定胞）与 ASE NVT 分子动力学示例；保守力适合 MD 与几何优化。",
+    "声子/热导率需要光滑的二阶导：无截断包络、读出非线性耦合全胞可能带来额外误差；没有 Hessian 接口，需有限位移。",
+    "应力单位：ASE 计算器返回 GPa（README 标注），而 ASE 惯例为 eV/Å³；TorchSim 接口默认 eV/Å³、可选 GPa。做状态方程/弹性常数时注意换算。",
+    "高通量能量筛选可用批量能量推理；分子检查点需传 reference_energies=\"molecular\"。",
+    "无偶极/极化率/电荷/磁矩输出，不能直接用于 IR/Raman 光谱或磁性问题。"
+  ],
+  "strengths": ["模型小（约 35 万参数）、推理便宜", "显式三体键角（M3GNet 式），强于纯两体 MPNN", "保守力 + 应变求导应力，可直接做变胞优化与 MD", "同时提供无机（v1/v2）与有机分子（GPTFF-mol）预训练模型，ASE/TorchSim 接口简单"],
+  "weaknesses": ["无平滑截断包络，能量在截断处可能不连续", "“求和后 MLP”读出：能量不能分解为原子能，广延性不由结构保证", "无色散、静电、电荷/自旋", "无 LAMMPS / 空间分解，大体系只能整图计算", "只有不变特征（cosθ），角分辨率不及等变模型"],
+  "pretrained": ["GPTFF v1（inorganic/gptff_v1.pth，无 Transformer，Atomly 无机数据）", "GPTFF v2（inorganic/gptff_v2.pth，启用 Transformer）", "GPTFF-mol energy_v1（OpenGEM26 有机分子，能量导向）", "GPTFF-mol force_v1（OpenGEM26 有机分子，力导向）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

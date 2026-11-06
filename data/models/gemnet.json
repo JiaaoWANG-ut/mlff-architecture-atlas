@@ -1,0 +1,209 @@
+{
+  "id": "gemnet",
+  "name": "GemNet",
+  "fullName": "GemNet: Universal Directional Graph Neural Networks for Molecules（GemNet-T / GemNet-Q；后续 GemNet-OC）",
+  "year": 2021,
+  "authors": "J. Gasteiger, F. Becker, S. Günnemann",
+  "paper": {"title": "GemNet: Universal Directional Graph Neural Networks for Molecules", "venue": "NeurIPS 2021", "url": "https://www.cs.cit.tum.de/daml/gemnet/"},
+  "repos": ["gemnet_pytorch", "fairchem"],
+  "family": "invariant-mpnn",
+  "tags": ["方向性 MPNN（不变特征 + 方向几何）", "两跳消息：三元组键角 + 四元组二面角", "球面 Fourier–Bessel 基", "保守力 / 直接力可切换", "GemNet-OC（OC20, fairchem）"],
+  "framework": "PyTorch（原始版本为 TensorFlow 2 的 gemnet_tf；GemNet-OC 属于 fairchem/OCP）",
+  "license": "Hippocratic License 2.0（附人权伦理条款的许可）",
+  "oneLiner": "GemNet 是“有方向感”的消息传递网络：消息放在有向边上，每个交互块既用三元组的键角、又用四元组的二面角（GemNet-Q）去更新边消息；所有几何量都展开成球面 Fourier–Bessel 基，再用高效双线性层聚合。力既可由能量自动求导（保守），也可在边上直接回归（更快）。",
+  "analogy": "像靠“问路”认识一个小区：普通 GNN 只问“你家离我多远”；GemNet 还会问“从我家看，你家和他家之间夹角多大”（三元组键角），甚至“我们两家门口的路各自往哪边拐”（四元组二面角）。多问一层方向，就能分辨出距离完全相同、但扭转方式不同的构象。",
+  "arch": {
+    "geometry": "距离 d（Bessel RBF）+ 键角 α_cab（j_l·Y_l0，CBF）+ 二面角 θ_cabd（j_l·Y_lm，SBF，仅 GemNet-Q）",
+    "equivariance": "E(3) 不变：只输入距离/键角/二面角，隐藏特征全是标量；方向信息通过角度进入",
+    "lmax": "num_spherical=7 → l=0…6；CBF 只用 m=0（7 个），SBF 用全部 Y_lm（49 个）",
+    "bodyOrder": "每块显式 3 体（三元组 c→a←b）+ 4 体（四元组 c→a–b←d，GemNet-Q）；多块叠加后更高",
+    "layers": "4 个交互块（num_blocks=4）+ 5 个输出块（嵌入后 1 个 + 每块 1 个）",
+    "cutoff": "嵌入/三元组 5 Å；四元组中间边 a–b 用 int_cutoff=10 Å（GemNet-OC 配置：12 Å + max_neighbors=30）",
+    "receptiveField": "多跳：每块至少外扩一个 5 Å 邻域，4 块 ≥ 20 Å；GemNet-Q 的 10 Å 中间边使其更大，小分子相当于全局",
+    "message": "有向边消息 m_ca：三元组 Σ_b CBF(d_ca,α_cab)·m_ba + 四元组 Σ_{b,d} SBF(d_ca,α_cab,θ_cabd)·m_db，经高效双线性层收缩",
+    "readout": "每个输出块：Σ_c RBF⊙m_ca → MLP → 无偏置线性层得原子能；5 个输出块相加后按分子求和",
+    "forces": "both",
+    "forcesDetail": "默认 direct_forces=False：F=−∂E/∂R（autograd，保守）；True（dT/dQ/OC）：边上标量 F_ca × 单位向量 v̂_ca 求和，快但不保守",
+    "stress": "无：参考实现只处理孤立分子（无晶胞/PBC），未实现维里/应力",
+    "longRange": "无静电/长程模块，只靠多块消息传递与 10 Å 四元组中间边扩大的感受野",
+    "dispersion": "无 D3 等色散项，只能在感受野内由训练数据隐式学到",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "num_targets 多目标回归；mve=True 时额外输出能量/力的方差（softplus，高斯 NLL 训练）",
+    "strictlyLocal": false,
+    "complexity": "三元组 ∝ N·M²，四元组 ∝ N·M²·M_int（最贵）；元组上只做 64/32 维低维运算；参考实现建图 O(N²)",
+    "accel": "无专用 GPU 内核；零填充稠密 batch matmul 的高效双线性层、跨块共享下投影、numba 生成索引；ASE 计算器，无 LAMMPS"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "4 个交互块且每块都要遍历三元组（∝N·M²），GemNet-Q 还要遍历更多的四元组（∝N·M²·M_int），保守力再加一次反传；GemNet-T 与直接力版本会快一些。"},
+    "expressiveness": {"v": 4, "why": "显式键角 + 二面角（每块 3/4 体）并用球面 Fourier–Bessel 基完整展开，是不变模型中最强的一档，但隐藏特征仍是标量而非高阶等变张量。"},
+    "longRange": {"v": 2, "why": "没有静电/色散项，只靠多块消息传递与 10 Å 四元组中间边扩大的感受野。"},
+    "scalability": {"v": 1, "why": "参考实现按整分子推理，邻居表在 CPU 上用 O(N²) 稠密距离矩阵构建，不支持 PBC、LAMMPS 或空间分解。"},
+    "physics": {"v": 4, "why": "默认保守力 + p=5 多项式平滑包络 + 原子能求和（广延），几何输入严格不变；但没有 ZBL 近程排斥，直接力变体不保守。"},
+    "coverage": {"v": 1, "why": "只有能量和力（无应力、Hessian、偶极接口）；唯一额外的是 mve 选项给出的能量/力方差。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：原子序数 Z 与坐标 R（孤立分子）",
+      "plain": "输入只有原子序数 Z 和笛卡尔坐标 R，参考实现针对孤立分子，没有晶胞和周期性。在默认的保守力模式（direct_forces=False）下，先把坐标设为可求导，之后对能量反传即可得到力。随后为每条有向边 c→a 计算长度 d_ca 和单位方向 v̂_ca（直接力模式会用到这个方向）。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_a, Z_a)\\}_{a=1}^{N},\\qquad d_{ca}=\\lVert\\mathbf r_a-\\mathbf r_c\\rVert,\\quad \\hat{\\mathbf v}_{ca}=\\frac{\\mathbf r_a-\\mathbf r_c}{d_{ca}}",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 493, "end": 497, "must": ".requires_grad = True", "caption": "forward：保守力模式下坐标设为可求导，并计算边长与方向"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 281, "end": 286, "must": "V_st = Rt - Rs", "caption": "calculate_interatomic_vectors：边向量、长度与单位方向"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "建图：5 Å 嵌入图 + 10 Å 相互作用图，枚举三元组与四元组",
+      "plain": "建图在 CPU 上完成：先算所有原子两两的距离矩阵，5 Å 内连边作为“嵌入图”；GemNet-Q 再用 10 Å 的 int_cutoff 建一张“相互作用图”。每对原子存成方向相反的两条有向边（id_swap 记录互逆关系）。共享目标原子 a 的两条边组成三元组 c→a←b；再通过一条 10 Å 内的 a–b 边把 c→a 与 d→b 连成四元组 c→a–b←d，并剔除原子重复的组合。消息的载体是“边”，信息在“边→边”之间传递，所以称为两跳（two-hop）几何消息传递。",
+      "math": "\\mathcal E=\\{c\\to a:\\ d_{ca}\\le c_{\\text{emb}}=5\\,\\mathring{\\mathrm A}\\},\\qquad \\mathcal T=\\{c\\to a\\leftarrow b:\\ b\\ne c\\},\\qquad \\mathcal Q=\\{c\\to a-b\\leftarrow d:\\ d_{ab}\\le c_{\\text{int}}=10\\,\\mathring{\\mathrm A}\\}",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/training/data_container.py", "start": 258, "end": 268, "must": "sp.csr_matrix(D_ij <= self.cutoff)", "caption": "稠密距离矩阵 → 嵌入图（cutoff）与相互作用图（int_cutoff）"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/training/data_container.py", "start": 411, "end": 425, "must": "mask = id3_i != id3_k", "caption": "get_triplets：共享原子 a 的边对 c→a←b"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/training/data_container.py", "start": 446, "end": 473, "must": "mask = mask1 * mask2 * mask3", "caption": "get_quadruplets：c→a–b←d，剔除原子重复"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何量：键角 α 与二面角 θ",
+      "plain": "有了边就能算角度。三元组的键角 α_cab 用 atan2(|u×v|, u·v) 计算，比 arccos 数值更稳，并给 |u×v| 设 1e-9 的下限避免梯度出现 NaN。四元组先把 r_ac 和 r_bd 分别投影到垂直于 a–b 轴的平面上（vector_rejection），再求两个投影的夹角，即二面角 θ_cabd。距离、角度、二面角都与坐标系无关，所以模型天然满足旋转/平移不变，同时又“看得见”方向。",
+      "math": "\\alpha_{cab}=\\operatorname{atan2}\\big(\\lVert\\mathbf r_{ac}\\times\\mathbf r_{ab}\\rVert,\\ \\mathbf r_{ac}\\cdot\\mathbf r_{ab}\\big),\\qquad \\theta_{cabd}=\\angle\\big(\\mathbf r_{ac}-(\\mathbf r_{ac}\\cdot\\hat{\\mathbf n})\\hat{\\mathbf n},\\ \\mathbf r_{bd}-(\\mathbf r_{bd}\\cdot\\hat{\\mathbf n})\\hat{\\mathbf n}\\big),\\ \\ \\hat{\\mathbf n}\\parallel\\mathbf r_{ab}",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 304, "end": 311, "must": "angle = torch.atan2(y, x)", "caption": "calculate_neighbor_angles：atan2 求键角"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 384, "end": 418, "must": "R_bd_proj = GemNet.vector_rejection(R_bd, R_ba)", "caption": "calculate_angles：投影到垂直 a–b 的平面后求二面角"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "基函数：Bessel 径向基 × 球谐（RBF / CBF / SBF）+ 平滑包络",
+      "plain": "几何量不直接喂给网络，而是展开成一组光滑基函数。距离用 6 个 sin(f_n d/c)/d 型 Bessel 基，频率 f_n 初始化为 nπ 且可学习；“距离 + 键角”用球 Bessel 函数 j_l 乘以球谐 Y_l0 的二维 Fourier–Bessel 基（CBF）；“距离 + 键角 + 二面角”用 j_l 乘以 Y_lm 的三维基（SBF，见四元组一步）。所有基都乘上 p=5 的多项式包络 u(d/c)，它在截断处连同一、二阶导数一起光滑归零，保证能量和力连续。",
+      "math": "e_{\\text{RBF},n}(d)=u\\!\\left(\\tfrac{d}{c}\\right)\\sqrt{\\tfrac{2}{c}}\\,\\frac{\\sin(f_n d/c)}{d},\\ f_n^{\\text{init}}=n\\pi;\\qquad u(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ p=5;\\qquad e_{\\text{CBF},ln}=\\frac{u(d_{ca}/c)}{c^{3/2}}\\,\\tilde j_l\\!\\left(z_{ln}\\tfrac{d_{ca}}{c}\\right)Y_{l0}(\\alpha_{cab})",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/basis_layers.py", "start": 37, "end": 49, "must": "torch.sin(self.frequencies * d_scaled) / d", "caption": "BesselBasisLayer：可学习频率的 Bessel 径向基"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/envelope.py", "start": 18, "end": 29, "must": "torch.where(d_scaled < 1, env_val", "caption": "Envelope：p=5 多项式平滑截断"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/basis_layers.py", "start": 119, "end": 131, "must": "sph = [f(Angle_cab) for f in self.sph_funcs]", "caption": "SphericalBasisLayer：球 Bessel j_l × Y_l0（CBF）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：原子嵌入 h_a + 有向边嵌入 m_ca",
+      "plain": "每种元素查表得到 128 维原子嵌入 h_a。每条有向边把两端原子的嵌入与距离 RBF 拼接，经一个无偏置的线性层 + ScaledSiLU 得到 128 维边嵌入 m_ca。之后的三元组/四元组交互都在更新边消息 m_ca，原子嵌入主要负责汇总与回写。",
+      "math": "h_a^{(0)}=\\mathbf E[Z_a]\\in\\mathbb R^{128},\\qquad m_{ca}^{(0)}=\\sigma\\big(W\\,[\\,h_c\\Vert h_a\\Vert e_{\\text{RBF}}(d_{ca})\\,]\\big)",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/embedding_block.py", "start": 21, "end": 34, "must": "self.embeddings(Z - 1)", "caption": "AtomEmbedding：元素查表"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/embedding_block.py", "start": 70, "end": 75, "must": "torch.cat([h_a, h_c, m_rbf], dim=-1)", "caption": "EdgeEmbedding：两端原子嵌入 + RBF 拼接"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "三元组交互（键角）+ 高效双线性层",
+      "plain": "三元组交互是 GemNet-T 的核心：邻边消息 m_ba 先经线性层、乘以 d_ba 的径向基并下投影到 64 维；再用 CBF(d_ca, α_cab) 对所有 b 加权求和，最后用一个三阶权重张量 W_ijk 做“双线性”收缩，得到 c→a 方向的新消息。高效实现先把每条边的全部邻边按 Kidx 填进零填充矩阵，用三次 batch matmul 完成“乘球谐求和 → 乘径向基 → 双线性收缩”，避免为每个三元组单独生成大矩阵。结果上投影回 128 维，并把反向边 a→c 的结果加回来（id_swap）。",
+      "math": "x_{ba}=\\sigma\\Big(W_{\\downarrow}\\big[\\sigma(W m_{ba})\\odot W_{\\text{rbf}}e_{\\text{RBF}}(d_{ba})\\big]\\Big),\\qquad x^{\\text{trip}}_{ca,k}=\\sum_{i,j}W_{ijk}\\sum_{l}\\tilde R_{lj}(d_{ca})\\sum_{b}Y_{l0}(\\alpha_{cab})\\,x_{ba,i},\\qquad m^{3}_{ca}=\\tfrac{1}{\\sqrt2}\\big[\\sigma(W^{ca}_{\\uparrow}x^{\\text{trip}}_{ca})+\\sigma(W^{ac}_{\\uparrow}x^{\\text{trip}}_{ac})\\big]",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/interaction_block.py", "start": 667, "end": 696, "must": "x = self.mlp_cbf(cbf3, x_ba, id3_reduce_ca, Kidx3)", "caption": "TripletInteraction.forward"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/efficient.py", "start": 168, "end": 189, "must": "sum_k = torch.matmul(sph, m2)", "caption": "EfficientInteractionBilinear：零填充 + 三次 matmul"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/efficient.py", "start": 49, "end": 57, "must": "rbf_W1 = torch.matmul(rbf_env, self.weight)", "caption": "EfficientInteractionDownProjection：CBF 径向部分的共享下投影"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "四元组交互（二面角，GemNet-Q）",
+      "plain": "GemNet-Q 额外加入四元组交互：边 d→b 的消息依次乘以 RBF(d_db)、CBF(d_ab, α_abd)，下投影到 32 维，再用三维基 SBF(d_ca, α_cab, θ_cabd) 通过同样的高效双线性层汇总到边 c→a。二面角让模型能区分只看键角时无法区分的构象（例如绕 a–b 键的扭转），代价是四元组数量远多于三元组。triplets_only=True 时整个模块被跳过，即 GemNet-T。",
+      "math": "e_{\\text{SBF},lmn}=\\frac{u(d_{ca}/c)}{c^{3/2}}\\,\\tilde j_l\\!\\left(z_{ln}\\tfrac{d_{ca}}{c}\\right)Y_{lm}(\\alpha_{cab},\\theta_{cabd});\\qquad x^{\\text{quad}}_{ca,k}=\\sum_{i,j}W_{ijk}\\sum_{l,m}\\tilde R_{lm,j}(d_{ca})\\sum_{b,d}Y_{lm}(\\alpha_{cab},\\theta_{cabd})\\big[x_{db}\\odot W_{\\text{cbf}}\\,e_{\\text{CBF}}(d_{ab},\\alpha_{abd})\\big]_i",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/interaction_block.py", "start": 533, "end": 566, "must": "x = self.mlp_sbf(sbf, x_db, id4_reduce_ca, Kidx4)", "caption": "QuadrupletInteraction.forward：RBF → CBF → SBF 双线性"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/basis_layers.py", "start": 241, "end": 270, "must": "sph = [f(Alpha_cab, Theta_cabd) for f in self.sph_funcs]", "caption": "TensorBasisLayer：j_l × Y_lm(α, θ)（SBF）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "合并与更新：边消息 → 原子嵌入 → 回写边",
+      "plain": "每个交互块把“线性跳连 + 三元组 + 四元组”三路相加后除以 √3，经残差层更新边消息；再把指向 a 的所有边消息乘以 RBF 门控后求和、过 MLP，残差更新原子嵌入 h_a；最后把 [h_c, h_a, m_ca] 拼接回写到边上。所有残差都乘 1/√2，再配合 scaling_factors.json 中预先拟合的缩放因子，让各层激活在初始化时方差一致，深层网络训练更稳。",
+      "math": "m_{ca}\\leftarrow\\tfrac{1}{\\sqrt2}\\Big(m_{ca}+\\mathrm{Res}\\big[\\tfrac{1}{\\sqrt3}(\\sigma(Wm_{ca})+m^{3}_{ca}+m^{4}_{ca})\\big]\\Big),\\qquad h_a\\leftarrow\\tfrac{1}{\\sqrt2}\\Big(h_a+\\mathrm{MLP}\\big[s\\textstyle\\sum_{c}m_{ca}\\odot W e_{\\text{RBF}}(d_{ca})\\big]\\Big),\\qquad m_{ca}\\leftarrow\\tfrac{1}{\\sqrt2}\\big(m_{ca}+\\mathrm{Res}\\,\\sigma(W[h_c\\Vert h_a\\Vert m_{ca}])\\big)",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/interaction_block.py", "start": 185, "end": 203, "must": "x = x_ca_skip + x3 + x4", "caption": "InteractionBlock：三路合并"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/interaction_block.py", "start": 205, "end": 234, "must": "m2 = self.concat_layer(h, m, id_c, id_a)", "caption": "残差更新边 → 原子更新 → 原子回写边"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/atom_update_block.py", "start": 64, "end": 72, "must": "x2 = scatter(x, id_j", "caption": "AtomUpdateBlock：RBF 门控的边→原子求和"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：嵌入后和每个交互块后各有一个输出块",
+      "plain": "GemNet 在嵌入之后和每个交互块之后各放一个输出块（共 num_blocks+1=5 个）。输出块同样用 RBF 门控对入射边消息求和得到原子特征，经 MLP 和最后一个线性层给出原子能 E_a^(t)。最后一层刻意不带偏置：没有任何邻边的原子贡献恰好为 0。",
+      "math": "E^{(t)}_a=W_{\\text{out}}\\,\\mathrm{MLP}^{(t)}\\Big(s\\sum_{c}m^{(t)}_{ca}\\odot W^{(t)}_{\\text{rbf}}e_{\\text{RBF}}(d_{ca})\\Big),\\qquad t=0,1,\\dots,T",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/atom_update_block.py", "start": 166, "end": 178, "must": "x_E = self.out_energy(x_E)", "caption": "OutputBlock.forward：能量分支"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/atom_update_block.py", "start": 130, "end": 133, "must": "self.out_energy = Dense(emb_size_atom, num_targets, bias=False", "caption": "最后一层无偏置"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：所有输出块的原子能相加，再按分子求和",
+      "plain": "各输出块的原子能逐块累加，再按分子（batch_seg）求和得到总能；extensive=False 时改为取平均，用于强度量目标。能量是原子能之和，保证了广延性。参考实现不自带元素参考能，ASE 计算器可选地加上 QM7-X 的孤立原子能（add_atom_energies）。",
+      "math": "E=\\sum_{a=1}^{N}\\sum_{t=0}^{T}E^{(t)}_a,\\qquad T=\\texttt{num\\_blocks}=4",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 547, "end": 584, "must": "E_a = scatter(E_a, batch_seg", "caption": "forward：输出块 0 + 每个交互块后的输出块累加 → 按分子求和"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：autograd 保守力 或 边上直接力（二选一）",
+      "plain": "① direct_forces=False（GemNet-T/Q，默认）：F = −∂E/∂R，一次 autograd 反传，力严格保守，NVE 能量守恒、Hessian 对称；训练时 create_graph=True 还要再对力反传，显存与时间开销大。② direct_forces=True（GemNet-dT/dQ，GemNet-OC 配置也用它）：每个输出块在边上再接一个 MLP，预测标量 F_ca，乘以单位方向 v̂_ca 后对入射边求和；省掉反传、推理更快（fit_scaling.py 注释 “evaluates faster”），但力不再是能量的梯度，长时间 MD 可能出现能量漂移。forces_coupled=True 可强制 F_ca 与 F_ac 大小相同。",
+      "math": "\\mathbf F_a=-\\frac{\\partial E}{\\partial\\mathbf r_a}\\ \\ (\\text{T/Q})\\qquad\\text{or}\\qquad \\mathbf F_a=\\sum_{c\\in\\mathcal N(a)}\\Big(\\sum_{t=0}^{T}F^{(t)}_{ca}\\Big)\\hat{\\mathbf v}_{ca},\\ \\ F^{(t)}_{ca}=W_F\\,\\mathrm{MLP}_F\\big(s\\,m^{(t)}_{ca}\\odot W e_{\\text{RBF}}(d_{ca})\\big)\\ \\ (\\text{dT/dQ/OC})",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 598, "end": 613, "must": "torch.autograd.grad(E_a.sum()", "caption": "保守力：能量对坐标求负梯度"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/gemnet.py", "start": 586, "end": 597, "must": "F_ji = F_ca[:, :, None] * V_ca[:, None, :]", "caption": "直接力：边上标量 × 单位方向，再对边求和"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/atom_update_block.py", "start": 181, "end": 190, "must": "x_F = self.out_forces(x_F)", "caption": "OutputBlock 的直接力 MLP 头"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "输出与使用：ASE/MD 接口 + MVE 不确定度",
+      "plain": "参考实现只输出能量和力（无应力、无周期）。ASE 计算器每一步用新坐标重建图再预测，配合 ase_example.ipynb 中的 MDSimulator 可直接跑分子动力学。训练时可开启 mve，让网络同时输出能量/力的均值与方差（方差经 softplus 保证为正），用高斯负对数似然训练，从而得到不确定度估计。",
+      "math": "\\sigma^2_E=\\operatorname{softplus}(E_{[:,1]}),\\ \\ \\sigma^2_{\\mathbf F}=\\operatorname{softplus}(\\mathbf F_{[:,1]}),\\qquad \\mathcal L_{\\text{NLL}}=\\tfrac12\\Big[\\log\\sigma^2+\\frac{(y-\\hat y)^2}{\\sigma^2}\\Big]",
+      "code": [
+        {"repo": "gemnet_pytorch", "file": "ase_calculator.py", "start": 151, "end": 170, "must": "self.molecule.update(R=atoms.positions)", "caption": "GNNCalculator.calculate：每步重建图并预测能量/力"},
+        {"repo": "gemnet_pytorch", "file": "gemnet/training/trainer.py", "start": 297, "end": 310, "must": "var_energy = torch.nn.functional.softplus(energy[:, 1:])", "caption": "Trainer.predict：mve 模式输出均值与方差"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff / int_cutoff", "value": "5.0 Å / 10.0 Å", "note": "嵌入与三元组截断 / 四元组中间边 a–b 截断（对 GemNet-T 无作用）", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 21, "end": 22, "must": "int_cutoff"}},
+    {"name": "num_blocks", "value": "4", "note": "交互块数（输出块为 5 个）", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 4, "end": 4, "must": "num_blocks"}},
+    {"name": "num_spherical × num_radial", "value": "7 × 6", "note": "角向阶数 l=0…6 × 径向频率数", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 2, "end": 3, "must": "num_radial"}},
+    {"name": "emb_size_atom / emb_size_edge", "value": "128 / 128", "note": "原子嵌入与有向边嵌入宽度", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 5, "end": 6, "must": "emb_size_edge"}},
+    {"name": "emb_size_trip / emb_size_quad", "value": "64 / 32", "note": "三元组 / 四元组上的降维通道", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 7, "end": 8, "must": "emb_size_quad"}},
+    {"name": "emb_size_rbf / cbf / sbf", "value": "16 / 16 / 32", "note": "基函数（跨块共享）下投影维度", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 9, "end": 11, "must": "emb_size_sbf"}},
+    {"name": "emb_size_bil_trip / bil_quad", "value": "64 / 32", "note": "双线性层输出维度", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 12, "end": 13, "must": "emb_size_bil_quad"}},
+    {"name": "num_before_skip / after_skip / concat / atom", "value": "1 / 1 / 1 / 2", "note": "各处残差层个数", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 14, "end": 17, "must": "num_concat"}},
+    {"name": "envelope_exponent p", "value": "5", "note": "多项式平滑包络阶数", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 23, "end": 23, "must": "envelope_exponent"}},
+    {"name": "activation", "value": "swish（ScaledSiLU = SiLU(x)/0.6）", "note": "所有带激活的 Dense 层", "code": {"repo": "gemnet_pytorch", "file": "gemnet/model/layers/base_layers.py", "start": 51, "end": 58, "must": "self.scale_factor = 1 / 0.6"}},
+    {"name": "triplets_only / direct_forces", "value": "False / False（GemNet-Q）；GemNet-T 为 True / False", "note": "变体开关：去掉四元组 → T；直接力 → dT/dQ", "code": {"repo": "gemnet_pytorch", "file": "pretrained/GemNet-Q/model_kwargs.json", "start": 18, "end": 20, "must": "direct_forces"}},
+    {"name": "GemNet-OC（fairchem AdsorbML 配置）", "value": "cutoff 12 Å，max_neighbors 30，高斯 RBF + 多项式包络 p=5，direct_forces: True", "note": "OC20 版本，另开启 atom–edge / edge–atom / atom 交互", "code": {"repo": "fairchem", "file": "src/fairchem/applications/AdsorbML/adsorbml/configs/gemnet-oc.yml", "start": 54, "end": 83, "must": "direct_forces: True"}}
+  ],
+  "speedNotes": [
+    "最贵的是四元组：c→a–b←d 的个数约 ∝ N·M²·M_int（M_int 为 10 Å 内邻居数），远多于三元组（∝ N·M²）。GemNet-T（triplets_only=True）整块跳过四元组，因此比 GemNet-Q 快，但少了二面角信息。",
+    "高效双线性层：先把每条边的所有邻边消息按 Kidx 填进（边数 × Kmax × 通道）的零填充稠密张量，再用三次 batch matmul 依次完成“乘球谐求和 → 乘径向基 → 双线性收缩”；代价是 Kmax 由邻居最多的边决定，邻居数不均时会浪费显存。",
+    "通道瓶颈：元组上的消息先下投影到 64/32 维（emb_size_trip/quad），基函数先用跨块共享的线性层压到 16/16/32 维，处理完再上投影回 128 维，以此控制元组级别的 FLOPs。",
+    "力的算法决定速度：autograd 保守力需要一次完整反传，训练时 create_graph=True 还要二阶反传；direct_forces=True 只在边上多一个 MLP 头，fit_scaling.py 注明它 “evaluates faster”，fairchem 的 GemNet-OC 配置也采用直接力。",
+    "参考实现的建图在 CPU 上用 NumPy 稠密距离矩阵（O(N²)）+ SciPy 稀疏矩阵完成，ASE 计算器每一步 MD 都要重建全部三/四元组索引，适合小分子，不适合大体系。"
+  ],
+  "weakNotes": [
+    "嵌入/三元组截断 5 Å，四元组中间边 a–b 可达 10 Å，再加 4 个交互块的多跳传播，对小分子基本覆盖整个分子；但模型中没有任何显式 1/r 静电或 r⁻⁶ 色散项。",
+    "没有总电荷、自旋输入，也没有 D3 等外挂接口；色散与静电只能由训练数据在感受野内隐式学到。README 未说明训练数据所用泛函（默认 config.yaml 指向 COLL v1.2 数据集）。",
+    "参考实现只支持孤立分子（无晶胞、无 PBC）：层状 vdW 材料、分子晶体、表面/界面等周期体系无法直接计算，需要改用 fairchem 中的 GemNet-OC 一类实现（其 OC20 吸附配置为 12 Å 截断 + max_neighbors 30）。",
+    "带电分子、离子对、远距离电荷转移等依赖长程静电的场景超出其设计范围；物理吸附等弱相互作用也只能依赖训练数据覆盖。"
+  ],
+  "downstreamNotes": [
+    "GemNet-T/Q 默认是 autograd 保守力 + p=5 多项式包络平滑截断，适合 NVE 分子动力学与振动分析；仓库提供 ASE 计算器与 MDSimulator（ase_example.ipynb）。",
+    "README 引用的后续工作（Stocker et al., MLST 2022）专门评估了 GemNet 等 GNN 势在长时间、高温 MD 中的鲁棒性——实际做 MD 前应自行检验稳定性，而不只看测试误差。",
+    "直接力版本（dT/dQ、GemNet-OC 配置）不是能量的梯度：NVE 下能量可能漂移、Hessian 不对称，不适合声子/热导；但用于结构弛豫足够且更快（AdsorbML 配置用 LBFGS 弛豫，fmax 0.02）。",
+    "参考实现没有应力和周期边界，不能做晶格弛豫、弹性常数、状态方程；也没有偶极/极化率读出，不能直接用于 IR/Raman 光谱。",
+    "mve=True 时网络同时给出能量/力的方差，可用于不确定度估计和主动学习挑选构型。"
+  ],
+  "strengths": ["显式键角 + 二面角，几何分辨力强，论文称其为“通用”的方向性 GNN", "保守力（T/Q）与直接力（dT/dQ）一键切换，兼顾物理性与速度", "高效双线性层 + 共享下投影，把元组计算变成 GPU 友好的稠密 matmul", "演化出 GemNet-OC，用于 OC20 催化吸附体系（fairchem AdsorbML 配置）"],
+  "weaknesses": ["四元组数量 ∝ N·M²·M_int，GemNet-Q 慢且耗显存", "参考实现只支持孤立分子：无 PBC、无应力", "无长程静电/色散，无电荷/自旋输入", "直接力变体不保守，长时间 MD / 声子需谨慎", "无 LAMMPS 接口，建图 O(N²)，难以扩展到大体系"],
+  "pretrained": ["GemNet-Q（pretrained/GemNet-Q：model.pth + model_kwargs.json）", "GemNet-T（pretrained/GemNet-T，triplets_only=True）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

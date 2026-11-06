@@ -1,0 +1,207 @@
+{
+  "id": "uf3",
+  "name": "UF3",
+  "fullName": "UF3: Ultra-Fast Force Fields（有效 2 体 + 3 体三次 B 样条势）",
+  "year": 2023,
+  "authors": "S. R. Xie, M. Rupp, R. G. Hennig",
+  "paper": {"title": "Ultra-fast interpretable machine-learning potentials", "venue": "npj Computational Materials 9, 162 (2023)", "url": "https://doi.org/10.1038/s41524-023-01092-7"},
+  "repos": ["uf3"],
+  "family": "linear-kernel",
+  "tags": ["2+3 体 B 样条", "正则化线性回归", "可解释", "严格局域", "LAMMPS ML-UF3"],
+  "framework": "Python（NumPy/SciPy、numba、ndsplines）+ LAMMPS ML-UF3 包（C++，含 KOKKOS 变体）",
+  "license": "Apache-2.0",
+  "oneLiner": "UF3 把原子间作用拆成“有效 2 体 + 3 体”两类函数，并直接用三次 B 样条表示：2 体是关于距离的一维样条，3 体是关于三角形三条边长的三维张量积样条；系数由带岭和曲率正则的线性最小二乘一次解出。速度与传统经验势同级，学到的势还能直接画出来解读。",
+  "analogy": "像用一排形状固定的“小鼓包”拼一条曲线：把距离轴切成很多小段，每段放一个鼓包（B 样条），训练只是决定每个鼓包的高度（系数）。2 体是拼一条“距离→能量”的曲线，3 体是拼一块“三角形三边→能量”的三维地形。任何一个距离只会碰到相邻 4 个鼓包，所以计算就像查表一样快。",
+  "arch": {
+    "geometry": "只用原子间距离：2 体用 r_ij；3 体用三角形三边 (r_ij, r_ik, r_jk)（三边长已隐含键角），不用球谐",
+    "equivariance": "不变（E(3) invariant）：输入只有距离，力由解析导数得到，自动满足旋转等变",
+    "lmax": "无（不使用球谐；角度依赖通过第三条边 r_jk 表达）",
+    "bodyOrder": "≤3：1 体常数偏移 + 2 体 + 3 体；代码对 4 体及以上直接报错（未实现）",
+    "layers": "无层：单个线性模型，无隐藏层、无消息传递",
+    "cutoff": "2 体默认窗口 (1.0, 8.0) Å；3 体三条边默认 [r, r, 2r]（r 缺省 4.0 Å）；均可按元素对/三元组单独设置",
+    "receptiveField": "= 截断半径（严格局域，无逐层传播）",
+    "message": "无消息传递；特征 = Σ_pairs B_n(r_ij)（2 体）与 Σ_triplets B_l(r_ij)B_m(r_ik)B_n(r_jk)（3 体）",
+    "readout": "线性：E = c·x（含每种元素一个 1 体偏移），c 由岭 + 曲率正则的加权最小二乘一次解出",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R 解析求得：三次样条一阶导 × 方向余弦 ∂r/∂R；训练时同一导数特征直接拟合力",
+    "stress": "Python UFCalculator 为数值应力（ASE 中心差分）；LAMMPS 中由 pair_style uf3 的维里给出 pxx…pxy",
+    "longRange": "无",
+    "dispersion": "无内置色散；只能在 2 体截断内由样条拟合（仓库示例 NeXe_lammps 拟合 LJ 体系）",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "无额外学习量；工具：应变拟合弹性常数、phonopy 有限位移声子谱、ASE 结构弛豫",
+    "strictlyLocal": true,
+    "complexity": "O(N·M) 两体 + O(N·M₃²) 三体；每个距离只触及 4 个非零基函数、每个三角形 4×4×4=64 个系数，与基函数总数基本无关",
+    "accel": "LAMMPS 官方 ML-UF3 包（pair_style uf3，MPI + KOKKOS GPU）；早期 2 体势可导出 pair_style table；Python 端 numba / ndsplines、多进程特征化"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "线性模型 + 局部支撑 B 样条，推理只是查表求和；README 称与最快的传统经验势同级。"},
+    "expressiveness": {"v": 2, "why": "体序最高 3、没有环境依赖的非线性，表达力明显低于 ACE/MTP/神经网络势；但 3 体样条强于纯 2 体势。"},
+    "longRange": {"v": 1, "why": "严格局域，没有静电、色散或电荷模块。"},
+    "scalability": {"v": 5, "why": "严格局域，LAMMPS ML-UF3 支持 MPI 空间分解与 KOKKOS GPU。"},
+    "physics": {"v": 4, "why": "力是能量的解析导数（保守），末端系数冻结使截断处 C² 平滑，可后处理强制近程排斥；但排斥核不是默认约束，Python 应力为数值差分。"},
+    "coverage": {"v": 2, "why": "只输出能量/力/应力；另有弹性常数与 phonopy 声子的便捷封装，无偶极、电荷、磁矩等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞 → 周期镜像超胞",
+      "plain": "UF3 的 Python 计算器直接接收 ASE Atoms（坐标、元素、晶胞、pbc）。对周期体系，先按截断半径 r_cut 算出每个晶格方向要复制几份镜像，拼成一个“超胞”，保证晶胞内每个原子在 r_cut 内的邻居都在场。这里没有任何可学习的嵌入——元素只用来决定查哪一张 2 体/3 体样条表。",
+      "math": "n_\\alpha=\\Big\\lceil\\frac{r_{\\mathrm{cut}}}{\\lVert\\mathbf p_\\alpha\\rVert}\\Big\\rceil,\\qquad \\mathbf p_\\alpha=\\frac{(\\mathbf a_\\alpha\\cdot\\mathbf n_\\alpha)\\,\\mathbf n_\\alpha}{\\lVert\\mathbf n_\\alpha\\rVert^2},\\quad \\mathbf n_1=\\mathbf a_2\\times\\mathbf a_3",
+      "code": [
+        {"repo": "uf3", "file": "uf3/data/geometry.py", "start": 69, "end": 83, "must": "supercell_factors = np.ceil(supercell_factors)", "caption": "get_supercell_factors：按晶面间距计算镜像份数"},
+        {"repo": "uf3", "file": "uf3/data/geometry.py", "start": 32, "end": 51, "must": "generate_periodic_image_indices(cell, r_cut)", "caption": "get_supercell：平铺周期镜像，非周期方向不复制"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "成对距离：按元素对筛选 r_min < r_ij < r_max",
+      "plain": "用 scipy 的 cdist 算出晶胞原子与超胞原子之间的全部距离，再对每一种元素对（如 W–W、Ne–Xe）用各自的 [r_min, r_max] 窗口筛选。i 遍历晶胞内原子、j 遍历超胞全部原子，所以每个原子对会被正反各数一次。距离就是唯一的几何输入，没有图神经网络意义上的边特征。",
+      "math": "\\mathcal P_{AB}=\\big\\{(i,j):\\ \\{Z_i,Z_j\\}=\\{A,B\\},\\ r^{AB}_{\\min}<r_{ij}=\\lVert\\mathbf r_j-\\mathbf r_i\\rVert<r^{AB}_{\\max}\\big\\}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/representation/distances.py", "start": 48, "end": 69, "must": "cut_mask = (distance_matrix > r_min) & (distance_matrix < r_max)", "caption": "distances_by_interaction：元素掩码 × 距离窗口"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "三次 B 样条基：结点序列、局部支撑与平滑截断",
+      "plain": "每种相互作用的势函数都写成三次 B 样条基函数的线性组合。结点默认在 [r_min, r_max] 上均匀分成 resolution 段，两端各再重复 3 次，于是得到 resolution+3 个基函数；每个基函数只在相邻 5 个结点（4 个区间）上非零，所以任一距离处只有 4 个基函数非零——这是 UF3 “超快”的根源。为了让势在截断处平滑归零，末端 3 个系数被冻结为 0（trailing_trim=3），能量及其一、二阶导数在 r_max 处都连续地变为 0。",
+      "math": "V_2(r)=\\sum_{n=0}^{K+2}c_n\\,B_{n,3}(r),\\qquad B_{n,k}(r)=\\frac{r-t_n}{t_{n+k}-t_n}B_{n,k-1}(r)+\\frac{t_{n+k+1}-r}{t_{n+k+1}-t_{n+1}}B_{n+1,k-1}(r),\\qquad \\mathbf t=(r_{\\min}^{\\times3},\\,r_{\\min},\\dots,r_{\\max},\\,r_{\\max}^{\\times3}),\\quad c_{K}=c_{K+1}=c_{K+2}=0",
+      "code": [
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 1030, "end": 1035, "must": "knots = np.linspace(r_min, r_max, n_intervals + 1)", "caption": "默认 linear 策略：[r_min, r_max] 均匀分 n_intervals 段"},
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 989, "end": 1008, "must": "np.repeat(knot_points[0], 3)", "caption": "两端结点重复 3 次；每个基函数取 5 个相邻结点"},
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 603, "end": 613, "must": "for trim_idx in range(1, n_trail[2] + 1):", "caption": "generate_frozen_indices：末端 trailing_trim 个系数冻结为 0"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "2 体特征：每个基函数对所有原子对求和（软直方图）",
+      "plain": "因为势对系数是线性的，能量可以写成“特征 · 系数”。对某一元素对，第 n 个能量特征就是第 n 个基函数在所有落入窗口的距离上的取值之和——相当于一个“软直方图”，统计有多少原子对的距离落在第 n 个小区间附近。力特征同理：用基函数的一阶导乘以距离对坐标的导数（方向余弦），再取负号。",
+      "math": "x^{E}_{n}=\\sum_{i}\\sum_{j\\neq i}B_n(r_{ij}),\\qquad x^{F}_{n,m\\alpha}=-\\sum_{i}\\sum_{j\\neq i}B_n'(r_{ij})\\,\\frac{\\partial r_{ij}}{\\partial r_{m\\alpha}},\\qquad E_2=\\mathbf c_2\\cdot\\mathbf x^{E},\\ \\ F_{m\\alpha}=\\mathbf c_2\\cdot\\mathbf x^{F}_{m\\alpha}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 800, "end": 807, "must": "interpolate.BSpline.basis_element(b_knots, extrapolate=False)", "caption": "每个基函数 = scipy 的单个 B 样条元"},
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 838, "end": 849, "must": "basis_functions[idx](points, nu=nu)", "caption": "evaluate_basis_functions：逐基函数求值并对所有距离求和"},
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 877, "end": 895, "must": "basis_function(distances[mask], nu=1)", "caption": "featurize_force_2B：力特征 = −Σ B′(r)·∂r/∂R"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "三元组：以 i 为中心枚举邻居对 (j<k)",
+      "plain": "3 体项以每个原子 i 为中心，枚举其邻居的无序对 (j, k)，用三条边长 (r_ij, r_ik, r_jk) 描述这个三角形——三边长与“两边夹一角”等价，所以角度信息已经包含在内。三条边各有自己的结点范围（默认第三条边 r_jk 的上限是前两条的两倍），任意一条边超出窗口的三元组都被丢弃。邻居 j、k 按原子序数排序，使 (A,B,C) 与 (A,C,B) 归为同一种 3 体相互作用。",
+      "math": "\\mathcal T_i=\\big\\{(j,k):\\ j<k,\\ r_{ij}\\in[t^{(1)}_{0},t^{(1)}_{\\mathrm{end}}],\\ r_{ik}\\in[t^{(2)}_{0},t^{(2)}_{\\mathrm{end}}],\\ r_{jk}\\in[t^{(3)}_{0},t^{(3)}_{\\mathrm{end}}]\\big\\}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/representation/angles.py", "start": 474, "end": 513, "must": "unique_pair_mask = (j_arr < k_arr)", "caption": "generate_triplets：唯一邻居对、按元素哈希分组、三边窗口过滤"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "3 体特征：三条边 B 样条的张量积",
+      "plain": "3 体势是三维张量积样条：V₃(r_ij, r_ik, r_jk) = Σ c_lmn B_l(r_ij) B_m(r_ik) B_n(r_jk)。每个三角形在每条边上只有 4 个非零基函数，因此只更新 4×4×4 = 64 个系数格点（numba 编译的 arrange_3b）。当 j、k 同元素且两条边设置相同时，交换 j↔k 不改变能量，代码把对称等价的系数合并（compress_3B），减少独立参数。",
+      "math": "V_3(r_{ij},r_{ik},r_{jk})=\\sum_{l,m,n}c_{lmn}\\,B_l(r_{ij})\\,B_m(r_{ik})\\,B_n(r_{jk}),\\qquad x^{E}_{lmn}=\\sum_{i}\\sum_{(j,k)\\in\\mathcal T_i}B_l(r_{ij})\\,B_m(r_{ik})\\,B_n(r_{jk})",
+      "code": [
+        {"repo": "uf3", "file": "uf3/representation/angles.py", "start": 124, "end": 139, "must": "value = values[i, 0] * values[j, 1] * values[k, 2]", "caption": "arrange_3b：每个三角形累加到 4×4×4 个格点"},
+        {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 674, "end": 690, "must": "vec = grid + grid.transpose(1, 0, 2)", "caption": "compress_3B：按置换对称合并等价系数"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "训练：岭 + 曲率正则的加权线性最小二乘，一次解出",
+      "plain": "所有特征排成矩阵 X，能量和力共享同一组系数 c。损失 = 加权能量残差 + 加权力残差 + 岭惩罚 λ_R‖c‖² + 曲率惩罚 λ_C‖Dc‖²，其中 D 是相邻系数的二阶差分（3 体用三维离散拉普拉斯），让样条在数据稀少的区间也保持平滑、不乱抖。能量与力的权重按样本数和标准差归一化（w = 1/(√n·σ)），再由 κ（默认 0.5）调配。问题是线性的，用 Gram 矩阵 + LU 分解（np.linalg.solve）一次得到全局最优，不需要梯度下降。",
+      "math": "\\mathbf c^{*}=\\arg\\min_{\\mathbf c}\\ \\kappa\\,w_E^2\\lVert X_E\\mathbf c-\\mathbf y_E\\rVert^2+(1-\\kappa)\\,w_F^2\\lVert X_F\\mathbf c-\\mathbf y_F\\rVert^2+\\lambda_R\\lVert\\mathbf c\\rVert^2+\\lambda_C\\lVert D\\mathbf c\\rVert^2,\\qquad (D\\mathbf c)_n=c_{n-1}-2c_n+c_{n+1},\\quad w=\\frac{1}{\\sqrt{n}\\,\\sigma}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/regression/regularize.py", "start": 52, "end": 58, "must": "reg_diag = np.eye(n_features) * -2", "caption": "1D 曲率（二阶差分）惩罚矩阵"},
+        {"repo": "uf3", "file": "uf3/regression/least_squares.py", "start": 349, "end": 353, "must": "gram = ((weight * energy_weight**2 * gram_e)", "caption": "能量/力 Gram 矩阵按 κ 与 1/(√n·σ) 加权合并"},
+        {"repo": "uf3", "file": "uf3/regression/least_squares.py", "start": 257, "end": 272, "must": "lu_factorization(gram + regularizer, ordinate)", "caption": "fit_with_gram：(XᵀWX + RᵀR) c = XᵀWy，冻结系数后 LU 求解"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "装配势函数：系数 + 结点 → 可求值/可求导的样条",
+      "plain": "训练得到的扁平系数向量按相互作用拆开：2 体直接与结点组成一维三次样条；3 体先把压缩的对称系数解压回完整的 L×M×N 网格，再组成三维张量积样条。extrapolate=False 表示距离超出结点范围时样条为 0，因此截断外严格没有贡献。",
+      "math": "V_2^{AB}(r)=\\mathrm{NDSpline}\\big(\\mathbf t^{AB},\\mathbf c^{AB},3\\big)(r),\\qquad V_3^{ABC}=\\mathrm{NDSpline}\\big(\\{\\mathbf t^{(1)},\\mathbf t^{(2)},\\mathbf t^{(3)}\\},\\ \\mathbf c^{ABC}_{lmn},3\\big)",
+      "code": [
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 536, "end": 545, "must": "bspline_curve = ndsplines.NDSpline(knot_sequence,", "caption": "construct_pair_potentials：一维三次样条"},
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 562, "end": 573, "must": "c_decompressed = bspline_config.decompress_3B(c_compressed, trio)", "caption": "construct_trio_potentials：解压对称系数 → 三维样条"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：1 体偏移 + Σ 2 体样条 + Σ 3 体样条",
+      "plain": "推理时直接求值：每种元素一个常数偏移（相当于孤立原子参考能）乘以原子数，加上所有原子对的 2 体样条值，再加上所有三元组的 3 体样条值。能量天然是原子贡献之和，因此广延；也正因为只是“查表 + 求和”，学到的 2 体曲线和 3 体切片可以直接画出来解读（哪段距离吸引、哪段排斥）。",
+      "math": "E=\\sum_{i}\\Big[E_1(Z_i)+\\sum_{j\\neq i}V_2^{Z_iZ_j}(r_{ij})+\\sum_{j<k}V_3^{Z_iZ_jZ_k}(r_{ij},r_{ik},r_{jk})\\Big]",
+      "code": [
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 156, "end": 181, "must": "energy = e_1b + e_2b + e_3b", "caption": "_get_potential_energy：1 体 + 2 体 + 3 体"},
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 191, "end": 211, "must": "self.pair_potentials[pair](distance_list)", "caption": "_energy_2b：对窗口内全部距离求样条值并求和"},
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 228, "end": 244, "must": "component = spline(np.vstack([r_l, r_m, r_n]).T)", "caption": "_energy_3b：逐中心原子对三元组求 3 体样条值"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：样条解析导数 × 方向余弦",
+      "plain": "力是同一能量表达式对坐标的解析导数，不需要自动微分：2 体部分用 V₂′(r)（ndsplines 的 nus=1），3 体部分分别对三条边求偏导（nus=[1,0,0] 等），再乘以 ∂r/∂R（单位方向矢量，只作用在相关的两个原子上）。导数来自同一组样条，所以力严格保守；三次样条导数连续，配合末端冻结的系数，力在截断处也平滑归零。",
+      "math": "\\mathbf F_m=-\\sum_{i}\\sum_{j\\neq i}V_2'(r_{ij})\\frac{\\partial r_{ij}}{\\partial\\mathbf r_m}-\\sum_{i}\\sum_{j<k}\\Big[\\partial_1V_3\\frac{\\partial r_{ij}}{\\partial\\mathbf r_m}+\\partial_2V_3\\frac{\\partial r_{ik}}{\\partial\\mathbf r_m}+\\partial_3V_3\\frac{\\partial r_{jk}}{\\partial\\mathbf r_m}\\Big],\\qquad \\frac{\\partial r_{ij}}{\\partial\\mathbf r_m}=(\\delta_{mj}-\\delta_{mi})\\frac{\\mathbf r_j-\\mathbf r_i}{r_{ij}}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 267, "end": 291, "must": "self.pair_potentials[pair](distance_list, nus=1)", "caption": "_forces_2b：V₂′(r) × ∂r/∂R"},
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 319, "end": 343, "must": "val_l = spline(triangles, nus=np.array([1, 0, 0]))", "caption": "_forces_3b：对三条边分别求偏导并回传到三个原子"},
+        {"repo": "uf3", "file": "uf3/representation/distances.py", "start": 353, "end": 364, "must": "delta_r = sup_positions[j_where, :] - sup_positions[i_where, :]", "caption": "compute_direction_cosines：∂r_ij/∂R"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：Python 端数值差分，LAMMPS 端由维里给出",
+      "plain": "UFCalculator 目前只实现了数值应力：调用 ASE 的 calculate_numerical_stress，对晶胞施加正、负微小应变，用能量的中心差分近似 σ = (1/V)∂E/∂ε；每个分量多算两次能量，较慢，但对光滑的样条足够准确。在 LAMMPS 中（UFLammps 封装或直接运行 pair_style uf3），应力从 LAMMPS 的压力张量 pxx…pxy 读出，并取负号换成 ASE 约定。",
+      "math": "\\sigma_{\\alpha\\beta}=\\frac{1}{V}\\frac{\\partial E}{\\partial\\varepsilon_{\\alpha\\beta}}\\approx\\frac{E(+\\delta)-E(-\\delta)}{2\\,\\delta\\,V}",
+      "code": [
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 399, "end": 404, "must": "self.calculate_numerical_stress(atoms, **kwargs)", "caption": "_get_stress：数值应力"},
+        {"repo": "uf3", "file": "uf3/forcefield/lammps.py", "start": 90, "end": 112, "must": "stress_vars = ['pxx', 'pyy', 'pzz', 'pyz', 'pxz', 'pxy']", "caption": "UFLammps：从 LAMMPS 压力张量取应力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "部署与下游：LAMMPS ML-UF3、表格势、声子/弹性常数",
+      "plain": "拟合好的模型可写成 LAMMPS 的 .uf3 势文件：文件里直接存结点和系数，由官方 ML-UF3 包的 pair_style uf3 求值（支持 MPI 与 KOKKOS GPU）。早期纯 2 体势也可导出为 pair_style table 的表格，导出时能量和力乘 2，因为 LAMMPS 每个原子对只算一次。Python 端还提供应变拟合的弹性常数和基于 phonopy 有限位移的声子谱接口。",
+      "math": "E^{\\mathrm{table}}(r)=2\\,V_2(r),\\qquad F^{\\mathrm{table}}(r)=-2\\,V_2'(r)",
+      "code": [
+        {"repo": "uf3", "file": "lammps_plugin/scripts/generate_uf3_lammps_pots.py", "start": 79, "end": 108, "must": "2B {interaction[0]} {interaction[1]}", "caption": "写出 UF3 LAMMPS 势文件：截断、结点、系数"},
+        {"repo": "uf3", "file": "uf3/forcefield/lammps.py", "start": 244, "end": 266, "must": "e = bspline_func(r) * 2", "caption": "export_tabulated_potential：2 体势表格化（×2 修正重复计数）"},
+        {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 449, "end": 487, "must": "phonon.compute_phonon_data(atoms,", "caption": "弹性常数与 phonopy 声子接口"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "degree", "value": "2（默认配置）；设为 3 即 2 体 + 3 体", "note": "相互作用最高体序", "code": {"repo": "uf3", "file": "uf3/default_options.yaml", "start": 1, "end": 4, "must": "degree: 2"}},
+    {"name": "2 体 r_min / r_max", "value": "1.0 Å / 8.0 Å", "note": "元素对未指定时的样条窗口", "code": {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 242, "end": 245, "must": "self.r_max_map.get(pair, 8.0)"}},
+    {"name": "2 体 resolution", "value": "15", "note": "结点区间数 → 18 个基函数", "code": {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 242, "end": 245, "must": "self.resolution_map.get(pair, 15)"}},
+    {"name": "3 体 r_max（三条边）", "value": "[r, r, 2r]，r 取相关元素对 r_max 的最大值（缺省 4.0 Å）", "note": "LAMMPS 插件要求 2r_ij = 2r_ik = r_jk", "code": {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 246, "end": 253, "must": "default_max = [np.max(maxs), np.max(maxs), 2 * np.max(maxs)]"}},
+    {"name": "3 体 resolution", "value": "[5, 5, 10]", "note": "三条边各自的结点区间数", "code": {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 246, "end": 253, "must": "default_res = [5, 5, 10]"}},
+    {"name": "trailing_trim / leading_trim", "value": "trailing {2: 3, 3: 3}；leading {2: 0, 3: 3}", "note": "两端冻结为 0 的系数个数 → 平滑截断（LAMMPS 插件要求 leading 0、trailing 3）", "code": {"repo": "uf3", "file": "uf3/representation/bspline.py", "start": 66, "end": 67, "must": "default_trailing_trim = {2: 3, 3: 3}"}},
+    {"name": "knot_strategy", "value": "linear（均匀）", "note": "可选 lammps（r² 均匀）/ geometric / inverse", "code": {"repo": "uf3", "file": "uf3/default_options.yaml", "start": 22, "end": 29, "must": "knot_strategy: linear"}},
+    {"name": "样条阶数", "value": "3（三次 B 样条）", "note": "C² 连续，力与力常数连续", "code": {"repo": "uf3", "file": "uf3/forcefield/calculator.py", "start": 540, "end": 543, "must": "# cubic BSpline"}},
+    {"name": "ridge_1b / 2b / 3b", "value": "1e-16 / 0.0 / 1e-10", "note": "岭惩罚 λ_R 默认值", "code": {"repo": "uf3", "file": "uf3/regression/regularize.py", "start": 9, "end": 13, "must": "ridge_3b=1e-10"}},
+    {"name": "curvature_2b / 3b", "value": "1e-16 / 1e-16", "note": "曲率惩罚 λ_C 默认值（docstring 建议交叉验证调参）", "code": {"repo": "uf3", "file": "uf3/default_options.yaml", "start": 45, "end": 54, "must": "curvature_2b: 1.0e-16"}},
+    {"name": "weight κ", "value": "0.5", "note": "能量 vs 力的权重，越大越偏向能量", "code": {"repo": "uf3", "file": "uf3/regression/least_squares.py", "start": 274, "end": 281, "must": "weight: float = 0.5"}}
+  ],
+  "speedNotes": [
+    "B 样条是局部支撑的：每个距离只碰到 4 个非零基函数，每个三角形只碰到 4×4×4=64 个系数，所以推理代价几乎与 resolution（基函数个数）无关；代码注释也指出提高 resolution 基本不影响速度。",
+    "开销主要在 3 体项：三元组数 ∝ N·M₃²（M₃ 为 3 体截断内邻居数），2 体只 ∝ N·M；推理中没有任何矩阵乘法或神经网络，README 称速度与最快的传统经验势同级。",
+    "训练只需一次线性求解：分批累加 Gram 矩阵（batch_size=2500），再 np.linalg.solve；特征化可多进程并行，3 体网格累加用 numba 编译。",
+    "Python 版 UFCalculator 用 cdist 稠密距离矩阵 + 超胞平铺，应力还是数值差分，只适合小体系验证；生产 MD 应使用 LAMMPS pair_style uf3（MPI + KOKKOS GPU）。"
+  ],
+  "weakNotes": [
+    "严格局域：2 体默认窗口到 8 Å，3 体默认边长 [4, 4, 8] Å；没有消息传递，截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失。",
+    "2 体样条很便宜，可以把 2 体截断设得较长，在截断内拟合 vdW 型的成对作用（仓库示例 NeXe_lammps 就是拟合 Lennard-Jones 体系）。",
+    "没有电荷/自旋输入，也没有静电、色散或电荷平衡模块；离子液体、带电缺陷、界面电荷转移等需要长程静电的体系无法正确描述，官方也没有外挂修正。",
+    "训练数据完全由用户提供（通过 ASE 解析 VASP/LAMMPS 等输出），泛函由数据决定；官方 6 个单元素势拟合自 Zuo et al. 2020 的 mlearn 数据集。",
+    "体序 ≤3：真正依赖局部配位环境的多体效应（如金属的嵌入能、共价键级）只能近似，层状材料层间、分子晶体等弱作用也只能靠截断内的有效 2/3 体项拟合。"
+  ],
+  "downstreamNotes": [
+    "MD：LAMMPS ML-UF3 可做大规模长时间模拟；仓库 Prakash 2026 势的 README 给出两相共存熔点：Li 455 ± 12 K（实验 454 K）、Ni 1832 ± 10 K（实验 1728 K）、Mo 1689 ± 13 K（实验 2896 K，低 42%）、Si 1352 ± 6 K（实验 1687 K），Ge 势在 MD 中不稳定。",
+    "声子与弹性：三次样条 + 末端冻结系数使力与力常数连续，Python 端提供 phonopy 有限位移声子谱和应变拟合弹性常数；README 也注明 Si 势声子最多偏软 17%。",
+    "几何优化：relax_fmax 用 ASE BFGSLineSearch，周期体系可同时弛豫晶胞（依赖数值应力）。",
+    "可解释与安全性：2 体曲线、3 体切片可直接作图检查；postprocess_coefficients_2b 可在短程强制单调排斥核，防止原子在高温/高压下“塌缩”。"
+  ],
+  "strengths": ["推理速度与传统经验势同级，LAMMPS 原生支持并有 KOKKOS GPU 版本", "线性模型：一次线性求解即可训练，结果确定、可复现", "可解释：学到的 2 体曲线与 3 体切片可直接画出检查", "严格局域 + C² 平滑截断，适合大规模并行 MD"],
+  "weaknesses": ["体序最高 3，难以描述强多体/环境依赖成键（如 Mo 熔点低 42%，Ge 势 MD 不稳定）", "没有长程静电、色散，也没有电荷/自旋输入", "Python 计算器慢，应力只有数值差分", "多元素时 2 体/3 体组合数快速增长（3 体约 ∝ 元素数³），需逐一设置窗口与分辨率"],
+  "pretrained": ["Ni / Cu / Li / Mo / Si 单元素 2+3 体势（Prakash et al., Comput. Mater. Sci. 2026，potentials/prakash2026_cms）", "Ge 单元素势（仅用于复现论文测试误差，官方注明 MD 不稳定）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

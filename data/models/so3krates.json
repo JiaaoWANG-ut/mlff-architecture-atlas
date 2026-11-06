@@ -1,0 +1,211 @@
+{
+  "id": "so3krates",
+  "name": "SO3krates",
+  "fullName": "SO3krates: A Euclidean Transformer for Fast and Stable Machine Learned Force Fields",
+  "year": 2024,
+  "authors": "J. T. Frank, O. T. Unke, K.-R. Müller, S. Chmiela",
+  "paper": {"title": "A Euclidean transformer for fast and stable machine learned force fields", "venue": "Nature Communications 15, 6539 (2024)", "url": "https://www.nature.com/articles/s41467-024-50620-6"},
+  "repos": ["mlff"],
+  "family": "spherical-equivariant",
+  "tags": ["Euclidean 自注意力", "球谐坐标 EV（无 CG 张量积）", "不变特征 / 等变 EV 分离", "稀疏高效等变", "前身 NeurIPS 2022；SO3LR 的骨架"],
+  "framework": "JAX/Flax",
+  "license": "MIT",
+  "oneLiner": "把每个原子的状态拆成两条轨道：不变特征 x（管化学）和一组球谐坐标 χ（Euclidean 变量 EV，管几何）；注意力权重同时看 x 和 EV 差的旋转不变收缩 ‖χ_j−χ_i‖²，于是方向信息只以标量形式进入网络，完全省掉昂贵的 Clebsch–Gordan 张量积。",
+  "analogy": "像一个会议室：每位与会者（原子）手里有一张写着专业背景的名片（不变特征 x），胸前还别着一个“指南针徽章”（球谐坐标 χ，记录他身边邻居的朝向分布）。谁该认真听谁发言（注意力），既看名片是否对口，也看两人徽章读数差多少；但比较徽章只看“差别有多大”，不管朝哪个方向——所以整个房间怎么转，结论都不变，也不用做复杂的坐标换算（CG 张量积）。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（exp(−r) 上的 32 个 PhysNet 高斯基）+ 方向（实球谐 Y_l^m, l=1,2,3）；另加 EV 差 χ_j−χ_i 的逐阶不变收缩",
+    "equivariance": "E(3) 不变能量；EV χ 按 Y_l^m 严格旋转等变，特征 x 不变；不用 CG 张量积",
+    "lmax": "EV 阶数 degrees=[1,2,3]（l_max=3，球谐实现到 l=4）；每原子仅一组 χ，m_tot=15，不分通道",
+    "bodyOrder": "无显式 ν 阶；‖χ_l‖² 经球谐加法定理隐含键角（三体）信息，逐层叠加提高有效体序",
+    "layers": "CLI train_so3krates 默认 --L 3；init_so3krates 默认 n_layer=6",
+    "cutoff": "5 Å（r_cut 默认），余弦截断乘在注意力系数上",
+    "receptiveField": "L × r_c（代码 effective_cutoff = steps·cutoff）：3 层 15 Å / 6 层 30 Å",
+    "message": "α_ij = ⟨W_Q x_i, w_ij ⊙ W_K x_j⟩/√F_h · φ(r_ij)（无 softmax），w_ij = MLP(rbf)+MLP(‖χ_j−χ_i‖²_l)；x 收 Σα·W_V x_j，χ_l 收 Σα^(l)·Y_l(r̂_ij)",
+    "readout": "最后一层 x_i → MLP[F,1]（SiLU）→ 原子能；求和；推理时 ×scale（+可选元素 shift）",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R：训练用 jax.jacrev，ASE 计算器用 jax.value_and_grad 一次得到 E 与 F",
+    "stress": "对称应变 ε 同时作用于坐标与晶胞，∂E/∂ε = Vσ（训练时应力标签乘体积）；ASE 计算器用 glp 的 strain_graph",
+    "longRange": "本仓库无静电/电荷平衡；只靠 L×r_c 感受野；χ 空间非局域修正（chi_cut / non_local_*）抛 NotImplementedError；静电+色散见 SO3LR",
+    "dispersion": "无（本版本 mlff 中没有 D3 或其它色散模块）",
+    "chargeSpin": "无（property_names 定义了 total_charge / total_spin，但模型未使用）",
+    "otherOutputs": "仅能量/力/应力；经 glp 可算热流；partial_charge、hirshfeld_volume 只出现在属性名与损失键中，无读出头",
+    "strictlyLocal": false,
+    "complexity": "O(L·N·M·F)（逐边注意力系数与值聚合）+ O(L·N·M·m_tot)（EV 更新，m_tot=15）+ O(L·N·F²)（Dense）；无 CG 张量积",
+    "accel": "JAX jit/vmap（XLA 编译），默认 float32（--jax_dtype x32）；ASE mlffCalculator + glp 邻居表；内置 mdx（JAX MD/LBFGS）；无 LAMMPS、无专用 GPU 内核"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "不做 CG 张量积，EV 每原子只有 15 个分量、注意力全是标量点积，速度接近 PaiNN 类轻量等变模型；但 3–6 层注意力 + F=132 仍比描述符模型慢。"},
+    "expressiveness": {"v": 3, "why": "等变 EV 引入角度信息，强于纯不变 MPNN；但 EV 不分通道、只用 l=0 收缩，没有显式高体序，弱于 MACE/NequIP 类。"},
+    "longRange": {"v": 2, "why": "本仓库只有 L×r_c（15–30 Å）消息传递感受野，没有静电/色散；可选 ZBL 只是近程排斥。"},
+    "scalability": {"v": 2, "why": "JAX 整图 jit + 填充邻居表，单 GPU 上随原子数线性扩展；但没有 LAMMPS / 空间分解 / 多 GPU MD 接口，且感受野大。"},
+    "physics": {"v": 4, "why": "保守力、余弦截断乘在注意力系数上（无 softmax，邻居进出截断时能量平滑）、原子能求和保证广延、可选可学习 ZBL；但余弦截断只有 C¹，ZBL 默认关闭。"},
+    "coverage": {"v": 2, "why": "官方输出为能量/力/应力；热流需借助 glp，偶极/电荷/Hessian 等没有现成读出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、原子序数、（可选）晶胞",
+      "plain": "ASE 计算器从 Atoms 读出坐标 R、原子序数 z 和晶胞，并用 glp 的邻居表整理成 JAX 数组。StackNet 把这些输入放进一个字典 quantities，再生成原子/原子对掩码（用于填充）。之后所有模块都在这个字典上读写，整条计算是一个可被 jax.jit 编译、可被 jax.grad 求导的纯函数。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ (\\mathrm{idx}_i,\\mathrm{idx}_j)",
+      "code": [
+        {"file": "mlff/md/calculator.py", "start": 121, "end": 135, "must": "atoms.get_atomic_numbers()", "caption": "mlffCalculator.calculate：读坐标、原子序数、晶胞并建邻居表"},
+        {"file": "mlff/nn/stacknet/stacknet.py", "start": 56, "end": 67, "must": "quantities.update(inputs)", "caption": "StackNet.__call__：输入字典 + 掩码 → 几何嵌入"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断半径内的原子对（含周期镜像与填充）",
+      "plain": "用 ASE 的 primitive_neighbor_list 找出所有距离小于 r_c（默认 5 Å）的原子对 (i,j) 以及跨越周期边界的整数平移 S。为了让 XLA 不必每步重新编译，边数按 capacity_multiplier（默认 1.25 倍）预留，多出的位置由 pair_mask 屏蔽。所有后续计算只在这些边上进行，总代价随原子数线性增长。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\}",
+      "code": [
+        {"file": "mlff/indexing/indices.py", "start": 207, "end": 231, "must": "primitive_neighbor_list(quantities='ijS'", "caption": "pbc_neighbor_list.allocate_fn：得到 (i, j, S) 并按容量填充"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → PhysNet 径向基 + 余弦截断；方向 → 球谐 Y_l^m",
+      "plain": "每条边算 r_ij = R_j − R_i（周期体系再加晶胞平移）。距离先变成 exp(−r)，再用 32 个均匀分布在 [e^{−r_c}, 1] 上的高斯展开（PhysNet 基）；余弦截断 φ(r) 不乘在径向基上，而是之后乘在注意力系数上，使任何原子对的贡献在 r_c 处平滑归零。方向用 l=1,2,3 的实球谐函数编码，共 m_tot = 3+5+7 = 15 个分量。",
+      "math": "\\mathrm{rbf}_k(r)=\\exp\\!\\big[-\\beta\\,(e^{-r}-\\mu_k)^2\\big],\\ \\mu_k\\in[e^{-r_c},1],\\ \\beta=\\big[\\tfrac{2}{K}(1-e^{-r_c})\\big]^{-2};\\qquad \\phi(r)=\\tfrac12\\big[\\cos(\\pi r/r_c)+1\\big];\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l\\in\\{1,2,3\\}",
+      "code": [
+        {"file": "mlff/nn/embed/embed.py", "start": 86, "end": 127, "must": "sph_fn(unit_r_ij)", "caption": "GeometryEmbed：r_ij → 距离、径向基、截断 φ、单位向量、球谐"},
+        {"file": "mlff/basis_function/radial.py", "start": 154, "end": 166, "must": "jnp.exp(-abs(coefficient) * (jnp.exp(-r) - offsets) ** 2)", "caption": "PhysNetBasis：exp(−r) 上的高斯基"},
+        {"file": "mlff/cutoff_function/radial.py", "start": 39, "end": 51, "must": "0.5 * (jnp.cos(x * jnp.pi / r_cut) + 1.0)", "caption": "余弦截断（默认 radial_cutoff_fn）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "两条轨道的初始化：不变特征 x 与球谐坐标 χ（EV）",
+      "plain": "SO3krates 给每个原子两份状态：x_i 是 F=132 维的不变特征，由原子序数查表（nn.Embed）得到；χ_i 是一组球谐坐标（Euclidean 变量，EV），每个原子只有一组共 15 个分量，不随特征通道复制。默认配置下 χ 初始化为零，由第一层把邻居方向“写入”。这种“化学放在 x、几何放在 χ”的分离，是后面能省掉张量积的前提。",
+      "math": "x_i^{(0)}=\\mathrm{Embed}(Z_i)\\in\\mathbb R^{F},\\qquad \\chi_i^{(0)}=\\mathbf 0\\in\\mathbb R^{m_{\\text{tot}}},\\ m_{\\text{tot}}=\\sum_{l\\in\\{1,2,3\\}}(2l+1)=15",
+      "code": [
+        {"file": "mlff/nn/embed/embed.py", "start": 224, "end": 229, "must": "nn.Embed(num_embeddings=self.num_embeddings, features=self.features)", "caption": "AtomTypeEmbed：原子序数 → F 维不变特征"},
+        {"file": "mlff/nn/embed/embed.py", "start": 140, "end": 150, "must": "_init_sphc_zeros(z=z", "caption": "sphc=True 且未设 sphc_normalization（默认）时走零初始化"},
+        {"file": "mlff/nn/embed/embed.py", "start": 196, "end": 197, "must": "jnp.zeros((z.shape[-1], sph_ij.shape[-1])", "caption": "_init_sphc_zeros：χ⁽⁰⁾ = 0"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：EV 差的旋转不变收缩 → 逐边滤波器",
+      "plain": "对每条边取 EV 之差 χ_j − χ_i，再对每个阶 l 用 CG（l⊗l→0）系数做“自己乘自己”的收缩，得到 3 个旋转不变的标量 d_ij,l ∝ ‖χ_j,l − χ_i,l‖²。它们和距离径向基各过一个 MLP 后相加，得到逐边滤波器 w_ij。因为 χ 汇总了邻居的方向分布，‖χ‖² 通过球谐加法定理隐含了键角信息——方向信息就这样以纯标量形式进入网络，不需要 CG 张量积。",
+      "math": "d_{ij,l}=\\sum_{m}C^{00}_{lm,lm}\\,(\\chi_{j,lm}-\\chi_{i,lm})^2\\ \\propto\\ \\lVert\\chi_{j,l}-\\chi_{i,l}\\rVert^2,\\qquad w_{ij}=\\mathrm{MLP}_{\\text{rad}}\\big(\\mathrm{rbf}(r_{ij})\\big)+\\mathrm{MLP}_{\\text{sph}}\\big(d_{ij}\\big)",
+      "code": [
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 87, "end": 93, "must": "chi[j] - chi[i]", "caption": "So3kratesLayer：EV 差及其逐阶不变收缩"},
+        {"file": "mlff/sph_ops/contract.py", "start": 162, "end": 188, "must": "sphc*sphc*cg_rep[None, :]", "caption": "make_l0_contraction_fn：CG(l⊗l→0) 对角元加权的 Σ_m χ_lm²"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 449, "end": 465, "must": "w += self.sph_filter_fn(", "caption": "RadialSphericalFilter：w = MLP(rbf) + MLP(d_χ)"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：Euclidean 自注意力更新不变特征 x",
+      "plain": "特征 x 拆成 4 个头。每个头里，注意力系数是查询 W_Q x_i、滤波器 w_ij、键 W_K x_j 三者逐元素相乘再求和（除以 √F_h），所以“谁影响谁”既取决于化学（x），也取决于距离和 EV 差（w_ij）。系数不做 softmax，而是直接乘余弦截断 φ(r_ij)，原子进出截断球时能量连续变化。最后按系数加权求和邻居的值 W_V x_j。",
+      "math": "\\alpha^{h}_{ij}=\\frac{\\phi(r_{ij})}{\\sqrt{F_h}}\\sum_{f}\\big(W^{h}_{Q}x_i\\big)_f\\,w^{h}_{ij,f}\\,\\big(W^{h}_{K}x_j\\big)_f,\\qquad \\Delta x^{h}_i=\\sum_{j\\in\\mathcal N(i)}\\alpha^{h}_{ij}\\,W^{h}_{V}x_j",
+      "code": [
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 568, "end": 586, "must": "(q_i * w_ij * k_j).sum(axis=-1) / jnp.sqrt(x.shape[-1])", "caption": "ConvAttentionCoefficients：q·w·k 求和 / √F_h"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 497, "end": 509, "must": "alpha = safe_scale(alpha, scale=pair_mask[:, None] * phi_r_cut[:, None])", "caption": "ConvAttention：系数直接乘截断（无 softmax）后聚合"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 606, "end": 608, "must": "alpha_ij[:, None] * v_j", "caption": "AttentionAggregation：Σ_j α_ij W_V x_j"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ③：同一机制更新球谐坐标 χ",
+      "plain": "几何块用另一套滤波器和投影重复上面的系数计算，但头数等于阶数个数（l=1,2,3 各一个头）。每个头的系数 α_ij^(l)（同样乘截断）去加权邻居方向的球谐 Y_l(r̂_ij)，累加到 χ_i,l 上。标量系数乘球谐仍按球谐方式旋转，所以 χ 保持严格等变；整个更新只是“标量 × 向量”的求和，代价 ∝ 边数 × 15。",
+      "math": "\\Delta\\chi_{i,lm}=\\sum_{j\\in\\mathcal N(i)}\\alpha^{(l)}_{ij}\\,Y_l^m(\\hat{\\mathbf r}_{ij}),\\qquad \\alpha^{(l)}_{ij}=\\frac{\\phi(r_{ij})}{\\sqrt{F/|L|}}\\big\\langle W^{l}_{Q}x_i,\\ w'_{ij}\\odot W^{l}_{K}x_j\\big\\rangle",
+      "code": [
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 326, "end": 337, "must": "self.filter_fn(rbf=rbf_ij, d_gamma=d_chi_ij_l)", "caption": "GeometricBlock：独立滤波器 w′ → SphConvAttention"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 548, "end": 565, "must": "segment_sum(alpha_ij * sph_ij, segment_ids=idx_i", "caption": "SphConvAttention：每个 l 一个头，Δχ = Σ_j α^(l) Y_l"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ④：x ↔ χ 交换信息 + 残差",
+      "plain": "注意力增量先以残差方式加回：x ← x + Δx，χ ← χ + Δχ。随后交互块把 x_i 与每个阶的不变量 ‖χ_i,l‖² 拼接，经一个 Dense 层输出 F 维的 a_i 和 3 个标量 b_i,l：x 加上 a_i，χ_l 按 (1+b_l) 逐阶缩放。这样几何信息流入化学特征，化学特征也能调节每阶 EV 的大小，而等变性不受影响。层数默认 3（CLI）或 6（init_so3krates）。",
+      "math": "[\\,a_i\\,\\Vert\\,b_i\\,]=\\mathrm{Dense}\\big([\\,x_i\\,\\Vert\\,d_{i}\\,]\\big),\\ d_{i,l}\\propto\\lVert\\chi_{i,l}\\rVert^2;\\qquad x_i\\leftarrow x_i+a_i,\\quad \\chi_{i,l}\\leftarrow\\chi_{i,l}+b_{i,l}\\,\\chi_{i,l}",
+      "code": [
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 144, "end": 164, "must": "delta_x, delta_chi = InteractionBlock(", "caption": "两次残差：先加注意力增量，再加交互块增量"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 369, "end": 379, "must": "return a1, self.repeat_fn(b1) * chi", "caption": "InteractionBlock：Dense([x, d_χ]) → (Δx, b_l·χ_l)"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "读出与总能：原子能求和（可选 ZBL 近程排斥）",
+      "plain": "最后一层的不变特征 x_i 经两层 MLP（F → 1，SiLU）得到原子能，求和即总能，这保证了广延性。推理时 MLFFPotential 再乘训练集统计得到的 scale，并可选加元素能量 shift。若训练时加 --zbl_repulsion，还会加一个参数可学习的 ZBL 屏蔽库仑排斥，只在 1.5 Å 以内平滑开启，防止原子在高温或高能碰撞中“穿透”。",
+      "math": "E=\\sum_i\\big[s\\,(\\epsilon_i+\\epsilon^{\\text{ZBL}}_i)+\\mu_{Z_i}\\big],\\ \\epsilon_i=\\mathrm{MLP}(x^{(T)}_i);\\qquad \\epsilon^{\\text{ZBL}}_i=\\frac12\\sum_{j}f_{\\text{sw}}(r_{ij})\\,\\phi(r_{ij})\\,\\frac{k_eZ_iZ_j}{r_{ij}}\\sum_{k=1}^{4}c_k\\,e^{-a_k d\\,r_{ij}(Z_i^{p}+Z_j^{p})}",
+      "code": [
+        {"file": "mlff/nn/observable/observable.py", "start": 77, "end": 91, "must": "e_loc = MLP(features=[x.shape[-1], 1], activation_fn=silu)(x)", "caption": "Energy：逐原子 MLP → 求和（可加 ZBL）"},
+        {"file": "mlff/nn/observable/observable.py", "start": 163, "end": 181, "must": "rzd = d_ij * (jnp.power(z_i, p) + jnp.power(z_j, p)) * d", "caption": "ZBLRepulsion：可学习 ZBL 屏蔽函数 + 1.5 Å 开关函数"},
+        {"file": "mlff/mdx/potential/mlff_potential.py", "start": 80, "end": 91, "must": "scales['energy']['per_atom_shift']", "caption": "推理时的 scale 与可选元素 shift"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程：只靠多层感受野（静电/色散在 SO3LR 中）",
+      "plain": "每层只看 r_c 以内的邻居，L 层后能量最多依赖 L×r_c 以内的原子（代码中 effective_cutoff = steps × cutoff）：CLI 默认 3 层 × 5 Å = 15 Å。这一版 mlff 没有静电、色散或电荷平衡模块；代码里基于 χ 空间距离的非局域修正（chi_cut / non_local_*）直接抛出 NotImplementedError。需要真正长程物理时，官方后续模型 SO3LR 在 SO3krates 之上预测部分电荷与 Hirshfeld 比值，用于静电和色散，并带 ZBL 排斥。",
+      "math": "r_{\\text{eff}}=L\\cdot r_c,\\qquad E=E\\big(\\{\\mathbf r_j:\\ r_{ij}<L\\,r_c\\}\\big)",
+      "code": [
+        {"file": "mlff/mdx/potential/mlff_potential.py", "start": 71, "end": 74, "must": "effective_cutoff = steps * cutoff", "caption": "有效截断 = 层数 × r_c"},
+        {"file": "mlff/nn/layer/so3krates_layer.py", "start": 47, "end": 54, "must": "Improved version of non-local corrections will come soon", "caption": "χ 空间非局域修正在此版本中未实现"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：JAX 自动微分",
+      "plain": "力是能量对坐标的负梯度：训练时用 jax.jacrev 对输入字典求导，ASE 计算器用 jax.value_and_grad 一次同时得到能量和力。因此力场严格保守，NVE 下能量守恒，这也是论文强调“稳定”MD 的基础；代价是多一次反向传播。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"file": "mlff/nn/stacknet/observable_function.py", "start": 142, "end": 149, "must": "D_force = (F_key, (E_key, R_key, lambda y: -y.squeeze(-3)))", "caption": "get_obs_and_force_fn：F = −∂E/∂R"},
+        {"file": "mlff/nn/stacknet/observable_function.py", "start": 57, "end": 63, "must": "jax.jacrev(observable_fn, argnums=1, allow_int=True)", "caption": "grad_obs_fn：jacrev 求导"},
+        {"file": "mlff/md/calculator.py", "start": 100, "end": 109, "must": "forces = - grads.R", "caption": "ASE 计算器：value_and_grad 同时得 E、F"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对对称应变求导",
+      "plain": "引入全零的 3×3 应变 ε 并取对称部分，同时作用到坐标和晶胞上，再让 jax.value_and_grad 对（输入, ε）一起求导：一次反传同时得到力和 ∂E/∂ε。训练时应力标签先乘晶胞体积再与之对齐，评估时再除回体积；ASE 计算器的 calculate_stress=True 分支用 glp 的 strain_graph 实现同样的思路。",
+      "math": "\\boldsymbol\\varepsilon_s=\\tfrac12(\\boldsymbol\\varepsilon+\\boldsymbol\\varepsilon^{\\top}),\\ \\mathbf r_i\\to(\\mathbf 1+\\boldsymbol\\varepsilon_s)\\mathbf r_i,\\ \\mathbf c_A\\to(\\mathbf 1+\\boldsymbol\\varepsilon_s)\\mathbf c_A,\\qquad V\\boldsymbol\\sigma=\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"file": "mlff/nn/stacknet/observable_function.py", "start": 171, "end": 184, "must": "_eps_symm = (_eps + _eps.T) / jnp.float32(2.0)", "caption": "get_energy_force_stress_fn：对称应变作用于坐标与晶胞"},
+        {"file": "mlff/md/calculator.py", "start": 87, "end": 99, "must": "graph = strain_graph(graph, strain)", "caption": "ASE 计算器（calculate_stress=True）：glp strain_graph"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "r_cut", "value": "5.0 Å", "note": "截断半径（余弦截断）", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 85, "end": 85, "must": "--r_cut"}},
+    {"name": "F", "value": "132", "note": "不变特征维度", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 86, "end": 86, "must": "--F"}},
+    {"name": "L（CLI --L）", "value": "3", "note": "train_so3krates 的层数", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 87, "end": 87, "must": "--L"}},
+    {"name": "n_layer（init_so3krates）", "value": "6", "note": "Python 构造函数的默认层数", "code": {"file": "mlff/nn/representation/so3krates.py", "start": 14, "end": 16, "must": "n_layer: int = 6"}},
+    {"name": "H（n_heads）", "value": "4", "note": "特征块注意力头数；几何块头数 = len(degrees) = 3", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 88, "end": 88, "must": "--H"}},
+    {"name": "degrees", "value": "[1, 2, 3]", "note": "EV 球谐阶数，m_tot = 15", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 89, "end": 89, "must": "--degrees"}},
+    {"name": "径向基", "value": "phys × 32，cosine_cutoff_fn", "note": "PhysNet 基个数与截断函数", "code": {"file": "mlff/nn/representation/so3krates.py", "start": 51, "end": 58, "must": "'n_rbf': 32"}},
+    {"name": "滤波器 MLP", "value": "rad [F, F]；sph [F/4, F]", "note": "特征块与几何块各一套", "code": {"file": "mlff/nn/representation/so3krates.py", "start": 61, "end": 67, "must": "'fb_sph_filter_features': [int(F/4), F]"}},
+    {"name": "loss_weights", "value": "E 0.01 / F 0.99 / σ 0.01", "note": "默认损失权重（以力为主）", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 148, "end": 148, "must": "pn.force: 0.99"}},
+    {"name": "lr", "value": "1e-3", "note": "初始学习率", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 139, "end": 139, "must": "default=1e-3"}},
+    {"name": "jax_dtype", "value": "x32", "note": "默认单精度", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 161, "end": 161, "must": "--jax_dtype"}},
+    {"name": "zbl_repulsion", "value": "关闭（store_true 开关）", "note": "可选 ZBL 近程排斥", "code": {"file": "mlff/cAPI/mlff_train_so3krates.py", "start": 97, "end": 97, "must": "--zbl_repulsion"}}
+  ],
+  "speedNotes": [
+    "每层只有两类逐边计算：注意力系数与值聚合（∝ 边数 × F，纯标量点积）和 EV 更新（∝ 边数 × m_tot，m_tot = 15）；完全没有 CG 张量积，提高 l_max 只线性增加 m_tot。",
+    "EV 每个原子只有一组（形状 n × m_tot），不像 NequIP/MACE 那样每个通道都携带 l>0 的不可约表示，内存和 FLOPs 都大幅降低。",
+    "注意力不做 softmax 归一化，系数直接乘余弦截断，省去按邻居归一化的开销，也让能量在邻居进出截断时保持平滑。",
+    "JAX jit + vmap 编译：邻居表按 capacity_multiplier（默认 1.25）预留并填充，避免每步重新编译；默认 float32（--jax_dtype x32）。",
+    "力（及应力）靠 jax.value_and_grad 反传得到，额外开销与一次前向同量级。"
+  ],
+  "weakNotes": [
+    "截断 5 Å，感受野 L × r_c：CLI 默认 3 层 → 15 Å，init_so3krates 默认 6 层 → 30 Å；超出部分的色散 r⁻⁶ 尾巴和静电 r⁻¹ 完全缺失。",
+    "本仓库（2024-08 主分支）没有静电、色散或电荷平衡模块；基于 χ 空间距离的非局域修正（chi_cut / non_local_*）在代码中抛出 NotImplementedError。",
+    "没有总电荷/自旋输入：带电分子、离子液体、带电缺陷、不同氧化态的同组成体系无法区分。",
+    "仓库不附带预训练模型，训练数据（及其泛函、是否含色散）由用户决定；README 以 MD17/MD22（kcal/mol）为例。弱相互作用能否学到取决于数据与截断。",
+    "官方升级路径是 SO3LR：在 SO3krates 之上预测部分电荷与 Hirshfeld 比值，加入静电、色散与 ZBL；本仓库已预留 partial_charge / hirshfeld_volume_ratio 等属性名。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 余弦截断（一阶导在 r_c 处为零）→ 力连续，适合长时间 MD；Nat Commun 论文标题即强调“fast and stable”。",
+    "通过 glp 可算能量/力/应力/热流，并可接 vibes 做声子、接 gkx 做 Green–Kubo 热导率（README）；文献 [3] 用它计算固体的状态方程与热流。",
+    "内置 mdx：JAX 版 LBFGS 结构优化与 Velocity Verlet / Langevin / BAOAB / Nosé–Hoover / Berendsen 积分器（README 提示 MD 部分正在重写）。",
+    "可选 ZBL 近程排斥改善高温、高能碰撞下原子过近时的稳定性。",
+    "没有偶极、极化率、电荷读出头，红外/拉曼光谱与带电体系需转向 SO3LR 或其他模型。"
+  ],
+  "strengths": ["不做 CG 张量积，在等变模型中推理很快", "注意力同时看化学与几何（EV 差），表达力强于纯不变 MPNN", "无 softmax + 余弦截断 + 保守力 → MD 稳定", "JAX 全可微，易接 glp 计算应力与热流", "是 SO3LR 等后续模型的骨架"],
+  "weaknesses": ["EV 只有一组且只用 l=0 收缩，角分辨率不如通道化的 MACE/NequIP", "本仓库版本无静电/色散/电荷与自旋输入", "多层消息传递使感受野达 15–30 Å，不利于空间分解并行", "无预训练通用模型，需针对体系自行训练", "MD 模块在重写中，无 LAMMPS 接口"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

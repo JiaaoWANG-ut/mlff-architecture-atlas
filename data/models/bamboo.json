@@ -1,0 +1,207 @@
+{
+  "id": "bamboo",
+  "name": "BAMBOO",
+  "fullName": "BAMBOO: ByteDance AI Molecular Simulation BOOster",
+  "year": 2024,
+  "authors": "S. Gong, Y. Zhang, Z. Mu, Z. Pu, H. Wang, … W. Gao, W. Yan, L. Xiang（ByteDance）",
+  "paper": {"title": "A predictive machine learning force-field framework for liquid electrolyte development", "venue": "Nature Machine Intelligence 7, 543–552 (2025)", "url": "https://doi.org/10.1038/s42256-025-01009-7"},
+  "repos": ["bamboo"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔等变图 Transformer (GET)", "预测电荷 + 阻尼库仑/PPPM", "D3(CSO) 色散", "锂电池液态电解质", "集成蒸馏 + 密度对齐"],
+  "framework": "PyTorch（TorchScript 导出）+ LAMMPS Kokkos/CUDA pair_style bamboo",
+  "license": "GPL-2.0（源码头注明 version 2 or later）",
+  "oneLiner": "字节跳动面向锂电池液态电解质的力场：用轻量的笛卡尔等变图 Transformer（GET）只预测短程原子能和受总电荷约束的部分电荷，再显式加上阻尼库仑（LAMMPS 中配 PPPM）、电负性能和 D3(CSO) 色散；训练后还可用集成蒸馏和“压强→密度对齐”把 MD 宏观性质校准到实验。",
+  "analogy": "像一位熟悉电解液的化学家分工合作：近处的事（5 Å 内谁挨着谁、朝哪个方向）交给“经验”（神经网络）判断，并顺便估计每个原子带多少电；远处的事则交给教科书公式（库仑定律 + 色散公式）按电荷精确计算；最后再拿实验测得的密度当“校准砝码”微调手感。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（32 个 ExpNormal 径向基 × 余弦截断）+ 单位方向 r̂_ij（l=1 笛卡尔向量）；无球谐、无显式角度",
+    "equivariance": "E(3) 等变：标量通道不变，3×64 向量通道只做线性组合、内积与标量门控；能量不变",
+    "lmax": "l ≤ 1（标量 + 三维向量通道，无高阶张量）",
+    "bodyOrder": "每层通过向量内积 ⟨u₁,u₂⟩ 引入键角（3 体）信息；3 层叠加后体序更高，但非 ACE 式完备展开",
+    "layers": "3 层 GET（首层 + 1 个中间层 + 末层，num_layers=3）",
+    "cutoff": "NN 5 Å；库仑实空间 5 Å（截断外由 PPPM 处理）；色散 10 Å",
+    "receptiveField": "NN 部分 3 × 5 = 15 Å；静电经 PPPM 覆盖全体系；色散 10 Å",
+    "message": "线性注意力 a_ij = SiLU(q_i·k_j)·f_c(r_ij)（16 头×4 维，无 softmax）；标量消息 Σ v_j⊙s_ij·a_ij，向量消息 Σ (v_j⊙s_ij) r̂_ij",
+    "readout": "末层标量 h_i → 能量 MLP(64→32→32→1, SiLU) 求和；电荷 MLP 同结构 + 2·tanh(·/2) 限幅 + 均匀修正保证总电荷",
+    "forces": "conservative",
+    "forcesDetail": "NN 能量对边向量 r_ij 做 autograd 得边力再散射到原子；库仑（固定电荷）与 D3（含 CN 导数）为解析力；∂E/∂q·∂q/∂R 项不计算，靠训练中 qeq_force 惩罚使其≈0（近似保守）",
+    "stress": "维里 W = Σ r_ij ⊗ f_ij（NN）+ ½Σ r_ij ⊗ f_ij（库仑）+ D3 解析维里；LAMMPS 累加用于 NPT",
+    "longRange": "内置：NN 预测部分电荷 → softplus 阻尼库仑（训练：团簇内全部原子对；推理：5 Å 实空间 + erfc 修正 + LAMMPS PPPM）",
+    "dispersion": "内置 DFT-D3(CSO)：CN 相关 C6，s6=1.0、a1=0.86、a4 由 6.25 改为 7.75，10 Å 截断；只在推理 forward 中加入",
+    "chargeSpin": "训练时每个团簇输入总电荷 total_charge（电荷之和严格守恒）；LAMMPS 推理固定总电荷为 0；无自旋",
+    "otherOutputs": "原子部分电荷（写回 LAMMPS atom->q）、偶极（训练监督）、库仑能分项（ecoul/evdwl）、分子间维里 nn_virial_outer（用于对齐）",
+    "strictlyLocal": false,
+    "complexity": "NN：O(N·M·C)，C=64，每边只有点积与逐元素乘（无 CG 张量积）；库仑实空间 O(N·M) + PPPM O(N log N)；D3 需 10 Å 邻居及 CN",
+    "accel": "TorchScript 模型 + LAMMPS Kokkos pair（GPU 上建三套边表，需 newton off、全邻居表）+ PPPM；模型内 FP32、接口 FP64；按全局 tag 建整图，示例单 GPU"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "64 维、3 层、只有 l=1 笛卡尔向量、无张量积，属 PaiNN/TorchMD-ET 量级；额外有 PPPM 和 10 Å D3（含 CN）开销。"},
+    "expressiveness": {"v": 3, "why": "只有标量 + l=1 向量通道、靠内积获得角度信息，通道仅 64；表达力中等，但长程部分由物理项分担。"},
+    "longRange": {"v": 5, "why": "内置预测电荷 + 阻尼库仑（推理配 PPPM）、总电荷约束与 QEq 一致性惩罚、内置 D3(CSO) 色散，静电与色散都显式建模。"},
+    "scalability": {"v": 2, "why": "有 LAMMPS Kokkos 接口，但 pair 按全局 tag 构建整图、单 GPU 推理，未见空间分解；3 层消息传递。"},
+    "physics": {"v": 3, "why": "NN 部分保守、余弦截断平滑、严格 E(3) 等变、原子能可加；但电荷响应力被省略（仅靠惩罚近似为零），D3 10 Å 硬截断，无 ZBL。"},
+    "coverage": {"v": 3, "why": "能量/力/维里之外输出原子部分电荷与偶极，并分项报告库仑能；无 Hessian、极化率、磁性等。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "输入与三套邻居表：NN 5 Å / 库仑 5 Å / 色散 10 Å",
+      "plain": "输入是原子坐标、元素和（训练时）每个团簇的总电荷。LAMMPS 推理时 forward 把总电荷固定为 0，并把输入转成 FP32。邻居由 LAMMPS（Kokkos）在 GPU 上按三个半径分拣：网络、库仑实空间、色散各用一套边；边向量 r_ij = r_i − r_j 已含周期镜像位移。关键在于对“边向量”而不是坐标打开 requires_grad——后面的力和维里都从边力得来。",
+      "math": "\\mathcal E_{\\text{net}}=\\{r_{ij}<5\\,\\text{Å}\\},\\quad \\mathcal E_{\\text{coul}}=\\{r_{ij}<5\\,\\text{Å}\\},\\quad \\mathcal E_{\\text{disp}}=\\{r_{ij}<10\\,\\text{Å}\\},\\qquad \\mathbf r_{ij}=\\mathbf r_i-\\mathbf r_j",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 294, "end": 304, "must": "inputs['edge_cell_shift'].requires_grad_(True)", "caption": "forward（LAMMPS 推理）：转 FP32、总电荷置 0、对边向量开启求导"},
+        {"file": "pair/src/pair_bamboo_kokkos.cpp", "start": 177, "end": 202, "must": "if (rsq < cutoff_net_sq)", "caption": "Kokkos pair：按 disp / coul / net 三个截断分拣邻居并记录边向量"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：ExpNormal 径向基 × 余弦截断；方向只用单位向量",
+      "plain": "距离 r 被展开成 32 个 ExpNormal 径向基（沿用 PhysNet 的初始化，中心与宽度可训练），并乘余弦截断，使特征在 5 Å 处平滑归零。径向基经线性层 + SiLU 变成 64 维边特征 s_ij（按 16 个头切成 16×4）。方向信息只有单位向量 r̂_ij：它与 s_ij 外积得到每条边的“向量特征”，没有球谐函数，也没有 CG 张量积。",
+      "math": "e_k(r)=f_c(r)\\,\\exp\\!\\big[-\\beta_k\\big(e^{-\\alpha r}-\\mu_k\\big)^2\\big],\\ \\alpha=\\tfrac{5}{r_c};\\quad f_c(r)=\\tfrac12\\big[\\cos(\\pi r/r_c)+1\\big]\\,\\Theta(r_c-r);\\qquad \\mathbf s_{ij}=\\mathrm{SiLU}\\big(W\\,\\mathbf e(r_{ij})\\big),\\ \\ \\vec{\\mathbf s}_{ij}=\\mathbf s_{ij}\\otimes\\hat{\\mathbf r}_{ij}",
+      "code": [
+        {"file": "utils/funcs.py", "start": 92, "end": 97, "must": "self.cutoff_fn(dist) * torch.exp(", "caption": "ExpNormalSmearing：可训练径向基，自带余弦截断"},
+        {"file": "utils/funcs.py", "start": 48, "end": 53, "must": "torch.cos(distances * math.pi / self.cutoff_upper)", "caption": "CosineCutoff：r_c 处平滑归零"},
+        {"file": "models/bamboo_get.py", "start": 260, "end": 265, "must": "edge_vec = edge_feat.unsqueeze(-3) * coord_diff.unsqueeze(-1).unsqueeze(-1)", "caption": "边特征 s_ij 与边向量特征 s_ij ⊗ r̂_ij"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "元素嵌入 + 元素级电负性 χ 与硬度 η",
+      "plain": "元素序号查一张 87×64 的嵌入表（H 到 Rn 的占位），得到初始标量特征 h⁽⁰⁾。BAMBOO 在消息传递之前，就用这份只看元素的嵌入经两个小 MLP 预测电负性 χ 和硬度 η——它们本质上是可学习的元素常数，后面用来构造类似 QEq 的电荷能 χ²q + η²q²。",
+      "math": "\\mathbf h_i^{(0)}=\\mathrm{Emb}(Z_i)\\in\\mathbb R^{64},\\qquad \\chi_i=\\mathrm{MLP}_\\chi\\big(\\mathbf h_i^{(0)}\\big),\\quad \\eta_i=\\mathrm{MLP}_\\eta\\big(\\mathbf h_i^{(0)}\\big)",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 136, "end": 146, "must": "self.pred_electronegativity_mlp(node_feat)", "caption": "energy_nn 开头：元素嵌入、径向基、由初始嵌入预测 χ 与 η"},
+        {"file": "models/bamboo_base.py", "start": 59, "end": 66, "must": "nn.Embedding(self.nelems, self.dim)", "caption": "嵌入表、径向基与截断函数的构造"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "GET 层 ①：线性注意力 + 截断加权的标量消息",
+      "plain": "每层先对标量特征做 LayerNorm，再线性投影出 q、k、v，按 16 个头（每头 4 维）切分。注意力不用 softmax，而是 SiLU(q_i·k_j) 再乘余弦截断 f_c(r_ij)（训练脚本用 SiLU，类默认 GELU）：无需对邻居归一化，邻居越过截断时权重连续降到零，能量因此平滑。标量消息是 v_j、边特征与注意力逐元素相乘后对邻居求和，经输出投影后以残差方式加回 h_i。",
+      "math": "(\\mathbf q,\\mathbf k,\\mathbf v)=W_{qkv}\\,\\mathrm{LN}(\\mathbf h),\\quad a^{h}_{ij}=\\mathrm{SiLU}\\big(\\langle\\mathbf q^h_i,\\mathbf k^h_j\\rangle\\big)\\,f_c(r_{ij});\\qquad \\mathbf m_i=\\sum_{j\\in\\mathcal N(i)}\\mathbf v_j\\odot\\mathbf s_{ij}\\,a_{ij}",
+      "code": [
+        {"file": "models/bamboo_get.py", "start": 46, "end": 57, "must": "qkv = self.qkv_proj(node_feat)", "caption": "qkv_attn：LayerNorm → q/k/v 投影，按 16 头切分"},
+        {"file": "models/bamboo_get.py", "start": 68, "end": 84, "must": "attn = self.attn_act(torch.sum(q_row * k_col, dim=-1)) * radial.unsqueeze(-1)", "caption": "LinearAttnFirst：激活代替 softmax、乘截断；标量/向量消息求和"},
+        {"file": "models/bamboo_get.py", "start": 267, "end": 281, "must": "for attn in self.attns:", "caption": "graph_nn：首层 → (n_layers−2) 个中间层 → 末层，残差更新"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "GET 层 ②：笛卡尔向量通道与内积——等变地引入键角",
+      "plain": "每个原子还带一组 3×64 的向量特征 V_i，由邻居的 v_j⊙s_ij 乘方向 r̂_ij 累加而来（向量消息不乘注意力）。中间层把 V_i 做无偏置线性混合得到 u₁、u₂、u₃：u₁·u₂ 的内积是旋转不变量，相当于把两条键的夹角（3 体信息）注入标量通道；u₃ 经标量门控后加回向量通道。只用线性组合、内积和标量乘法，就严格保证 E(3) 等变——与 PaiNN / TorchMD-ET 同一思路。末层只更新标量。",
+      "math": "\\vec{\\mathbf M}_i=\\sum_j(\\mathbf v_j\\odot\\mathbf s_{ij})\\,\\hat{\\mathbf r}_{ij},\\quad (\\vec{\\mathbf u}_1,\\vec{\\mathbf u}_2,\\vec{\\mathbf u}_3)=W_V\\vec{\\mathbf V}_i,\\quad (\\mathbf o_1,\\mathbf o_2,\\mathbf o_3)=W_O\\,\\mathbf m_i;\\qquad \\Delta\\mathbf h_i=\\langle\\vec{\\mathbf u}_1,\\vec{\\mathbf u}_2\\rangle\\odot\\mathbf o_2+\\mathbf o_3,\\quad \\Delta\\vec{\\mathbf V}_i=\\vec{\\mathbf u}_3\\odot\\mathbf o_1+\\vec{\\mathbf M}_i",
+      "code": [
+        {"file": "models/bamboo_get.py", "start": 129, "end": 156, "must": "input_dot = (input_1 * input_2).sum(dim=-2)", "caption": "LinearAttn.forward：向量内积 → 标量；标量门控 → 向量；向量消息累加"},
+        {"file": "models/bamboo_get.py", "start": 201, "end": 220, "must": "delta_node_feat = input_dot * output_2 + output_3", "caption": "LinearAttnLast：末层只输出标量更新"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：短程原子能 + 有界部分电荷（总电荷守恒）",
+      "plain": "3 层之后的标量 h_i 进入结构相同的小 MLP（64→32→32→1，SiLU）：一个给出原子能 E_i，一个给出原始电荷。原始电荷先用 2·tanh(c/2) 限制在 ±2 e 以内，再把与目标总电荷 Q 的差平均分给每个原子，保证 Σq_i 严格等于 Q。这样电荷随构型连续变化，作为后面库仑能的输入。",
+      "math": "E_i=\\mathrm{MLP}_E(\\mathbf h_i),\\qquad \\tilde q_i=Q_{\\text{ub}}\\tanh\\!\\big(\\mathrm{MLP}_q(\\mathbf h_i)/Q_{\\text{ub}}\\big),\\quad q_i=\\tilde q_i+\\frac{Q-\\sum_k\\tilde q_k}{N},\\quad Q_{\\text{ub}}=2",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 151, "end": 168, "must": "pred_charge = charge + torch.gather(diff_charge, 0, inputs['mol_ids'])", "caption": "energy_nn：电荷限幅与总电荷修正、电负性能、原子能求和"},
+        {"file": "models/bamboo_base.py", "start": 71, "end": 85, "must": "mlp_layers.append(nn.Linear(dim//2, 1))", "caption": "get_mlp_layers：能量/电荷/χ/η 四个读出头"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "静电：阻尼库仑 + 电负性能 + QEq 一致性惩罚（推理配 PPPM）",
+      "plain": "库仑能用预测电荷两两计算。为避免短距离 1/r 发散，用 softplus 阻尼：r 远大于 r0=2.2 Å 时恢复裸库仑，r→0 时趋于有限值。训练时团簇内所有原子对都参与；推理时 pair 只算 5 Å 内的实空间部分并加 erfc(g r)−1 修正，截断外交给 LAMMPS 的 PPPM（电荷已写回 atom->q）。电荷能 E_coul+E_χ 经由电荷对坐标的梯度称为 qeq_force，训练中以权重 300 惩罚到 0——等价于要求电荷满足电荷平衡条件，于是算力时可以把电荷当常数。",
+      "math": "E_{\\text{coul}}=\\frac12\\sum_{i\\neq j}\\frac{k_e q_iq_j}{r_{ij}}\\cdot\\frac{r_{ij}/r_0}{1+\\mathrm{softplus}_{\\beta}\\big((r_{ij}-r_0)/r_0\\big)},\\quad E_\\chi=\\sum_i\\big(\\chi_i^2q_i+\\eta_i^2q_i^2\\big);\\qquad \\mathbf F^{\\text{qeq}}=-\\sum_k\\frac{\\partial(E_{\\text{coul}}+E_\\chi)}{\\partial q_k}\\frac{\\partial q_k}{\\partial\\mathbf R}\\to 0",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 102, "end": 122, "must": "ecoul = prefactor_coul * rij / r0 / (1 + softplus_coul)", "caption": "get_coulomb：softplus 阻尼库仑与解析力，推理时加 erfc 实空间修正"},
+        {"file": "models/bamboo_base.py", "start": 250, "end": 258, "must": "charge_energy = coul_energy + electronegativity_energy", "caption": "predict：经由电荷的梯度 qeq_force（应被正则化为 0）"},
+        {"file": "train/train.py", "start": 213, "end": 225, "must": "loss += qeq_force * self.qeq_force_regularizer", "caption": "训练损失：E/F/维里/电荷/偶极 + 300×qeq_force²"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "色散：D3(CSO)，C6 随配位数变化，10 Å 截断",
+      "plain": "vdW 色散写成独立物理项 DFT-D3(CSO)：先由共价半径算配位数 CN，再对参考 C6 做 CN 加权插值，最后用 CSO 型阻尼只保留 C6/r⁶ 项。代码中 s6=1.0、a1=0.86，并把 a4 从 6.25 改为 7.75（README：改善零样本密度）；能量、力（含 CN 链式导数）和维里都是手写解析式。该项只在推理 forward 中加入，训练用的 predict 不含色散。",
+      "math": "E_{\\text{disp}}=-\\sum_{i<j}C_6^{ij}(\\mathrm{CN}_i,\\mathrm{CN}_j)\\,\\frac{s_6+a_1\\big/\\big(1+e^{\\,r_{ij}-2.5R_0^{ij}}\\big)}{r_{ij}^6+a_4^6},\\quad s_6=1,\\ a_1=0.86,\\ a_4=7.75\\ \\text{bohr};\\qquad \\mathrm{CN}_i=\\sum_j\\frac{1}{1+e^{-16(R_{\\text{cov}}^{ij}/r_{ij}-1)}}",
+      "code": [
+        {"file": "models/modules/dftd3/dftd3.py", "start": 174, "end": 190, "must": "t = 1 / (rij ** 6 + 7.75 ** 6)", "caption": "DFTD3CSO：CSO 阻尼，a4=6.25 改为 7.75"},
+        {"file": "models/modules/dftd3/dftd3.py", "start": 129, "end": 159, "must": "self.compute_dispersion(rij, r0ij, kij)", "caption": "DFTD3Base.forward：CN → C6 → 能量与解析力（含 CN 项）"},
+        {"file": "models/modules/dftd3/dftd3.py", "start": 62, "end": 69, "must": "KCN = 16.0", "caption": "cn_d3：D3 配位数及其导数"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：NN 短程 + 库仑 + 电负性能 + 色散",
+      "plain": "总能是几项物理意义清楚的部分之和：网络的短程原子能之和、预测电荷的库仑能、电负性/硬度能 E_χ，以及（仅推理时）D3 色散。原子能求和保证广延性；训练的能量损失会先减去批平均，只拟合相对能量。LAMMPS 把库仑能单独报告为 ecoul，其余计入 evdwl，便于分析。",
+      "math": "E=\\underbrace{\\sum_i E_i}_{\\text{NN}}+E_{\\text{coul}}+\\sum_i\\big(\\chi_i^2q_i+\\eta_i^2q_i^2\\big)+E_{\\text{disp}}",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 329, "end": 335, "must": "outputs['pred_energy'] = nn_energy + coul_energy + disp_energy + electronegativity_energy", "caption": "forward：总能、力、维里三项相加"},
+        {"file": "pair/src/pair_bamboo_kokkos.cpp", "start": 421, "end": 435, "must": "eng_coul = pred_coul_energy_tensor.data_ptr<double>()[0];", "caption": "LAMMPS：库仑能记为 ecoul，其余记为 evdwl"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对“边向量”自动微分 + 解析库仑/色散力",
+      "plain": "NN 能量对每条边的向量 r_ij 做一次 torch.autograd.grad 得到边力 f_ij，再按边的两端散射（i 得 +f_ij，j 得 −f_ij）成原子力——与对坐标求导等价，还顺带给出维里并自然处理周期镜像。库仑力（电荷固定）与 D3 力是手写解析导数。电荷随坐标变化带来的力项不显式计算，依赖训练中的 qeq_force 惩罚使其近似为零，所以力是“近似保守”的。",
+      "math": "\\mathbf f_{ij}=-\\frac{\\partial E_{\\text{NN}}}{\\partial\\mathbf r_{ij}},\\qquad \\mathbf F_i=\\sum_{j}\\mathbf f_{ij}-\\sum_{k}\\mathbf f_{ki}+\\mathbf F_i^{\\text{coul}}\\big|_{q\\ \\text{fixed}}+\\mathbf F_i^{\\text{D3}}",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 309, "end": 324, "must": "nn_fij = torch.autograd.grad([nn_energy], [inputs['edge_cell_shift']]", "caption": "forward：NN 边力 autograd → 原子力；库仑用解析边力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "维里与压强：边向量 ⊗ 边力，支撑 NPT",
+      "plain": "因为力按边计算，维里可直接写成 Σ r_ij ⊗ f_ij（NN）、½Σ r_ij ⊗ f_ij（库仑，每对计两次）再加 D3 解析维里，不需要额外的应变求导。LAMMPS pair 把 3×3 维里对称化后累加到 virial[0..5]，与 PPPM 的倒空间维里一起给出压强，用于 NPT 预测电解质密度（示例 in.lammps 为 300 K、各向同性 NPT）。",
+      "math": "\\mathbf W=\\sum_{(i,j)\\in\\mathcal E_{\\text{net}}}\\mathbf r_{ij}\\otimes\\mathbf f_{ij}+\\frac12\\sum_{(i,j)\\in\\mathcal E_{\\text{coul}}}\\mathbf r_{ij}\\otimes\\mathbf f^{\\text{coul}}_{ij}+\\mathbf W^{\\text{D3}},\\qquad P=\\frac{Nk_BT}{V}+\\frac{\\mathrm{tr}\\,\\mathbf W}{3V}",
+      "code": [
+        {"file": "models/bamboo_base.py", "start": 316, "end": 333, "must": "nn_virial = torch.sum(nn_fij_cast.unsqueeze(-2) * inputs['edge_cell_shift'].unsqueeze(-1), dim=0)", "caption": "forward：NN、库仑、D3 维里相加"},
+        {"file": "pair/src/pair_bamboo_kokkos.cpp", "start": 447, "end": 454, "must": "virial[3] += 0.5 * (predict_virial[0][1] + predict_virial[1][0]);", "caption": "LAMMPS：对称化后累加到 virial"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "输出与校准：电荷写回 LAMMPS；集成蒸馏与密度（压强）对齐",
+      "plain": "模型还输出每个原子的部分电荷（LAMMPS 中写回 atom->q，可 dump，也供 PPPM 使用）；训练时用 Σq_i r_i 得到的偶极与 DFT 偶极对齐。训练后有两个面向电解质的校准流程：集成蒸馏（DistillationEnsemble）让至少 3 个模型在 MD 帧上预测 E/F/维里，取均值作软标签微调一个模型；密度对齐（DensityAlignment）只用分子间边的维里 nn_virial_outer，把模型压强平移 ΔP，从而让 NPT 密度贴近实验。两者都与 DFT 团簇损失交替训练，防止遗忘。",
+      "math": "\\boldsymbol\\mu=\\sum_i q_i\\mathbf r_i;\\qquad \\mathcal L_{\\text{ens}}=\\lambda_F\\lVert\\mathbf F-\\bar{\\mathbf F}_{\\text{ens}}\\rVert^2+\\tfrac{\\lambda_E}{N}\\big(E-\\bar E_{\\text{ens}}\\big)^2+\\tfrac{\\lambda_W}{N}\\lVert\\mathbf W-\\bar{\\mathbf W}_{\\text{ens}}\\rVert^2;\\qquad \\mathcal L_{\\text{align}}=\\Big(\\frac{\\Delta W_{\\text{inter}}}{3V}-\\Delta P\\Big)^2+\\dots",
+      "code": [
+        {"file": "pair/src/pair_bamboo_kokkos.cpp", "start": 437, "end": 445, "must": "d_charge(itag)", "caption": "LAMMPS：力与预测电荷写回 f 与 q"},
+        {"file": "train/ensemble.py", "start": 450, "end": 461, "must": "bulk_loss: torch.Tensor = mse_forces * self.bulk_force_ratio", "caption": "集成蒸馏：拟合多个模型在 MD 帧上的平均 E/F/维里"},
+        {"file": "train/alignment.py", "start": 338, "end": 347, "must": "nktv2p * nn_virial_outer_diff / (3*volume)", "caption": "密度对齐：分子间维里换算的压强偏移逼近目标 ΔP"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "rcut（NN 截断）", "value": "5.0 Å", "note": "GET 邻居半径；pair_style 第 1 个参数", "code": {"file": "train/train.py", "start": 63, "end": 72, "must": "parser.add_argument('--rcut', type=float, default=5.0)"}},
+    {"name": "num_layers", "value": "3", "note": "首层 + 1 个中间层 + 末层"},
+    {"name": "emb_dim / num_heads", "value": "64 / 16（每头 4 维）", "note": "标量通道宽度与注意力头数"},
+    {"name": "num_rbf", "value": "32", "note": "ExpNormal 径向基个数"},
+    {"name": "charge_ub", "value": "2.0 e", "note": "部分电荷 tanh 限幅上界", "code": {"file": "train/train.py", "start": 54, "end": 60, "must": "parser.add_argument('--charge_ub', default=2.0, type=float)"}},
+    {"name": "coul_damping_beta / r0", "value": "18.7 / 2.2 Å", "note": "库仑 softplus 阻尼参数"},
+    {"name": "disp_cutoff", "value": "10.0 Å", "note": "D3(CSO) 截断；pair_style 第 3 个参数"},
+    {"name": "D3(CSO) 参数", "value": "s6=1.0, a1=0.86, a4=7.75", "note": "a4 由原 6.25 调整", "code": {"file": "models/modules/dftd3/dftd3.py", "start": 175, "end": 184, "must": "def __init__(self, s6=1.0, a1=0.86, *args, **kwargs):"}},
+    {"name": "energy / charge MLP", "value": "2 个隐藏层（64→32→32→1，SiLU）", "note": "能量、电荷、χ、η 四个读出头同结构"},
+    {"name": "损失权重", "value": "E 0.01 / F 0.3 / virial 0.01 / q 10 / dipole 10；qeq 300", "note": "configs/train_config/config.json", "code": {"file": "configs/train_config/config.json", "start": 12, "end": 18, "must": "\"qeq_force_regularizer\": 300.0"}},
+    {"name": "优化器", "value": "Adamax, lr 1e-2, weight_decay 1e-3, ExponentialLR γ=0.99", "note": "train.py 默认；config 中 num_epoch=1000", "code": {"file": "train/train.py", "start": 168, "end": 170, "must": "torch.optim.Adamax("}},
+    {"name": "LAMMPS 设置", "value": "pair_style bamboo 5.0 5.0 10.0 1；kspace pppm 1.0e-6", "note": "NN/库仑/色散截断 + 有向边模式；需 newton off", "code": {"file": "benchmark/in.lammps", "start": 1, "end": 11, "must": "bamboo 5.0 5.0 10.0 1"}}
+  ],
+  "speedNotes": [
+    "主体是 3 层 GET：每条边只有 16 头×4 维的点积注意力和逐元素乘法，向量通道只有 l=1（3×64），没有 CG 张量积，FLOPs 与 PaiNN / TorchMD-ET 同量级。",
+    "物理项也有开销：库仑在 5 Å 实空间逐对计算 + LAMMPS PPPM（示例精度 1e-6、64³ 网格）；D3(CSO) 需要 10 Å 邻居（边数随 r³ 增长）并计算 CN 及其导数。",
+    "推理时 NN 力只需一次 autograd（对边向量），库仑和 D3 力是解析式不走反传；训练时还要再求一次 qeq_force 梯度（create_graph=True），训练比推理贵得多。",
+    "TorchScript + LAMMPS Kokkos pair 在 GPU 上建图；模型内 FP32、接口 FP64；pair 按全局 tag 构建整图，示例为单 GPU（-k on g 1），没有多 GPU 空间分解。"
+  ],
+  "weakNotes": [
+    "NN 截断 5 Å、3 层 → 约 15 Å 感受野；真正的长程交给物理项：预测电荷 + 阻尼库仑（推理时 PPPM 处理截断外的 1/r）与 10 Å 的 D3(CSO) 色散。",
+    "电荷由 2·tanh 限幅在 ±2 e 内，再均匀平移保证总电荷——不是显式 QEq 求解；电荷平衡只通过 qeq_force 惩罚近似满足，残差不为零时力会带小的非保守误差。",
+    "仓库未说明 DFT 泛函（数据集在 HuggingFace mzl/bamboo）；色散不进入训练（predict 中无），只在推理时外加 D3(CSO)。2025.05 版把旧的“只依赖元素、与几何无关”的色散换成 CN 相关 D3(CSO)，并微调 a4 以改善零样本密度预测。",
+    "LAMMPS 推理把总电荷固定为 0、无自旋输入，带净电荷体系、电极/界面外电场、金属等不在设计范围；嵌入表是 H–Rn 占位，但训练数据集中在碳酸酯溶剂 + 锂盐。"
+  ],
+  "downstreamNotes": [
+    "核心用途：NPT/NVT MD 预测电解质密度、粘度、离子电导率。README（paper_new_disp.pt）：DMC_EC|60_40|LiPF6|0.9 预测密度 1.238 ± 0.003 g/mL（实验 1.239），粘度 2.942 ± 0.138 cP（实验 2.778），电导率 10.593（Mistry）/ 13.560（NE）mS/cm（实验 12.793）。",
+    "直接输出维里/压强，可跑 NPT；密度对齐用分子间维里调节压强 ΔP，把 NPT 密度校准到实验值，但 README 中个别体系（如 MA 1.027 vs 0.93 g/mL）仍有偏差。",
+    "集成蒸馏把 ≥3 个模型的 MD 帧平均预测蒸馏进单个模型以降低方差（README：至少需要三个模型）。",
+    "输出原子部分电荷（可 dump 的 q）与偶极，便于溶剂化结构与电导分析；不提供 Hessian、极化率等，未面向声子/固体性质。"
+  ],
+  "strengths": ["能量分项清晰：NN 短程 + 预测电荷库仑 + 电负性能 + D3 色散", "专为液态电解质：电荷/偶极监督、总电荷约束、PPPM 全长程静电", "集成蒸馏 + 密度（压强）对齐，可用少量实验数据校准宏观性质", "轻量笛卡尔等变 Transformer（64 维、3 层），配 LAMMPS Kokkos GPU 接口"],
+  "weaknesses": ["应用面窄：面向有机电解质，不是通用基础模型", "电荷响应力被省略（靠惩罚近似），D3 10 Å 硬截断", "推理只支持总电荷 0、单 GPU 整图，无空间分解", "只有 l=1 向量通道，表达力不及高体序球谐模型"],
+  "pretrained": ["benchmark/benchmark.pt（README：复现论文结果）", "benchmark/paper.pt", "benchmark/paper_new_disp.pt（2025.05，CN 相关 D3(CSO) 色散）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

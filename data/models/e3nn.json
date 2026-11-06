@@ -1,0 +1,172 @@
+{
+  "id": "e3nn",
+  "name": "e3nn",
+  "fullName": "e3nn: Euclidean Neural Networks（E(3) 等变神经网络基础库）",
+  "year": 2020,
+  "authors": "M. Geiger, T. Smidt 等（e3nn 开发者）",
+  "paper": {"title": "e3nn: Euclidean Neural Networks", "venue": "arXiv 2022 (arXiv:2207.09453)", "url": "https://arxiv.org/abs/2207.09453"},
+  "repos": ["e3nn"],
+  "family": "infrastructure",
+  "tags": ["基础设施库", "O(3) Irreps", "球谐函数", "CG 张量积", "torch.fx 代码生成", "等变性测试"],
+  "framework": "PyTorch（torch.fx 代码生成 + opt_einsum_fx；可 TorchScript / torch.compile）",
+  "license": "MIT",
+  "oneLiner": "e3nn 不是力场，而是 NequIP、Allegro、MACE、SevenNet 等等变力场共用的“数学零件库”：用 Irreps 记号标明每个特征在旋转/反演下怎么变，再提供球谐函数、Wigner-3j（CG）系数和按 instructions 组装的张量积、线性层、Gate 非线性，搭出来的网络自动严格 O(3) 等变。",
+  "analogy": "像乐高积木的标准接口：每块积木（特征）都印着规格，例如“16x0e+8x1o”= 16 个标量 + 8 个矢量；张量积是转接头，CG 系数规定两种规格能拼出哪些新规格（|l1−l2|≤l≤l1+l2，宇称相乘）。只要按接口拼，整座模型无论怎么旋转、镜像，各部分都会“同步转动”而不会错位——这就是等变性。",
+  "arch": {
+    "geometry": "库提供：边向量 → 实球谐 Y_l^m（x,y,z 多项式，l≤12，可选单位化）；径向基 soft_one_hot_linspace（gaussian/cosine/smooth_finite/fourier/bessel）",
+    "equivariance": "O(3) 严格等变（Irrep 带宇称 e/o，含反演）；配合相对向量即 E(3)；可用 assert_equivariant 数值验证",
+    "lmax": "任意 l：wigner_3j 由 SU(2) CG 公式现算并缓存；spherical_harmonics 显式实现到 l=12",
+    "bodyOrder": "库不固定：每做一次 (h_j ⊗ Y(r̂_ij)) 张量积并对邻居求和体序 +1（NequIP 式）；节点上自乘（TensorSquare / 对称收缩）可一步提高体序（MACE 式）",
+    "layers": "不适用（由上层模型决定）；示例网络 gate_points 由若干 (Convolution → Gate) 层组成",
+    "cutoff": "不适用；示例网络用 max_radius + smooth_cutoff（余弦开关，r/r_max 从 0.5 到 1 平滑降到 0）",
+    "receptiveField": "由上层模型决定：Allegro 为单个 r_c（严格局域），NequIP/MACE 为层数 × r_c",
+    "message": "TensorProduct：按 instructions (i1,i2,i_out,mode,train) 组合 CG 路径；'uvw' 全连接权重，'uvu' 逐通道，权重可由径向 MLP 逐边给出（shared_weights=False）",
+    "readout": "o3.Linear 只连接相同 irrep（偏置只能加在 0e）；Gate 非线性；能量读出（取 0e 标量）由上层模型实现",
+    "forces": "n/a",
+    "forcesDetail": "库不计算力；NequIP/MACE 等对能量做 torch.autograd.grad。e3nn 算子由多项式与 einsum 组成，支持高阶自动微分（力训练需二阶导）",
+    "stress": "不适用（上层模型用应变求导实现）",
+    "longRange": "无（纯局域数学算子）",
+    "dispersion": "无",
+    "chargeSpin": "无内置；可把总电荷/自旋作为 0e 标量输入通道",
+    "otherOutputs": "任意 irreps 输出：1o 矢量（偶极）、1e 赝矢量（磁矩）、2e 张量；io.CartesianTensor('ij=ji') 在笛卡尔张量与 irreps 间互转",
+    "strictlyLocal": false,
+    "complexity": "单条路径 (l1,l2,l3) 稠密收缩 ∝ mul1·mul2·(2l1+1)(2l2+1)(2l3+1)；路径数 O(L³) × 每条 O(L³) → 全张量积 O(L⁶)；对原子数 N、邻居数 M 线性",
+    "accel": "torch.fx 代码生成 + opt_einsum_fx 收缩顺序优化 + l=0 特化分支；jit_mode=script/inductor/eager（PyTorch≥2.10 默认 eager）；cuEquivariance（mul_ir 布局兼容 e3nn）、OpenEquivariance 融合内核"
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "Irreps 记号：给每个特征贴上“变换规格”",
+      "plain": "e3nn 里的特征都是扁平的一维数组，旁边配一个 Irreps 说明它的“变换规格”。“16x0e+8x1o”读作 16 份 l=0、偶宇称(e) 的标量 + 8 份 l=1、奇宇称(o) 的矢量，总维数 Σ mul·(2l+1) = 40。l 决定旋转时用哪个 (2l+1) 维 Wigner-D 矩阵，p=±1 决定空间反演时是否变号：位移、力、偶极是 1o，角动量、磁矩这类赝矢量是 1e。整个特征的表示矩阵就是各块 D 的块对角直和，后续每个算子都靠 Irreps 自动检查输入输出是否匹配。",
+      "math": "\\texttt{16x0e+8x1o}:\\ \\dim=\\sum_k \\mathrm{mul}_k\\,(2l_k+1)=16\\cdot 1+8\\cdot 3=40,\\qquad D^{V}(R,k)=\\bigoplus_{(\\mathrm{mul},l,p)\\in V}\\ \\bigoplus^{\\mathrm{mul}} p^{k}\\,D^{l}(R)",
+      "code": [
+        {"file": "e3nn/o3/_irreps.py", "start": 358, "end": 380, "must": "mul, ir = mul_ir.split(\"x\")", "caption": "Irreps 字符串解析：按 + 拆块，再按 x 拆出多重度 mul 与 irrep"},
+        {"file": "e3nn/o3/_irreps.py", "start": 64, "end": 75, "must": "\"o\": -1,", "caption": "Irrep('1o')：数字是 l，末尾字母 e/o 给出宇称 p=±1"},
+        {"file": "e3nn/o3/_irreps.py", "start": 748, "end": 752, "must": "return direct_sum(*blocks)", "caption": "整个 Irreps 的表示矩阵 = 各 irrep 的 Wigner-D 块对角直和"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "球谐函数：把方向变成等变特征",
+      "plain": "o3.spherical_harmonics(l, x, normalize, normalization) 把三维向量（通常是边向量 r_ij）映射成 2l+1 维的 Y^l，它在旋转下严格按 D^l 变换——这是方向信息进入等变网络的入口。e3nn 直接用 x、y、z 的多项式实现（显式写到 l=12，高阶由低阶递推），处处可导、GPU 友好；normalize=True 先把向量投到单位球面，零向量输出 0 而非 NaN。normalization 只改尺度：'component' 使 ‖Y^l‖²=2l+1（每个分量方差≈1，MACE 与 e3nn 示例网络都用它），'norm' 使 ‖Y^l‖=1，'integral'（函数默认）使球面积分为 1。示例网络还把 Y 乘上平滑截断函数，保证邻居进出截断球时特征连续。",
+      "math": "Y^{l}(R\\,\\hat{\\mathbf r})=D^{l}(R)\\,Y^{l}(\\hat{\\mathbf r}),\\qquad Y^{1}=\\sqrt{3}\\,(x,y,z),\\qquad \\lVert Y^{l}\\rVert^2=2l+1\\ (\\text{component}),\\quad Y_{\\text{integral}}=\\frac{Y_{\\text{component}}}{\\sqrt{4\\pi}},\\quad Y_{\\text{norm}}=\\frac{Y_{\\text{component}}}{\\sqrt{2l+1}}",
+      "code": [
+        {"file": "e3nn/o3/_spherical_harmonics.py", "start": 93, "end": 112, "must": "sh = self.sph_func(self._lmax, x[..., 0], x[..., 1], x[..., 2])", "caption": "forward：可选单位化 → 多项式求值 → 按 normalization 缩放"},
+        {"file": "e3nn/o3/_spherical_harmonics.py", "start": 203, "end": 226, "must": "sh_1_0 = math.sqrt(3) * x", "caption": "显式多项式：l=1、2，并由 l=2 递推出 l=3"},
+        {"file": "e3nn/nn/models/gate_points_2102.py", "start": 328, "end": 337, "must": "edge_attr = smooth_cutoff(edge_length / self.max_radius)[:, None] * edge_sh", "caption": "示例网络：边向量 → component 归一化球谐 × 平滑截断"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "Wigner-3j / Clebsch–Gordan 系数：耦合两个角动量的“乘法表”",
+      "plain": "两个等变量相乘（l1⊗l2）得到的是可约表示，必须用 Clebsch–Gordan（Wigner-3j）系数拆回各个 l3。选择定则由 Irrep.__mul__ 给出：l3 从 |l1−l2| 到 l1+l2，宇称相乘。o3.wigner_3j 先用 SU(2) 的 CG 公式在复球谐基下计算，再用 change_basis_real_to_complex 换到实基、取实部并整体归一化（ΣC²=1），结果用 lru_cache 缓存。它满足“三个 D 矩阵一起转、C 不变”，这正是张量积等变的数学保证。",
+      "math": "C_{lmn}=\\sum_{ijk}C_{ijk}\\,D^{l_1}_{il}(R)\\,D^{l_2}_{jm}(R)\\,D^{l_3}_{kn}(R)\\ \\ \\forall R,\\qquad \\sum_{ijk}C_{ijk}^2=1,\\qquad |l_1-l_2|\\le l_3\\le l_1+l_2,\\ \\ p_3=p_1p_2",
+      "code": [
+        {"file": "e3nn/o3/_wigner.py", "start": 139, "end": 164, "must": "C = torch.einsum(\"ij,kl,mn,ikn->jlm\", Q1, Q2, torch.conj(Q3.T), C)", "caption": "wigner_3j：SU(2) CG → 复基到实基变换 → 取实部 → 归一化"},
+        {"file": "e3nn/o3/_irreps.py", "start": 229, "end": 241, "must": "lmin = abs(self.l - other.l)", "caption": "Irrep 乘法即选择定则：l 从 |l1−l2| 到 l1+l2，宇称相乘"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "TensorProduct：用 instructions 指定“走哪些路径、通道怎么连”",
+      "plain": "o3.TensorProduct(irreps_in1, irreps_in2, irreps_out, instructions) 是 e3nn 的核心：每条 instruction (i_in1, i_in2, i_out, mode, has_weight[, path_weight]) 声明一条路径——取两个输入各一块，用 CG 耦合到输出的某一块。mode 规定通道（多重度）u、v、w 怎么连：'uvw' 全连接（权重 mul1×mul2×mul_out），'uvu' 逐通道（权重 mul1×mul2，输出通道 = mul1），'uuu' 逐元素。每条路径再乘归一化系数 √α（默认 irrep_normalization='component'、path_normalization='element'），使输出方差与路径数、通道数无关，深层网络才好训练。",
+      "math": "z^{(o)}_{w,k}=\\sum_{\\text{paths}\\to o}\\sqrt{\\alpha}\\sum_{u,v}w_{uvw}\\sum_{i,j}C^{l_1l_2l_3}_{ijk}\\,x_{u,i}\\,y_{v,j}\\ \\ (\\texttt{uvw}),\\qquad z_{u,k}=\\sqrt{\\alpha}\\sum_{v}w_{uv}\\sum_{i,j}C_{ijk}\\,x_{u,i}\\,y_{v,j}\\ \\ (\\texttt{uvu}),\\qquad \\alpha=\\frac{2l_3+1}{\\sum_{\\text{paths}\\to o}N_{\\text{elem}}}",
+      "code": [
+        {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 236, "end": 257, "must": "\"uvu\": (self.irreps_in1[i_in1].mul, self.irreps_in2[i_in2].mul),", "caption": "每种连接模式对应的权重形状 path_shape"},
+        {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 290, "end": 319, "must": "normalization_coefficients += [sqrt(alpha)]", "caption": "路径归一化：默认 component × element"},
+        {"file": "e3nn/o3/_tensor_product/_codegen.py", "start": 132, "end": 165, "must": "result = torch.einsum(f\"{z}uvw,ijk,zuvij->zwk\", w, w3j, xx)", "caption": "生成的计算：外积 x⊗y 与稠密 w3j、权重做 einsum；l=0 路径走特化分支"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "FullyConnectedTensorProduct 与 'uvu' 卷积：NequIP / MACE / SevenNet 的消息",
+      "plain": "FullyConnectedTensorProduct 自动为所有满足选择定则的组合建 'uvw' 路径，参数多、表达力强，e3nn 示例网络用它做“节点特征 ⊗ 元素属性”的自相互作用。原子间消息则几乎都用 'uvu'：多通道节点特征 h_j ⊗ 单通道边球谐 Y(r̂_ij)，每个通道独立耦合，权重由“距离 → MLP”逐边生成（shared_weights=False），再对邻居求和并除以 √(邻居数)。NequIP 的交互块、MACE 的 tp_out_irreps_with_instructions（注释写明 Based on mir-group/nequip）、SevenNet 的卷积都是同一段构造：遍历 ir_in × ir_edge 的乘积、保留目标 irreps、追加 (i, j, k, 'uvu', True)。",
+      "math": "m^{(l_3)}_{i,u,m_3}=\\frac{1}{\\sqrt{N_{\\text{nb}}}}\\sum_{j\\in\\mathcal N(i)}\\sqrt{\\alpha}\\;\\mathrm{MLP}_{u}(r_{ij})\\sum_{m_1,m_2}C^{l_1l_2l_3}_{m_1m_2m_3}\\,h^{(l_1)}_{j,u,m_1}\\,Y^{l_2}_{m_2}(\\hat{\\mathbf r}_{ij})",
+      "code": [
+        {"file": "e3nn/o3/_tensor_product/_sub.py", "start": 53, "end": 68, "must": "(i_1, i_2, i_out, \"uvw\", True, 1.0)", "caption": "FullyConnectedTensorProduct：所有允许路径都用 'uvw'"},
+        {"file": "e3nn/nn/models/gate_points_2102.py", "start": 117, "end": 133, "must": "edge_features = self.tp(x[edge_src], edge_attr, weight)", "caption": "e3nn 示例卷积：径向 MLP 出权重 → 'uvu' 张量积 → 邻居求和 / √N"},
+        {"repo": "mace", "file": "mace/modules/irreps_tools.py", "start": 16, "end": 46, "must": "instructions.append((i, j, k, \"uvu\", trainable))", "caption": "MACE（源自 NequIP）构造 'uvu' 指令的同一段代码"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "代码生成：torch.fx 把 instructions “编译”成专用程序",
+      "plain": "TensorProduct / Linear 在构造时就做代码生成：codegen 用 torch.fx 按 instructions 逐条生成计算图（x1、x2、w 占位符 → 切块 → einsum → 按输出块求和拼接），w3j 作为常量 buffer 注册进 GraphModule；l=0 路径和 (1,1,1) 的 'uuu'（直接用叉乘）走特化分支，省去与稠密 CG 的乘法。随后 opt_einsum_fx 用 batch=4 的零张量样例为整张图选收缩顺序（注释论证该顺序对任意 batch 都最优）。最后按 jit_mode：'script' 编译为 TorchScript（可脱离 Python 部署），其它模式保留 fx GraphModule，可对整个模型 torch.compile(fullgraph=True)；PyTorch ≥ 2.10 默认 eager。forward 只是调用这段生成好的程序。",
+      "math": "\\text{instructions}\\xrightarrow{\\texttt{torch.fx}}\\texttt{GraphModule}\\xrightarrow{\\texttt{opt\\_einsum\\_fx}}\\text{optimal contraction order}\\xrightarrow{\\texttt{jit\\_mode}}\\{\\text{TorchScript},\\ \\texttt{torch.compile},\\ \\text{eager}\\}",
+      "code": [
+        {"file": "e3nn/o3/_tensor_product/_codegen.py", "start": 356, "end": 393, "must": "graphmod = optimize_einsums_full(graphmod, example_inputs)", "caption": "w3j 注册为 buffer → GraphModule → opt_einsum_fx 优化收缩路径"},
+        {"file": "e3nn/util/codegen/_mixin.py", "start": 37, "end": 51, "must": "scriptmod = e3nn.util.jit.compile(graphmod, recurse=False)", "caption": "按 jit_mode 决定是否编译为 TorchScript 子模块"},
+        {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 549, "end": 554, "must": "return self._compiled_main_left_right(x, y, real_weight)", "caption": "forward 只调用生成好的程序"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "o3.Linear：只在同类 irrep 之间混合通道",
+      "plain": "等变线性层不能把 l=0 与 l=1 混在一起（旋转后会对不上），所以 o3.Linear 默认只连接 ir_in == ir_out 的块：每块一个 mul_in×mul_out 权重矩阵，对 2l+1 个 m 分量共用——这是 Schur 引理允许的唯一线性等变映射。偏置只能加在 0e 标量上（矢量加常数会破坏等变），权重按 1/√fan_in 归一化。上层模型用它做元素 one-hot → 0e 嵌入、层内通道混合（自相互作用），以及最后把 0e 特征读出成原子能（→ 1x0e）。",
+      "math": "y^{(o)}_{w,m}=\\sum_{\\text{in}:\\,ir_{\\text{in}}=ir_{o}}\\frac{1}{\\sqrt{\\sum\\mathrm{mul}_{\\text{in}}}}\\sum_{u}W_{uw}\\,x^{(\\text{in})}_{u,m}\\;\\big(+\\,b_w\\ \\text{only if }ir_o=0e\\big)",
+      "code": [
+        {"file": "e3nn/o3/_linear.py", "start": 133, "end": 165, "must": "if ir_in == ir_out", "caption": "默认指令：只连接相同 irrep；1/√fan_in 归一化"},
+        {"file": "e3nn/o3/_linear.py", "start": 436, "end": 450, "must": "ein_out = torch.einsum(f\"{z}uw,zui->zwi\", w, x_list[ins.i_in])", "caption": "生成的 einsum：同一权重作用于所有 m 分量"},
+        {"file": "e3nn/o3/_linear.py", "start": 175, "end": 181, "must": "biases = [biases and ir.is_scalar() for _, ir in irreps_out]", "caption": "偏置只允许加在标量 0e 上"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "Gate 非线性：用标量“开关”调制高阶特征",
+      "plain": "SiLU、tanh 这类逐元素非线性直接作用在矢量分量上会破坏等变（先转再激活 ≠ 先激活再转）。Gate 把输入拆成三份：普通标量直接过激活；“门”标量过激活后当作系数；l≥1 的被门控特征乘以各自的门（ElementwiseTensorProduct，'uuu' 模式、无权重，0e⊗l 就是数乘）。非线性只作用在旋转不变量上，所以输出仍严格等变。NequIP 的 convnetlayer 与 SevenNet 的 equivariant_gate 都直接调用 e3nn 的 Gate。",
+      "math": "\\mathrm{Gate}(x)=\\Big(\\bigoplus_i\\phi_i(s_i)\\Big)\\oplus\\Big(\\bigoplus_j\\phi_j(g_j)\\,\\mathbf v_j\\Big),\\qquad s_i,g_j\\in\\{0e,0o\\},\\ \\ \\mathbf v_j\\in l\\ge 1",
+      "code": [
+        {"file": "e3nn/nn/_gate.py", "start": 93, "end": 116, "must": "self.mul = ElementwiseTensorProduct(irreps_gated, irreps_gates)", "caption": "构造：门必须是标量，门个数 = 被门控 irrep 个数"},
+        {"file": "e3nn/nn/_gate.py", "start": 133, "end": 144, "must": "gated = self.mul(gated, gates)", "caption": "forward：标量过激活，门过激活后逐元素乘到高阶特征上"},
+        {"file": "e3nn/o3/_tensor_product/_sub.py", "start": 133, "end": 144, "must": "instr += [(i, i, i_out, \"uuu\", False)]", "caption": "ElementwiseTensorProduct：逐元素 'uuu'、无权重"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "等变性测试：随机旋转 + 反演，数值验证 f(D x) = D f(x)",
+      "plain": "怎么确认一个模块真的等变？e3nn.util.test.equivariance_error 随机采样旋转矩阵 R，并乘以 (−1)^k（k=0,1）加入空间反演，对每个输入按其 Irreps 的 D 矩阵变换（标为 'cartesian_points' 的坐标输入还会加随机平移），比较“先变换再计算”与“先计算再变换”的最大分量误差。assert_equivariant 用默认容差（float32: 1e-3，float64: 1e-9）判定是否通过。基于 e3nn 的力场都可以用它写单元测试：能量（0e）应不变，力（1o）应随结构一起转。",
+      "math": "\\varepsilon=\\max\\big|\\,f\\big(D_{\\text{in}}(g)\\,x\\big)-D_{\\text{out}}(g)\\,f(x)\\,\\big|,\\qquad g=(-1)^{k}R,\\ k\\in\\{0,1\\},\\qquad \\varepsilon<10^{-3}\\ (\\text{fp32}),\\ \\ 10^{-9}\\ (\\text{fp64})",
+      "code": [
+        {"file": "e3nn/util/test.py", "start": 268, "end": 311, "must": "rot_mat *= (-1) ** parity_k", "caption": "equivariance_error：随机旋转(+反演) → 两条计算路径对比"},
+        {"file": "e3nn/util/test.py", "start": 183, "end": 205, "must": "problems = {case: err for case, err in errors.items() if err.max() > tolerance}", "caption": "assert_equivariant：超过容差即报错"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "irrep_normalization", "value": "\"component\"", "note": "TensorProduct 默认：α ∝ 2l3+1，使输出每个分量方差≈1", "code": {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 222, "end": 223, "must": "irrep_normalization = \"component\""}},
+    {"name": "path_normalization", "value": "\"element\"", "note": "按汇入同一输出块的元素总数归一化", "code": {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 225, "end": 226, "must": "path_normalization = \"element\""}},
+    {"name": "shared_weights / internal_weights", "value": "True / 有可训练路径时为 True", "note": "默认一组全局权重；消息传递时设 shared_weights=False，由径向 MLP 逐边提供", "code": {"file": "e3nn/o3/_tensor_product/_tensor_product.py", "start": 329, "end": 338, "must": "internal_weights = shared_weights and any(i.has_weight for i in self.instructions)"}},
+    {"name": "spherical_harmonics normalization", "value": "\"integral\"（函数默认）；MACE 与示例网络用 \"component\"", "note": "integral = component/√(4π)；norm = component/√(2l+1)", "code": {"file": "e3nn/o3/_spherical_harmonics.py", "start": 115, "end": 117, "must": "normalization: str = \"integral\""}},
+    {"name": "球谐最高阶 l", "value": "12", "note": "spherical_harmonics 显式实现的上限（wigner_3j 无此限制）", "code": {"file": "e3nn/o3/_spherical_harmonics.py", "start": 80, "end": 84, "must": "_lmax = 12"}},
+    {"name": "specialized_code / optimize_einsums", "value": "True / True", "note": "l=0 等路径走特化分支；opt_einsum_fx 优化收缩顺序", "code": {"file": "e3nn/__init__.py", "start": 8, "end": 12, "must": "specialized_code=True, optimize_einsums=True"}},
+    {"name": "jit_mode", "value": "PyTorch ≥ 2.10 为 \"eager\"，否则 \"script\"（可选 \"inductor\"）", "note": "决定生成代码是否编译为 TorchScript", "code": {"file": "e3nn/__init__.py", "start": 8, "end": 12, "must": "_DEFAULT_JIT_MODE = \"eager\" if"}},
+    {"name": "o3.Linear biases", "value": "False（True 时只加在 0e 上）", "note": "矢量/张量不能加常数偏置", "code": {"file": "e3nn/o3/_linear.py", "start": 112, "end": 125, "must": "biases: Union[bool, List[bool]] = False,"}},
+    {"name": "assert_equivariant 容差", "value": "float32: 1e-3；float64: 1e-9", "note": "最大分量误差阈值", "code": {"file": "e3nn/util/test.py", "start": 38, "end": 38, "must": "torch.float32: 1e-3, torch.float64: 1e-9"}},
+    {"name": "smooth_cutoff（示例网络）", "value": "u=2(r/r_max−1)，y=(1−cos πu)/2", "note": "r/r_max ∈ [0.5, 1] 内从 1 平滑降到 0", "code": {"file": "e3nn/nn/models/gate_points_2102.py", "start": 136, "end": 141, "must": "y = (math.pi * u).cos().neg().add(1).div(2)"}},
+    {"name": "版本", "value": "0.6.0", "note": "本站所读源码的 __version__", "code": {"file": "e3nn/__init__.py", "start": 1, "end": 1, "must": "__version__ = \"0.6.0\""}}
+  ],
+  "speedNotes": [
+    "FLOPs 几乎全在张量积：每条路径 (l1,l2,l3) 与稠密 CG 的收缩 ∝ (2l1+1)(2l2+1)(2l3+1)，路径数 ∝ L³，所以完整张量积随最高阶 L 按 O(L⁶) 增长；'uvw' 还要乘 mul1·mul2·mul_out，而 'uvu' 只随通道数线性增长——这正是 NequIP/MACE 的边上消息选 'uvu' 的原因。",
+    "e3nn 的通用实现是“每条路径一个 einsum”：w3j 以稠密张量存储（实基 CG 多数元素为 0），一般路径先做外积 x⊗y 再收缩；路径一多就产生大量小 GPU kernel 和中间张量，在“边数 × 通道”很大的消息传递里既慢又占显存。",
+    "专用内核因此出现：NVIDIA cuEquivariance 把张量积写成“分段多项式”并配优化 CUDA 内核，默认 mul_ir 布局就是 e3nn 的布局，可直接替换；OpenEquivariance 为 e3nn 式 CG 张量积生成 GPU 内核（NequIP 中与邻居求和 scatter 融合）。MACE（wrapper_ops）与 NequIP（_tp_scatter_oeq）都已接入。",
+    "e3nn 自身的优化：l=0 路径与 (1,1,1) 'uuu'（叉乘）走特化代码，opt_einsum_fx 为整张图选收缩顺序，fx 图可编译为 TorchScript，或对整个模型 torch.compile(fullgraph=True)。",
+    "另一条路线是降低复杂度本身：eSCN / EquiformerV2 把边旋转到 z 轴、用 SO(2) 卷积把 O(L⁶) 降到 O(L³)，其核心卷积不再走 e3nn 式全 CG 张量积。"
+  ],
+  "weakNotes": [
+    "e3nn 只提供局域的逐边/逐节点等变算子，自身没有截断半径、长程静电或色散；“能看多远”完全由上层模型的 r_c 和层数决定。",
+    "没有内置的总电荷/自旋输入、Ewald 或 D3；需要长程物理时要在 e3nn 之外另加模块（LES、Ewald 消息传递、DFT-D3 等）。",
+    "等变只保证旋转/反演对称性正确，不保证物理正确：层状材料层间 vdW、物理吸附、带电缺陷能否描述，取决于训练数据的泛函与上层模型的长程项。",
+    "示例网络的 smooth_cutoff 只保证在 r_max 处平滑归零；近程排斥（ZBL）等物理先验也需上层模型提供。"
+  ],
+  "downstreamNotes": [
+    "NequIP、Allegro、MACE、SevenNet 等球谐等变力场直接用 e3nn 的 Irreps、球谐、TensorProduct、Linear、Gate 搭网络，并可用 assert_equivariant 写单元测试。",
+    "所有算子由多项式与 einsum 组成，平滑可微、支持高阶自动微分：上层模型据此得到保守力、应力，以及 Hessian/声子所需的二阶导。",
+    "可直接输出张量性质：1o 偶极、1e 磁矩、2e 张量；io.CartesianTensor('ij=ji') 把对称 3×3 张量（极化率、应力）拆成 0e+2e，便于学习 IR/Raman 光谱与介电性质。",
+    "生成的 fx 图可编译为 TorchScript 或用 torch.compile 加速，使上层模型能部署到 LAMMPS/ASE 等 MD 环境（接口由上层模型提供）。"
+  ],
+  "strengths": ["严格的 O(3) 等变（含宇称），Irreps 规格自动检查", "instructions 机制灵活：一个 API 覆盖全连接/逐通道/逐元素张量积", "torch.fx 代码生成 + opt_einsum 优化，支持 TorchScript / torch.compile", "事实标准：NequIP/Allegro/MACE/SevenNet 的共同底座，cuEquivariance 兼容其数据布局", "自带等变性测试、CartesianTensor 等工具"],
+  "weaknesses": ["通用 CG 张量积随 L 按 O(L⁶) 增长，高 L 很慢", "每路径一个 einsum + 稠密 w3j，小 kernel 多、显存大，需 cuEquivariance/OpenEquivariance 加速", "只是零件库：没有截断、能量/力读出、长程项", "仍为 0.x 版本，README 说明每次不兼容变更都会提升第二位版本号"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

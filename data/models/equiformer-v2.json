@@ -1,0 +1,218 @@
+{
+  "id": "equiformer-v2",
+  "name": "EquiformerV2",
+  "fullName": "EquiformerV2: Improved Equivariant Transformer for Scaling to Higher-Degree Representations（含 OMat24 / DeNS 的 eqV2 模型）",
+  "year": 2024,
+  "authors": "Y.-L. Liao, B. Wood, A. Das, T. Smidt",
+  "paper": {"title": "EquiformerV2: Improved Equivariant Transformer for Scaling to Higher-Degree Representations", "venue": "ICLR 2024", "url": "https://arxiv.org/abs/2306.12059"},
+  "repos": ["equiformer_v2", "fairchem"],
+  "family": "spherical-equivariant",
+  "tags": ["eSCN 式 SO(2) 卷积", "等变图注意力 Transformer", "高阶 L=6 + m_max 截断", "直接力/应力（非保守）", "OMat24 / DeNS"],
+  "framework": "PyTorch + PyG（torch_geometric / torch_cluster）+ e3nn（Wigner-D、S² 网格）；OMat24 权重需 fairchem-core 1.x",
+  "license": "MIT（equiformer_v2 与 fairchem 代码）；OMat24 权重为 Meta Research 许可（需在 Hugging Face 申请）",
+  "oneLiner": "把 eSCN 的“先把每条边转到沿键方向的坐标系、再做 SO(2) 卷积”技巧装进等变图注意力 Transformer：昂贵的 CG 张量积变成按 m 分组的普通线性层，于是球谐阶数可以提到 L=6；再用注意力重归一化、可分离 S² 激活和可分离等变 LayerNorm 让深层网络稳定训练。力（OMat 模型还有应力）由专门的输出头直接预测。",
+  "analogy": "像拍证件照前先让每对原子“正对镜头”（把键转到极轴上）：转正之后，原本复杂的三维角动量耦合只剩下“绕键轴转几圈”（m）这一个变量，每个 m 查一张小表就能算完，算完再把照片转回原来的朝向。",
+  "arch": {
+    "geometry": "边长 r_ij → 600 个高斯基（0–r_c）+ 两端元素嵌入；方向 → 每条边一个旋转矩阵及 l≤L 的 Wigner-D（把键转到极轴），不显式构造球谐卷积核",
+    "equivariance": "SO(3)/E(3) 等变：特征为 l≤L 的球谐系数；SO(2) 卷积对绕键轴旋转严格等变，S² 网格激活只在网格分辨率内近似等变",
+    "lmax": "L_max=6、m_max=2（83M，OC20-2M）；L=6、m_max=3（153M）；L=4、m_max=2（31M）",
+    "bodyOrder": "每层是两体消息 + 非线性（S² 激活、注意力）；无显式 ν 阶收缩，多体关联靠深层堆叠隐式获得",
+    "layers": "12（83M）/ 8（31M）/ 20（153M）个 Transformer 块",
+    "cutoff": "max_radius=12 Å 且每原子最多 20 个邻居（OC20 配置与 Matbench eqV2 YAML 一致；代码默认 5 Å）",
+    "receptiveField": "名义上 层数 × 12 Å，但每层只连最近 20 个邻居，致密体系中实际传播距离远小于此",
+    "message": "拼接 [x_j‖x_i] → Wigner-D 转到边坐标系 → SO(2) 卷积（径向 MLP 调制）→ 可分离 S² 激活 → SO(2) 卷积 → 多头注意力加权 → 逆旋转 → 求和",
+    "readout": "末层等变 LayerNorm → 输出 1 通道的 S² 网格 FFN，取 l=0 为原子能 → 求和 ÷ 常数 77.81317",
+    "forces": "direct",
+    "forcesDetail": "独立的 SO(2) 等变图注意力“力头”，取每个原子输出的 l=1 三个分量作为力；不是 −∂E/∂R，力场不保守",
+    "stress": "OC20 代码无应力；OMat24/MPtrj 的 eqV2 模型为 S2EFS 任务，直接回归应力（Matbench 标注 targets=EFS_D）",
+    "longRange": "无显式长程项，只靠多层 × 12 Å 截断的大感受野",
+    "dispersion": "无内置色散；训练数据为 PBE(+U) 类 DFT（MPtrj、PBE Alexandria、OMat24），需自行外加 D3",
+    "chargeSpin": "无（只有原子序数、坐标、晶胞）",
+    "otherOutputs": "无官方 Hessian / 偶极 / 电荷 / 磁矩；DeNS 训练时额外有去噪输出（仅训练用）",
+    "strictlyLocal": false,
+    "complexity": "∝ N·k（k≤20）× 层数：每边 Wigner 旋转 ~O(L³C)、SO(2) 线性 ~O(m_max·L²C²)（对比 CG 张量积 O(L⁶)），外加 S² 网格投影",
+    "accel": "无专用 CUDA 内核；训练支持 AMP（等变 LN 处强制 fp32）与多节点 DDP；推理经 fairchem-core 1.x 的 OCPCalculator（ASE），无 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 1, "why": "12–20 层、L=6 的等变 Transformer，参数 31M–153M，每条边都要做 Wigner 旋转、两次 SO(2) 卷积和球面网格投影，属于最慢的一档；直接力省掉反传只能部分抵消。"},
+    "expressiveness": {"v": 5, "why": "L=6 的高角分辨率 + 多头注意力 + 球面网格非线性，深达 12–20 层，容量是全领域最大的一档，OC20 与 Matbench Discovery 精度长期领先。"},
+    "longRange": {"v": 2, "why": "没有任何显式长程/色散/静电项，只有多层消息传递带来的大感受野。"},
+    "scalability": {"v": 1, "why": "只能整图推理（ASE 计算器），无 LAMMPS / 空间分解接口；深层 + 高 L 使显存随原子数快速增长。"},
+    "physics": {"v": 1, "why": "力/应力直接预测、不保守；高斯径向基没有截断包络且有 20 邻居上限，势能面不连续；无 ZBL，只保证广延性和（近似）等变。"},
+    "coverage": {"v": 2, "why": "官方只有能量、力（OMat/MP 模型另有直接应力），没有 Hessian、偶极、电荷、磁矩等额外性质。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：原子序数、坐标、晶胞",
+      "plain": "输入是原子序数 Z、笛卡尔坐标 R，周期体系再加晶胞与周期平移。原子序数通过大小为 max_num_elements=90 的嵌入表变成特征。与 MACE 等保守力模型不同，这里不需要对坐标打开求导——力（和应力）由网络直接“写出来”，而不是对能量求导。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3}",
+      "code": [{"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 356, "end": 373, "must": "self.generate_graph(data)", "caption": "EquiformerV2_OC20.forward：读取原子序数与坐标并建图"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：12 Å 截断 + 最多 20 个邻居",
+      "plain": "用 radius_graph_pbc 在 12 Å 内找邻居（含周期镜像），但每个原子最多只保留 max_neighbors=20 个邻居。12 Å 的大截断让单层就能“看”得很远，邻居上限则控制边数与显存。代价是：当第 20、21 近邻距离相近时，原子的微小移动会让邻居集合突变，势能面出现小跳变。",
+      "math": "\\mathcal N(i)=\\mathrm{nearest}_{20}\\big\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\big\\},\\qquad r_c=12\\,\\text{Å}",
+      "code": [
+        {"repo": "equiformer_v2", "file": "oc20/trainer/base_trainer_v2.py", "start": 651, "end": 661, "must": "radius_graph_pbc(", "caption": "_forward_otf_graph：按 max_radius 与 max_neighbors 在线建图"},
+        {"repo": "equiformer_v2", "file": "oc20/configs/s2ef/2M/equiformer_v2/equiformer_v2_N@12_L@6_M@2.yml", "start": 35, "end": 40, "must": "max_neighbors:", "caption": "配置：max_neighbors=20、max_radius=12.0"},
+        {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-m-omat-salex-mp.yml", "start": 70, "end": 72, "must": "graph_construction_radius: 12.0", "caption": "eqV2 M（OMat）同样使用 12 Å / 20 邻居"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 600 个高斯基；方向 → 边对齐旋转矩阵",
+      "plain": "边长 r_ij 用 600 个等间距高斯函数（0 到 r_c，宽度系数 2.0）展开，并在每个块里与两端原子的元素嵌入拼接，作为径向 MLP 的输入。注意这里没有乘任何截断包络，边在 r_c 处出现/消失时特征不会平滑归零。方向不直接用球谐函数编码，而是为每条边构造一个旋转矩阵 R_ij，把键方向转到极轴上（绕键轴的滚转角由一个随机辅助向量决定），之后由它算出 Wigner-D 矩阵。",
+      "math": "e_k(r_{ij})=\\exp\\!\\Big(-\\frac{(r_{ij}-\\mu_k)^2}{2(\\beta\\,\\Delta\\mu)^2}\\Big),\\ \\mu_k\\in\\mathrm{linspace}(0,r_c,600),\\ \\beta=2\\qquad \\mathbf R_{ij}\\,\\hat{\\mathbf r}_{ij}=\\hat{\\mathbf y}",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 219, "end": 226, "must": "GaussianSmearing(", "caption": "600 个高斯径向基，宽度系数 2.0"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/radial.py", "start": 42, "end": 58, "must": "torch.exp(self.coeff * torch.pow(dist, 2))", "caption": "同款 GaussianSmearing 的函数形式（fairchem 中保留的实现）"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/edge_rot_mat.py", "start": 19, "end": 58, "must": "torch.rand_like(edge_vec_0)", "caption": "init_edge_rot_mat：以键方向为轴，用随机辅助向量叉乘补全正交基"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素 → l=0 通道，再加“边度嵌入”",
+      "plain": "每个原子的特征是一个 (L+1)²×C 的球谐系数数组，初始时只有 l=0 位置填入元素嵌入。“边度嵌入”把每条边的径向信息只放在 m=0 分量（即边坐标系中沿键方向的信号），用 Wigner-D 逆矩阵转回全局坐标系，对邻居求和并除以平均度数 23.395，让高阶 l 通道从一开始就带有方向信息。",
+      "math": "x_i^{(0)}\\big|_{l=0}=\\mathrm{Emb}(Z_i)\\qquad x_i^{(0)}\\mathrel{+}=\\frac{1}{\\bar d}\\sum_{j\\in\\mathcal N(i)}D_{ij}^{-1}\\Big[\\mathrm{MLP}\\big(e(r_{ij}),Z_i,Z_j\\big)\\Big]_{m=0},\\ \\ \\bar d=23.395",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 402, "end": 429, "must": "x.embedding = x.embedding + edge_degree.embedding", "caption": "元素嵌入写入 l=0，叠加边度嵌入"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/input_block.py", "start": 94, "end": 121, "must": "x_edge_embedding._rotate_inv(self.SO3_rotation, self.mappingReduced)", "caption": "EdgeDegreeEmbedding：m=0 径向特征 → 逆旋转 → 邻居求和 ÷ 平均度数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "注意力块 ①：用 Wigner-D 把消息转到“键沿极轴”的坐标系",
+      "plain": "每个注意力块先把源原子 j 与目标原子 i 的特征拼接成边上的消息，再用块对角的 Wigner-D 矩阵把它旋转到边坐标系。在这个坐标系里，绕键轴的旋转只会让同一 |m| 的 ±m 分量互相混合，所以可以只保留 |m|≤m_max（默认 2）的系数——这就是 mmax 截断，用很小的信息损失换来大幅降本。",
+      "math": "\\tilde{\\mathbf x}_{ij}=D(\\mathbf R_{ij})\\,[\\,x_j\\,\\Vert\\,x_i\\,]\\Big|_{|m|\\le m_{\\max}},\\qquad D(\\mathbf R)=\\bigoplus_{l=0}^{L}D^{l}(\\alpha,\\beta,\\gamma)",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/so3.py", "start": 461, "end": 481, "must": "block = wigner_D(lmax, alpha, beta, gamma)", "caption": "由边旋转矩阵求欧拉角，拼成 l=0…L 的块对角 Wigner-D"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/so3.py", "start": 445, "end": 457, "must": "wigner = self.wigner[:, out_mask, :]", "caption": "rotate / rotate_inv：只取 |m|≤m_max 的行（mmax 截断）"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/transformer_block.py", "start": 250, "end": 274, "must": "x_message._rotate(self.SO3_rotation, self.lmax_list, self.mmax_list)", "caption": "拼接源/目标特征并旋转到边坐标系"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "注意力块 ②：SO(2) 卷积代替 CG 张量积（eSCN）",
+      "plain": "在边坐标系里，原本昂贵的 Clebsch–Gordan 张量积被简化为 SO(2) 卷积：对每个 m 单独做一个线性层，(+m, −m) 两个分量像复数的实部/虚部一样共享两组权重 W₁、W₂，因此对绕键轴的旋转严格等变。输入先逐元素乘上由“距离 + 两端元素”经径向 MLP（Linear+LayerNorm+SiLU）得到的系数。复杂度从 O(L⁶) 降到约 O(L³)，这正是 L=6 变得可行的关键。",
+      "math": "\\begin{pmatrix}y_{+m}\\\\ y_{-m}\\end{pmatrix}=\\begin{pmatrix}W^{(m)}_{1}&-W^{(m)}_{2}\\\\ W^{(m)}_{2}&W^{(m)}_{1}\\end{pmatrix}\\begin{pmatrix}\\tilde x_{+m}\\odot\\phi_m(e_{ij})\\\\ \\tilde x_{-m}\\odot\\phi_m(e_{ij})\\end{pmatrix},\\ 0<m\\le m_{\\max}\\qquad y_{0}=W^{(0)}\\big(\\tilde x_{0}\\odot\\phi_0(e_{ij})\\big)",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/so2_ops.py", "start": 142, "end": 180, "must": "x_m = self.so2_m_conv[m - 1](x_m)", "caption": "SO2_Convolution.forward：按 m 分组，m=0 与 m>0 分别做线性层，先乘径向权重"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/so2_ops.py", "start": 53, "end": 61, "must": "x_m_r = x_r.narrow(1, 0, 1) - x_i.narrow(1, 1, 1)", "caption": "SO2_m_Convolution：±m 分量的“复数乘法”式权重共享"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/radial_function.py", "start": 9, "end": 30, "must": "modules.append(nn.LayerNorm(channels_list[i]))", "caption": "RadialFunction：Linear + LayerNorm + SiLU 的径向 MLP"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "注意力块 ③：注意力重归一化 + 可分离 S² 激活 + 逆旋转求和",
+      "plain": "第一次 SO(2) 卷积额外输出一组 m=0 标量：一部分算注意力权重，一部分当激活的“门”。注意力 logits 先过 LayerNorm（注意力重归一化）、再过 SmoothLeakyReLU 与可学习向量点积，并在每个目标原子的邻居上做 softmax。消息经“可分离 S² 激活”：l=0 直接用 SiLU，l>0 投影到球面网格逐点 SiLU 再投影回来，从而混合不同 l。随后做第二次 SO(2) 卷积、乘注意力权重、用 Wigner-D 逆矩阵转回全局坐标、对邻居求和再线性投影。",
+      "math": "\\alpha_{ij}^{h}=\\underset{j\\in\\mathcal N(i)}{\\mathrm{softmax}}\\Big(\\mathbf a_h^{\\top}\\,\\mathrm{SmoothLeakyReLU}\\big(\\mathrm{LN}(f^{h}_{ij})\\big)\\Big)\\qquad m_i=W_{\\text{proj}}\\sum_{j}\\alpha_{ij}^{h}\\,D_{ij}^{-1}\\,\\mathrm{SO2}_2\\Big(\\sigma_{S^2}\\big(\\mathrm{SO2}_1(\\tilde{\\mathbf x}_{ij})\\big)\\Big)",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/transformer_block.py", "start": 282, "end": 313, "must": "alpha = torch_geometric.utils.softmax(alpha, edge_index[1])", "caption": "可分离 S² 激活、第二次 SO(2) 卷积、LayerNorm 重归一化后的注意力 softmax"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/transformer_block.py", "start": 316, "end": 334, "must": "x_message._reduce_edge(edge_index[1], len(x.embedding))", "caption": "注意力加权 → 逆旋转 → 邻居求和 → 投影"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/activation.py", "start": 182, "end": 190, "must": "output_tensors = self.s2_act(input_tensors, SO3_grid)", "caption": "SeparableS2Activation：l=0 走 SiLU，l>0 走球面网格激活"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "Transformer 块：可分离等变 LayerNorm + 球面网格 FFN + 残差",
+      "plain": "每个块是“预归一化 + 残差”结构：LN → 等变图注意力 → 残差，LN → 前馈网络 → 残差。等变 LayerNorm 对 l=0 用普通 LayerNorm，对 l>0 只缩放不平移（平移会破坏等变），并按 1/(2l+1) 平衡各阶的贡献。前馈网络先做逐 l 的线性层，再投影到 18×18 的球面网格上做逐点 MLP 后投影回来，l=0 部分由单独的标量 MLP 给出。默认堆叠 12 块（31M 为 8 块，153M 为 20 块）。",
+      "math": "x\\leftarrow x+\\mathrm{Attn}(\\mathrm{LN}(x)),\\ \\ x\\leftarrow x+\\mathrm{FFN}(\\mathrm{LN}(x))\\qquad \\mathrm{FFN}(x)=W_2\\,\\mathcal G^{-1}\\Big(\\mathrm{MLP}\\big(\\mathcal G(W_1x)\\big)\\Big)\\qquad \\mathrm{LN}(x)^{(l>0)}_{mc}=\\gamma_{l,c}\\,x^{(l)}_{mc}\\Big/\\sqrt{\\tfrac{1}{CL}\\sum_{c',\\,l'\\ge1}\\tfrac{1}{2l'+1}\\sum_{m'}\\big(x^{(l')}_{m'c'}\\big)^2+\\epsilon}",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/transformer_block.py", "start": 592, "end": 612, "must": "output_embedding = self.ffn(output_embedding)", "caption": "TransBlockV2.forward：norm_1 → 注意力 → 残差 → norm_2 → FFN"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/layer_norm.py", "start": 160, "end": 197, "must": "feature_norm = (feature_norm + self.eps).pow(-0.5)", "caption": "EquivariantLayerNormArraySphericalHarmonics（layer_norm_sh）"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/transformer_block.py", "start": 414, "end": 449, "must": "input_embedding_grid = self.grid_mlp(input_embedding_grid)", "caption": "FeedForwardNetwork：投影到球面网格做 MLP，l=0 用标量 MLP 替换"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "能量：末层 LN → FFN 取 l=0 → 求和 ÷ 常数",
+      "plain": "所有块之后再做一次等变 LayerNorm，再用一个输出 1 通道的前馈网络（同样的球面网格结构）取 l=0 分量作为原子能。体系内原子能求和后除以常数 77.81317（OC20 IS2RE 100k 的平均原子数）——这只是固定缩放，能量仍是原子能之和，保持广延性。OC20 代码中没有单独的元素参考能 E0 项。",
+      "math": "E=\\frac{1}{\\bar N}\\sum_{i=1}^{N}\\Big[\\mathrm{FFN}_E\\big(\\mathrm{LN}(x_i^{(T)})\\big)\\Big]_{l=0},\\qquad \\bar N=77.81317",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 444, "end": 454, "must": "energy.index_add_(0, data.batch, node_energy.view(-1))", "caption": "末层 LN → energy_block → 按结构求和 ÷ _AVG_NUM_NODES"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 52, "end": 55, "must": "77.81317", "caption": "归一化常数：平均原子数与平均度数（OC20 统计）"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：独立的等变注意力头直接输出 l=1 向量",
+      "plain": "力由一个独立的“力头”给出：它与主干的 SO(2) 等变图注意力同构，输出通道数为 1，取每个原子输出中 l=1 的 3 个分量当作力矢量。l=1 分量随旋转像向量一样变换，所以力是等变的；但它不是能量的梯度，力场不保守，沿闭合路径做功不为零、NVE 下能量会漂移。好处是只需一次前向、无需反向传播。",
+      "math": "\\mathbf F_i=\\Big[\\mathrm{SO2Attn}_{F}\\big(x^{(T)}\\big)_i\\Big]_{l=1}\\in\\mathbb R^{3}\\qquad \\big(\\mathbf F_i\\neq-\\partial E/\\partial\\mathbf r_i\\big)",
+      "code": [
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 459, "end": 465, "must": "forces = forces.embedding.narrow(1, 1, 3)", "caption": "取 l=1 的三个系数作为力"},
+        {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 327, "end": 350, "must": "self.force_block = SO2EquivariantGraphAttention(", "caption": "力头 = 输出 1 通道的 SO(2) 等变图注意力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力（OMat24 / MPtrj 模型）：直接回归，不对应变求导",
+      "plain": "原始 OC20 代码只输出能量和力。OMat24/MPtrj 系列 eqV2（用 fairchem 1.x 训练）是 S2EFS 任务：再加一个输出头直接回归 3×3 应力，同样不经过对应变求导，Matbench Discovery 将其标为 targets=EFS_D（D=direct）。eqV2 M 的 MAE 损失中能量/应力/力权重为 20/1/10。该应力头代码位于 fairchem 1.x，当前克隆的 fairchem 2.x 已移除 eqV2。",
+      "math": "\\boldsymbol\\sigma=\\mathrm{Head}_{\\sigma}\\big(\\{x_i^{(T)}\\}\\big)\\in\\mathbb R^{3\\times3}\\qquad \\mathcal L=\\lambda_E\\lvert\\Delta E\\rvert+\\lambda_F\\lVert\\Delta\\mathbf F\\rVert+\\lambda_\\sigma\\lVert\\Delta\\boldsymbol\\sigma\\rVert,\\ (\\lambda_E,\\lambda_F,\\lambda_\\sigma)=(20,10,1)",
+      "code": [
+        {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-m-omat-salex-mp.yml", "start": 57, "end": 61, "must": "targets: EFS_D", "caption": "eqV2 M：S2EFS 训练，能量/力/应力均为直接预测"},
+        {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-m-omat-salex-mp.yml", "start": 77, "end": 82, "must": "stress: 1", "caption": "上游配置：MAE 损失与能量/应力/力权重"},
+        {"repo": "fairchem", "file": "docs/inorganic_materials/models.md", "start": 19, "end": 36, "must": "All models are equiformerV2 S2EFS models", "caption": "fairchem 文档：OMat24 系列均为 EquiformerV2 S2EFS 模型"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "训练技巧：DeNS 去噪辅助任务（eqV2-S-DeNS）",
+      "plain": "DeNS（Denoising Non-Equilibrium Structures）是作者后续提出的辅助训练任务：以 0.5 的概率给训练结构的坐标加高斯噪声（noise_std=0.1），并把该结构的真实力编码进输入，让模型还原所加的噪声。对非平衡结构，单纯去噪是病态的（不知道原结构往哪边偏），编码力之后问题变得适定。它只影响训练，推理时输出仍是能量/力/应力；eqV2-S-DeNS 只用 MPtrj 从头训练。",
+      "math": "\\tilde{\\mathbf r}_i=\\mathbf r_i+\\boldsymbol\\epsilon_i,\\ \\boldsymbol\\epsilon_i\\sim\\mathcal N(0,\\sigma^2\\mathbf I),\\ \\sigma=0.1,\\ p=0.5\\qquad \\mathcal L_{\\text{DeNS}}=\\big\\lVert\\hat{\\boldsymbol\\epsilon}_i(\\tilde{\\mathcal S},\\mathbf F)-\\boldsymbol\\epsilon_i\\big\\rVert",
+      "code": [
+        {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-s-dens-mp.yml", "start": 77, "end": 85, "must": "dens_probability: 0.5", "caption": "eqV2 S DeNS：损失权重含 dens 项，加噪概率 0.5、噪声标准差 0.1"},
+        {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-s-dens-mp.yml", "start": 97, "end": 101, "must": "Denoising Non-Equilibrium Structures (DeNS)", "caption": "DeNS 说明：编码力使非平衡结构的去噪问题适定"},
+        {"repo": "equiformer_v2", "file": "README.md", "start": 10, "end": 11, "must": "which we call **DeNS**", "caption": "README：DeNS 作为 EquiformerV2 的自监督辅助任务"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "max_radius", "value": "12.0 Å（OC20 配置；Matbench eqV2 YAML 同为 12.0）", "note": "邻居截断；代码默认值为 5.0", "code": {"repo": "equiformer_v2", "file": "oc20/configs/s2ef/2M/equiformer_v2/equiformer_v2_N@12_L@6_M@2.yml", "start": 35, "end": 40, "must": "max_radius:"}},
+    {"name": "max_neighbors", "value": "20", "note": "每个原子最多保留的邻居数"},
+    {"name": "num_layers", "value": "12（83M / S2EF-2M）；8（31M）；20（153M）", "note": "Transformer 块数", "code": {"repo": "equiformer_v2", "file": "oc20/configs/s2ef/all_md/equiformer_v2/equiformer_v2_N@20_L@6_M@3_153M.yml", "start": 54, "end": 64, "must": "num_layers:"}},
+    {"name": "lmax_list / mmax_list", "value": "[6]/[2]（83M）；[4]/[2]（31M）；[6]/[3]（153M）", "note": "最高阶 L 与 SO(2) 卷积保留的最高 |m|", "code": {"repo": "equiformer_v2", "file": "oc20/configs/s2ef/2M/equiformer_v2/equiformer_v2_N@12_L@6_M@2.yml", "start": 51, "end": 53, "must": "mmax_list:"}},
+    {"name": "sphere_channels", "value": "128", "note": "每个 (l, m) 系数上的通道数 C"},
+    {"name": "num_heads / attn_alpha / attn_value", "value": "8 / 64 / 16（attn_hidden 64）", "note": "注意力头数与每头通道数（2M 配置）"},
+    {"name": "ffn_hidden_channels / grid_resolution", "value": "128 / 18", "note": "前馈网络宽度与球面网格分辨率（18×18）"},
+    {"name": "径向基", "value": "GaussianSmearing(0, r_c, 600, 2.0)", "note": "600 个高斯基；配置中的 num_distance_basis=512 未使用", "code": {"repo": "equiformer_v2", "file": "nets/equiformer_v2/equiformer_v2_oc20.py", "start": 219, "end": 226, "must": "GaussianSmearing("}},
+    {"name": "edge_channels", "value": "128", "note": "径向 MLP 宽度 [600+2×128, 128, 128]：高斯基拼接两端元素嵌入（各 128 维）"},
+    {"name": "norm_type", "value": "layer_norm_sh", "note": "可分离等变 LayerNorm（代码默认为 rms_norm_sh）"},
+    {"name": "损失权重", "value": "OC20-2M：力 100 / 能量 2；eqV2 M（OMat）：能量 20 / 力 10 / 应力 1", "note": "后者来自 Matbench YAML 的 upstream_config（MAE 损失）", "code": {"repo": "equiformer_v2", "file": "oc20/configs/s2ef/2M/equiformer_v2/equiformer_v2_N@12_L@6_M@2.yml", "start": 95, "end": 99, "must": "force_coefficient: 100"}},
+    {"name": "参数量", "value": "eqV2 M：86,589,068；eqV2 S DeNS：31,207,434", "note": "Matbench Discovery YAML 的 model_params", "code": {"repo": "matbench-discovery", "file": "models/eqv2/eqv2-m-omat-salex-mp.yml", "start": 57, "end": 61, "must": "model_params: 86589068"}}
+  ],
+  "speedNotes": [
+    "开销集中在边上：每条边都要用块对角 Wigner-D（L=6 时每通道 49×49）把消息转进/转出边坐标系（torch.bmm），再做两次 SO(2) 卷积；12–20 层 × 128 通道，属于最重的一档。",
+    "eSCN 技巧把 CG 张量积换成按 m 分组的线性层，并只保留 |m|≤m_max 的系数，复杂度从 O(L⁶) 降到约 O(L³)，这是能用 L=6 的前提；153M 模型把 m_max 提到 3，SO(2) 卷积随之变重。",
+    "S² 激活与网格 FFN 要在 18×18 球面网格和球谐系数之间来回做 einsum 投影（每条边、每个原子都做），占用大量显存与 FLOPs。",
+    "力（和应力）由输出头直接给出，单次前向即得 E/F/S、无需反传；这让如此大的模型也能完成 Matbench Discovery 约 25.7 万个结构的弛豫。",
+    "没有融合 CUDA 内核；训练支持 AMP（等变 LayerNorm 处强制 fp32），Matbench 的推理记录使用 float32。"
+  ],
+  "weakNotes": [
+    "截断 12 Å，但每个原子只保留最近 20 个邻居：致密固体中实际只覆盖最近的一两层壳层，稀疏体系（分子、表面吸附物）才用满 12 Å；多层堆叠给出半局域的大感受野，但没有任何显式长程项。",
+    "无色散、无静电、无总电荷/自旋输入；MPtrj 与 PBE Alexandria 均为 PBE(+U) 数据，层状 vdW 材料、分子晶体、物理吸附需要自行外加 D3 一类修正（官方未内置）。",
+    "OC20/OC22/ODAC 版本只在催化/吸附体系上训练，迁移到其他体系需谨慎；仅 OMat24 训练的权重与 Materials Project 能量不兼容（文档注明），做 MP 相图比较应使用 OMat-Alex-MP 微调版。",
+    "带电缺陷、离子液体、电极/电解质界面等依赖长程静电的问题超出其能力；fairchem 官方现推荐改用 UMA。"
+  ],
+  "downstreamNotes": [
+    "声子/热导率：力不是能量的梯度，二阶导不自洽——Matbench Discovery κ_SRME：eqV2 M 1.771、eqV2 S DeNS 1.676（越低越好；YAML 注释称不加 DeNS 的 eqV2 S 为 1.772）。",
+    "稳定性筛选与几何优化是强项：Matbench Discovery（unique prototypes）eqV2 M 的 F1 0.917、MAE 0.02 eV/atom；eqV2 S DeNS 的 F1 0.815。",
+    "MD：可做带恒温器的 NVT，但非保守力 + 无截断包络 + 邻居上限会导致 NVE 能量漂移；MLIP Arena 模型注册表把 eqV2(OMat) 标为 npt: false，fairchem 文档建议振动/MD 改用能量守恒的 UMA。",
+    "催化：OC20/OC22/ODAC 版本面向吸附能与弛豫（S2EF/IS2RE、AdsorbML），也用于 Open Catalyst demo（ocpapi 默认 equiformer_v2_31M_s2ef_all_md）。",
+    "需要 Hessian、偶极/极化率、磁矩或严格能量守恒的任务不适合；运行旧权重需固定 fairchem-core 1.x 环境。"
+  ],
+  "strengths": ["L=6 高角分辨率 + 注意力，精度在 OC20 与 Matbench Discovery 上长期领先", "eSCN 式 SO(2) 卷积让高阶等变网络可训练、可扩展到 153M 参数", "直接力/应力一次前向输出，适合大规模弛豫与稳定性筛选", "预训练权重丰富：OC20/OC22/ODAC、OMat24、MPtrj（DeNS）"],
+  "weaknesses": ["力与应力非保守，声子/热导/NVE MD 表现差", "无截断包络且有 20 邻居上限，势能面不连续", "推理成本高（深层 + L=6 + 球面网格），无 LAMMPS 接口", "无色散、静电与电荷/自旋输入", "fairchem 2.x 已移除 eqV2，需 fairchem-core 1.x 才能运行"],
+  "pretrained": [
+    "EquiformerV2 83M（OC20 S2EF-2M）",
+    "EquiformerV2 31M / 153M（OC20 S2EF-All+MD）",
+    "EquiformerV2 121M（OC22 S2EFS，λE=4、λF=100）",
+    "EquiformerV2-Large（ODAC）",
+    "eqV2-31M / 86M / 153M-OMat（仅 OMat24）",
+    "eqV2-31M-MP、eqV2-31M / 86M / 153M-DeNS-MP（仅 MPtrj）",
+    "eqV2-31M / 86M / 153M-OMat-Alex-MP（OMat24 预训练 + MPtrj/sAlex 微调；eqV2 M = eqV2_86M_omat_mp_salex）"
+  ],
+  "mbdKeys": ["eqv2-m-omat-salex-mp", "eqv2-s-dens-mp"],
+  "arenaKeys": ["eqV2(OMat)", "EquiformerV2(OC22)", "EquiformerV2(OC20)"]
+}

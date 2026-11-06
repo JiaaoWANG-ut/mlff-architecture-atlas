@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>基准数据 · MLFF 架构图解</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+<h1>基准数据</h1>
+<p class="muted">本站所有基准数字都直接从两个公开仓库的原始结果文件中提取（固定 commit，见下方“数据来源”），没有手工抄录。点击表头排序；模型名链接到原始 YAML，“架构”列链接到本站对应的架构页面。</p>
+
+<h2 id="sources">数据来源</h2>
+<div class="grid g2" id="src-cards"></div>
+
+<h2 id="mbd">Matbench Discovery（MBD）全部条目</h2>
+<div class="callout"><b>指标说明</b>
+  <b>F1 / DAF</b>：从 WBM 测试集中“发现”热力学稳定晶体的分类分数与相对随机挑选的富集倍数（越高越好）；<b>MAE</b>：形成能（距凸包能）误差，eV/atom；
+  <b>κ<sub>SRME</sub></b>：103 个晶体晶格热导率的对称相对平均误差（0 最好、2 最差）；<b>RMSD</b>：弛豫结构与 DFT 结构的均方根偏差，Å；
+  <b>对称匹配</b>：弛豫后空间群与 DFT 一致的比例（symprec = 10<sup>−5</sup>）；<b>RDF 误差</b>：MD 径向分布函数与 DFT-MD 的差异；
+  <b>力（targets）</b>：EFS_G = 能量求导得力 / 应力（保守），EFS_D = 直接预测，_GM = 另含磁矩，EFSH = 训练时加入 Hessian，E = 只预测能量（不是力场）。更多术语见 <a href="glossary.html">术语表</a>。</div>
+<div class="filters">
+  <input type="search" id="q" placeholder="搜索模型名、训练集…">
+  <select id="tg"><option value="">力的类型：全部</option></select>
+  <label class="small"><input type="checkbox" id="only-arch"> 只看本站收录了架构的条目</label>
+  <span class="muted small" id="count"></span>
+</div>
+<div class="table-wrap"><table id="tbl-mbd"></table></div>
+<p class="small muted">MD 用时：MBD 的 MD 任务（17 个体系）总用时与硬件；不同硬件之间不可直接比较。“—”表示该条目未提交此项。</p>
+
+<h2 id="arena">MLIP Arena</h2>
+<h3 id="arena-stab">稳定性（升温 / 加压）</h3>
+<p class="small muted">升温：NVT，10 ps 内 300 → 3000 K；加压：NPT，10 ps 内 300 → 3000 K 且 0 → 500 GPa。“完整跑完”= 达到目标时长的 98% 以上；“平均完成度”= 崩溃前跑完的比例的平均值；n 为 步/秒 ∝ N<sup>−n</sup> 的拟合指数。</p>
+<div class="table-wrap"><table id="tbl-stab"></table></div>
+<h3 id="arena-comb">氢气燃烧（反应性 + 计时）</h3>
+<p class="small muted">H<sub>256</sub>O<sub>128</sub>（384 原子），NVT 300 → 3000 → 300 K。水产率 = 最后一帧识别出的水分子数 / 128；未跑完的模型产率不可比。</p>
+<div class="table-wrap"><table id="tbl-comb"></table></div>
+<h3 id="arena-eos">状态方程（EOS）</h3>
+<p class="small muted">对一组晶体做体积压缩 / 拉伸的能量曲线，统计非物理的能量差翻转次数、曲折度（理想 = 1）、压缩时能量与导数的 Spearman 单调性（理想为 ±1），以及缺失（失败）体系数。</p>
+<div class="table-wrap"><table id="tbl-eos"></table></div>
+</main>
+<script>
+mountChrome("bench.html");
+const B = window.MLFF_BENCH;
+const $ = (id) => document.getElementById(id);
+const archLink = (id) => { const m = id && modelById(id); return m ? `<a href="${modelLink(m)}">${esc(m.name)}</a>` : '<span class="muted">—</span>'; };
+const ext = (url, text) => (url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>` : text);
+const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%");
+const shortHw = (h) => String(h || "").replace(/^NVIDIA /, "").replace(" Server Edition", "");
+
+$("src-cards").innerHTML = [["mbd", "Matbench Discovery", "稳定性发现、弛豫、声子 / 热导、双原子曲线、MD 等任务；本站使用其 models/*/*.yml 中的指标与用时记录。"],
+  ["arena", "MLIP Arena", "同一平台上的 MD 稳定性（升温 / 加压）、氢气燃烧反应性与计时、EOS 光滑性；本站使用其仓库中的原始结果文件。"]]
+  .map(([k, name, desc]) => { const s = B.sources[k]; return `<div class="card"><h3>${ext(s.url, name)}</h3><p class="small">${desc}</p>
+    <p class="small">commit <a href="${esc(s.url)}/tree/${esc(s.commit)}" target="_blank" rel="noopener"><code>${esc(s.commit.slice(0, 10))}</code></a> · ${esc(s.date)}</p></div>`; }).join("");
+
+/* ---- MBD ---- */
+const TGS = [...new Set(B.mbd.map((r) => r.targets))].sort();
+$("tg").innerHTML += TGS.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+const COLS = [
+  ["模型", 0, (r) => r.name, (r) => ext(r.file, esc(r.name))],
+  ["架构", 0, (r) => (r.modelId ? modelById(r.modelId)?.name : ""), (r) => archLink(r.modelId)],
+  ["力", 0, (r) => r.targets, (r) => `<span class="badge ${r.targets === "EFS_D" ? "direct" : r.targets === "E" ? "" : "cons"}">${esc(r.targets)}</span>`],
+  ["训练数据", 0, (r) => (r.trainingSets || []).join(", "), (r) => `<span class="small">${esc((r.trainingSets || []).join(", "))}</span>`],
+  ["参数量", 1, (r) => r.params],
+  ["r<sub>c</sub> (Å)", 1, (r) => r.radius],
+  ["F1↑", 1, (r) => r.discovery?.F1],
+  ["DAF↑", 1, (r) => r.discovery?.DAF],
+  ["MAE↓", 1, (r) => r.discovery?.MAE],
+  ["κ<sub>SRME</sub>↓", 1, (r) => r.phonons?.["κ_SRME"]],
+  ["RMSD↓", 1, (r) => r.geo?.rmsd],
+  ["对称匹配↑", 1, (r) => r.geo?.symmetry_match, (r) => pct(r.geo?.symmetry_match)],
+  ["RDF 误差↓", 1, (r) => r.md?.rdf_error],
+  ["MD 用时 (h)", 1, (r) => (mdCost(r) ? mdCost(r).sec / 3600 : null), (r) => { const c = mdCost(r); return c ? `${fmt(c.sec / 3600)} <span class="small muted">${esc(shortHw(c.hardware))}</span>` : "—"; }],
+  ["开放性", 0, (r) => r.openness],
+  ["发布", 0, (r) => r.published, (r) => ext(r.paper, esc(r.published || "论文"))],
+];
+const tbl = $("tbl-mbd");
+tbl.innerHTML = `<thead><tr>${COLS.map(([h, n]) => `<th class="sortable" ${n ? 'data-type="num"' : ""}>${h}</th>`).join("")}</tr></thead><tbody></tbody>`;
+makeSortable(tbl);
+function renderMbd() {
+  const q = $("q").value.trim().toLowerCase(), tg = $("tg").value, only = $("only-arch").checked;
+  const rows = B.mbd.filter((r) => (!tg || r.targets === tg) && (!only || r.modelId) &&
+    (!q || [r.name, r.key, r.modelId, ...(r.trainingSets || [])].join(" ").toLowerCase().includes(q)));
+  tbl.tBodies[0].innerHTML = rows.map((r) => `<tr>${COLS.map(([, n, v, f]) => {
+    const x = v(r);
+    return `<td class="${n ? "num" : ""}" data-v="${x == null ? "" : esc(x)}">${f ? f(r) : n ? fmt(x) : esc(x ?? "—")}</td>`;
+  }).join("")}</tr>`).join("");
+  $("count").textContent = `${rows.length} / ${B.mbd.length} 条`;
+  const th = tbl.querySelector("th[data-dir]");
+  if (th) { th.dataset.dir = th.dataset.dir === "asc" ? "desc" : "asc"; th.click(); }
+}
+["q", "tg", "only-arch"].forEach((id) => { $(id).addEventListener("input", renderMbd); $(id).addEventListener("change", renderMbd); });
+renderMbd();
+tbl.querySelectorAll("th")[6].click(); tbl.querySelectorAll("th")[6].click(); // F1 descending
+
+/* ---- generic table ---- */
+function table(el, cols, rows) {
+  el.innerHTML = `<thead><tr>${cols.map(([h, n]) => `<th class="sortable" ${n ? 'data-type="num"' : ""}>${h}</th>`).join("")}</tr></thead><tbody>${
+    rows.map((r) => `<tr>${cols.map(([, n, v, f]) => { const x = v(r); return `<td class="${n ? "num" : ""}" data-v="${x == null ? "" : esc(x)}">${f ? f(r) : n ? fmt(x) : esc(x ?? "—")}</td>`; }).join("")}</tr>`).join("")}</tbody>`;
+  makeSortable(el);
+}
+table($("tbl-stab"), [
+  ["模型", 0, (r) => r.name], ["架构", 0, (r) => r.modelId || "", (r) => archLink(r.modelId)],
+  ["测试", 0, (r) => r.kind, (r) => (r.kind === "heating" ? "升温" : "加压")],
+  ["体系数", 1, (r) => r.runs], ["完整跑完", 1, (r) => r.completed, (r) => pct(r.completed)],
+  ["平均完成度", 1, (r) => r.meanFinal, (r) => pct(r.meanFinal)], ["中位 步/秒", 1, (r) => r.medianSps],
+  ["中位 原子·步/秒", 1, (r) => r.medianAtomSteps], ["n", 1, (r) => r.fit?.n],
+], B.arenaStability.slice().sort((a, b) => a.kind.localeCompare(b.kind) || b.completed - a.completed));
+table($("tbl-comb"), [
+  ["模型", 0, (r) => r.name], ["架构", 0, (r) => r.modelId || "", (r) => archLink(r.modelId)],
+  ["原子数", 1, (r) => r.natoms], ["步/秒", 1, (r) => r.sps], ["用时 (h)", 1, (r) => r.hours],
+  ["完成度", 1, (r) => r.finalFrac, (r) => pct(r.finalFrac)],
+  ["水产率", 1, (r) => r.yield, (r) => (r.finalFrac < 0.98 ? `<span class="muted" title="未跑完，不可比">(${fmt(r.yield)})</span>` : fmt(r.yield))],
+], B.arenaCombustion.slice().sort((a, b) => b.sps - a.sps));
+table($("tbl-eos"), [
+  ["排名", 1, (r) => r.rank], ["模型", 0, (r) => r.model], ["架构", 0, (r) => r.modelId || "", (r) => archLink(r.modelId)],
+  ["能量差翻转↓", 1, (r) => r["energy-diff-flip-times"]], ["曲折度↓", 1, (r) => r.tortuosity],
+  ["压缩能量 Spearman", 1, (r) => r["spearman-compression-energy"]], ["压缩导数 Spearman", 1, (r) => r["spearman-compression-derivative"]],
+  ["拉伸能量 Spearman", 1, (r) => r["spearman-tension-energy"]], ["缺失↓", 1, (r) => r.missing],
+], B.arenaEos.slice().sort((a, b) => a.rank - b.rank));
+</script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+{
+  "id": "grace",
+  "name": "GRACE",
+  "fullName": "GRACE: Graph Atomic Cluster Expansion（图原子团簇展开）",
+  "year": 2024,
+  "authors": "A. Bochkarev, Y. Lysogorskiy, R. Drautz",
+  "paper": {"title": "Graph Atomic Cluster Expansion for Semilocal Interactions beyond Equivariant Message Passing", "venue": "Phys. Rev. X 14, 021036 (2024)", "url": "https://journals.aps.org/prx/abstract/10.1103/PhysRevX.14.021036"},
+  "repos": ["grace-tensorpotential"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "ACE 的图推广（星形/树形基）", "1L 严格局域 / 2L·3L 半局域", "FS 类 Finnis–Sinclair 读出", "CALM 不确定度 γ", "LAMMPS Kokkos"],
+  "framework": "TensorFlow（XLA）；LAMMPS 中可用 C++/Kokkos 无 TF 推理",
+  "license": "ASL 学术软件许可（非商用）",
+  "oneLiner": "把 ACE（原子团簇展开）推广到“图”上：1 层的 GRACE-1L 就是“带可学习径向 MLP、化学嵌入和 MLP 读出的 ACE”（星形基，严格局域）；2L/3L 再让邻居的等变特征参与下一次 ACE 展开（树形基，即消息传递）。每层用 CG 乘积直接做到 4 阶（5 体）关联。",
+  "analogy": "ACE 像给每个原子拍一张“周围邻居全景照”，再统计照片里两两、三三、四四的组合形状；GRACE-1L 只看自己这张照片；GRACE-2L/3L 则先让每个邻居也拍好照片并写一行“摘要”（L≤1 的等变特征），再把这些摘要贴进自己的照片里重新统计——像朋友圈转发，转发一次就能“看到” 12 Å 外的事。",
+  "arch": {
+    "geometry": "键向量 r_ij → 长度（Chebyshev T_n(2r/r_c−1)×多项式包络 → MLP[64,64]）+ 方向（实球谐 Y_lm）",
+    "equivariance": "O(3)/E(3) 等变：实球谐 + 实 CG 耦合（ProductFunction），读出只取 L=0 不变量",
+    "lmax": "1L 默认 l_max=4；2L(v1_24) 默认 (3,3)、large (4,3)；FS (5,5,4,3)；层间传递 L≤1",
+    "bodyOrder": "每层乘积阶 max_order=4（A→AA→AAA→AAAA）→ 每层 5 体；2L/3L 的树形基跨层叠加，有效体序更高",
+    "layers": "1L：1 层；2L：2 层；3L：3 层（仅基础模型，无公开 preset）",
+    "cutoff": "基础模型 6 Å（Matbench graph_construction_radius 6.0）；SMAX 为元素相关 5.0–7.5 Å",
+    "receptiveField": "1L：r_c = 6 Å（严格局域）；2L：≈2r_c = 12 Å；3L：≈3r_c = 18 Å",
+    "message": "A_i=Σ_j R_nl(r_ij)·Y_lm(r̂_ij)·z̃_j（元素嵌入）；2L/3L：邻居等变特征 I_j(L≤1) 与 R·Y 做 CG 耦合（YI）再求和",
+    "readout": "FunctionReduceN（中心元素相关权重）收集各阶 L=0 不变量 ρ → 1 个线性通道 + n_mlp_dens 通道过 MLP[64]；FS 用 sgn(ρ)|ρ|^m 型非线性",
+    "forces": "conservative",
+    "forcesDetail": "tf.GradientTape 对键向量 r_ij 求导得成对力 f_ij=−∂E/∂r_ij，再按键两端 segment_sum 组装 F_i",
+    "stress": "维里 W=Σ_bonds f_ij ⊗ r_ij（与力同一次反传），ASE 中 σ=−W/V",
+    "longRange": "基础模型无；感受野外静电/色散全部截断（extra/gen_tensor 中有实验性的偶极倒空间 Ewald 代码）",
+    "dispersion": "无内置 D3，仓库未提供官方色散接口，需用户自行叠加",
+    "chargeSpin": "无总电荷/自旋输入；ASE 计算器支持可选的原子磁矩输入数据键（ATOMIC_MAGMOM，供自定义模型使用）",
+    "otherOutputs": "原子能、CALM 外推等级 γ（可选不确定度）、多模型集成的 E/F/S 标准差、LAMMPS 成对力",
+    "strictlyLocal": false,
+    "complexity": "A 基 O(N·M·n·(l_max+1)²)；节点 CG 乘积 O(N·n·P_CG)；2L/3L 每层再加边上等变耦合 O(N·M·n·P_CG)",
+    "accel": "XLA jit_compile（默认）、基础模型默认 fp32、稠密邻居 batched matmul；LAMMPS grace（TF）、grace/1l|2l|3l/kk（Kokkos）、grace/fs（C++ MPI）"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "主力 2L 与 MACE 同级（边上 CG 耦合 + 节点 4 阶乘积）；1L/FS 单层严格局域明显更快，3L 更慢。"},
+    "expressiveness": {"v": 5, "why": "等变 + 每层 4 阶 CG 乘积（5 体），源自完备的 ACE 基，2L/3L 再叠加树形半局域基。"},
+    "longRange": {"v": 2, "why": "无色散与静电模块；2L/3L 仅靠 12–18 Å 的消息传递感受野，1L 严格局域。"},
+    "scalability": {"v": 4, "why": "1L/FS 严格局域，LAMMPS MPI 切分无额外通信，FS 有纯 C++ 实现；2L/3L 也可多进程/Kokkos，但需层间通信。"},
+    "physics": {"v": 4, "why": "保守力、多项式包络平滑截断、原子能可加（广延）、元素参考能平移、可选 ZBL；ZBL 非默认。"},
+    "coverage": {"v": 2, "why": "官方输出以能量/力/应力为主，另有 CALM 不确定度 γ；无原生 Hessian、偶极、电荷等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入与邻居图：matscipy 邻居表直接给出键向量",
+      "plain": "ASE 结构先按截断半径补齐周期性，再用 matscipy 的 neighbour_list(\"ijD\") 一次性得到所有原子对 (i, j) 与跨周期的键向量 D=r_j−r_i+平移。GRACE 后面的一切（包括求力）都以“键向量”为自变量，而不是原子坐标，这让力与维里可以从同一份成对导数得到。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [{"repo": "grace-tensorpotential", "file": "tensorpotential/data/databuilder.py", "start": 438, "end": 453, "must": "nl(\"ijD\", ase_atoms, cutoff=cutoff)", "caption": "构建 ind_i / ind_j / bond_vector（可选按元素对设置不同截断）"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：Chebyshev 径向基 × 多项式包络 → MLP；方向 → 实球谐",
+      "plain": "距离先映射到 [−1,1] 后展开成 8 个第一类 Chebyshev 多项式 T_1…T_8，并乘以 p=5 的多项式包络，让能量和力在 r_c 处平滑归零；随后一个两层 tanh MLP（64×64）把这 8 个数变成每个 (n,l) 通道各自的径向函数 R_nl。方向用实球谐 Y_lm 编码（由复球谐的实部/虚部组合而来），它在旋转下按已知规律变换，是等变性的来源。",
+      "math": "g_k(r)=T_k\\!\\left(\\tfrac{2r}{r_c}-1\\right)f_{\\text{cut}}\\!\\left(\\tfrac{r}{r_c}\\right),\\ k=1..8,\\quad f_{\\text{cut}}(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2};\\qquad R_{nl}(r)=\\mathrm{MLP}_{[64,64],\\tanh}\\big(g(r)\\big)_{nl},\\quad Y_{lm}(\\hat{\\mathbf r}_{ij})",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/functions/radial.py", "start": 165, "end": 177, "must": "chebvander(r_rescale, self.nfunc + 1, self.kind)[:, 1:]", "caption": "ChebSqrRadialBasisFunction：Chebyshev 基 × 包络（basis_type=\"Cheb\"）"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/functions/radial.py", "start": 304, "end": 310, "must": "- (p + 1) * (p + 2) / 2 * r**p", "caption": "p 阶多项式截断包络"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 803, "end": 813, "must": "y = self.mlp(basis)", "caption": "MLPRadialFunction：径向 MLP 输出 R_nl"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向：实球谐函数 Y_lm",
+      "plain": "单位键向量 r̂_ij 经 Legendre 递推得到复球谐，再按 m 的正负组合成实球谐（m<0 取虚部、m>0 取实部并乘 √2）。实数表示让后面所有 CG 耦合都在实数域完成，计算更省。",
+      "math": "Y_{l,-|m|}=\\sqrt2\\,(-1)^m\\,\\mathrm{Im}\\,Y_l^{|m|},\\quad Y_{l0}=Y_l^{0},\\quad Y_{l,|m|}=\\sqrt2\\,(-1)^m\\,\\mathrm{Re}\\,Y_l^{|m|}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/functions/spherical_harmonics.py", "start": 242, "end": 257, "must": "zlm += [sqrt2 * ylm_r[ind] * ph]", "caption": "_compute_rsh：复球谐 → 实球谐"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 258, "end": 260, "must": "return self.sh(vhat)", "caption": "SphericalHarmonic 指令"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：每种元素一个 128 维可学习向量",
+      "plain": "与经典 ACE 为每对元素单独设系数不同，GRACE 给每种元素查表得到一个 128 维嵌入，再线性投影到径向通道 n 上，作为邻居 j 的“指示函数”。因此参数量不随元素数平方增长，一套模型可覆盖整个周期表。",
+      "math": "\\mathbf z_{Z}=W_{\\text{emb}}[Z]\\in\\mathbb R^{128},\\qquad \\tilde z_{j,n}=\\sum_{e}U_{ne}\\,z_{Z_j,e}",
+      "code": [{"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 1057, "end": 1063, "must": "return self.w", "caption": "ScalarChemicalEmbedding：元素嵌入表（可 LoRA 微调）"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：原子基 A —— ACE 的“邻居密度投影”",
+      "plain": "对每条键，把径向函数 R_nl、球谐 Y_lm 与邻居元素嵌入 z̃_j 相乘，再对 i 的所有邻居求和并除以平均邻居数。得到的 A_i 就是 ACE 里的原子基：把 i 周围的原子密度投影到各个 (n,l,m) 通道上。它只含两体信息，但求和后天然对邻居置换不变。",
+      "math": "A_{i,nlm}=\\frac{1}{\\bar n}\\sum_{j\\in\\mathcal N(i)}R_{nl}(r_{ij})\\,Y_{lm}(\\hat{\\mathbf r}_{ij})\\,\\tilde z_{j,n}",
+      "code": [{"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 1218, "end": 1261, "must": "jnl,jn->jnl", "caption": "SingleParticleBasisFunctionScalarInd：R·Y·z → unsorted_segment_sum"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：乘积基 A → AA → AAA → AAAA（多体关联）",
+      "plain": "ACE 的核心：把 A 与自身做张量积，再用 CG 系数耦合回确定的角动量 L。GRACE 采用“张量分解”的做法：先用线性层把通道混合（FCRight2Left），再在同一通道内逐元素相乘并做 CG 求和；AA 保留 L≤l_max 供后续使用，AAA、AAAA 只耦合到 L=0。乘到第 4 阶即同时考虑 4 个邻居 + 中心 = 5 体，而代价仍与原子数成正比。这和 MACE 的“对称收缩”思路相同，只是 GRACE 逐阶两两相乘、默认阶数到 4。",
+      "math": "\\mathbf{AA}_{i,nLM}=\\sum_{l_1m_1l_2m_2}C^{LM}_{l_1m_1,l_2m_2}\\,\\tilde A_{i,nl_1m_1}\\tilde A_{i,nl_2m_2},\\quad \\tilde A=\\mathcal L(A);\\qquad \\mathbf{AAA}=\\big[\\mathcal L(\\mathbf{AA},A)\\otimes A\\big]_{L=0},\\quad \\mathbf{AAAA}=\\big[\\mathcal L(\\mathbf{AA},A)^{\\otimes 2}\\big]_{L=0}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 433, "end": 471, "must": "AAA = ProductFunction(", "caption": "GRACE_1LAYER：A1/AA/AA1/AAA 的搭建（AAAA 同理）"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 2136, "end": 2155, "must": "prod = lft * rght * self.cg", "caption": "ProductFunction：逐通道乘积 × CG 系数，再按 (L,M) 求和"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 3934, "end": 3956, "must": "add_right_to_left", "caption": "FCRight2Left：通道线性混合后并入左操作数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ③（仅 2L/3L）：树形基 = 等变消息传递",
+      "plain": "GRACE-2L 先把第一层各阶基函数压缩成邻居 j 的等变“指示特征” I_j（只保留 L≤1，即标量 + 矢量），再在第二层把 I_j 当作“化学嵌入”的升级版：与 R·Y 做 CG 耦合并对邻居求和（YI），之后重复 B → BB → BBB → BBBB 的乘积。于是原子 i 的能量依赖到 2r_c 以内的原子（ACE 的“树”），3L 再多传一次。代价是每层多一次边上的等变耦合，且不再严格局域。",
+      "math": "I_{j,nl'm'}=\\sum_{\\nu}W^{(\\nu)}_{Z_j}\\,\\mathbf B^{(\\nu)}_{j}\\big|_{l'\\le1},\\qquad YI_{i,nLM}=\\frac{1}{\\bar n}\\sum_{j}\\sum C^{LM}_{lm,l'm'}\\,R^{(1)}_{nl}(r_{ij})\\,Y_{lm}(\\hat{\\mathbf r}_{ij})\\,I_{j,nl'm'}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 707, "end": 746, "must": "indicator=instr_red", "caption": "GRACE_2LAYER：I（L≤1 指示特征）→ YI → B"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 1478, "end": 1508, "must": "jnl,jnr->jnlr", "caption": "SingleParticleBasisFunctionEquivariantInd：R·Y ⊗ I_j，邻居求和后 CG 耦合"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：元素相关的线性收缩 + MLP",
+      "plain": "把各阶基函数中 L=0 的不变量，用依赖中心元素 Z_i 的权重线性组合成 n_mlp_dens+1 个“密度” ρ（2L 中两层的基都参与）。第 0 个密度直接作为线性能量项，其余送入一个 64 宽的 MLP，两者相加得原子能。线性项对应经典线性 ACE，MLP 提供非线性。",
+      "math": "\\rho_{i,k}=\\sum_{\\nu}\\sum_{\\eta}W^{(\\nu)}_{Z_i,k\\eta}\\,\\mathbf B^{(\\nu)}_{i,\\eta,L=0},\\qquad E_i=\\rho_{i,0}+\\mathrm{MLP}_{[64]}\\big(\\rho_{i,1..n_{\\text{dens}}}\\big)",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 3413, "end": 3433, "must": "w = tf.gather(w, atomic_mu_i, axis=0)", "caption": "FunctionReduceN：按中心元素取权重并收缩"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/output.py", "start": 404, "end": 443, "must": "norm_out = transformed_origin + lin_origin", "caption": "LinMLPOut2ScalarTarget：线性通道 + MLP 通道"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出变体：GRACE/FS 的 Finnis–Sinclair 型非线性",
+      "plain": "FS 预设不用 MLP，而是像经典嵌入原子法（EAM/Finnis–Sinclair）那样对每个密度 ρ_k 施加幂函数 sgn(ρ)|ρ|^m（默认 m=1, 0.5, 2, 0.75），并加一个指数项让 ρ→0 处光滑。它“温和非线性”、可导出为 YAML 供纯 C++ 实现（无需 TensorFlow）在 LAMMPS 中 MPI 并行。",
+      "math": "E_i=\\sum_k c_k\\,F_{m_k}(\\rho_{i,k}),\\quad F_m(\\rho)=\\mathrm{sgn}(\\rho)\\Big[\\big(|\\rho|+x_0e^{-|\\rho|}\\big)^{m}-y_0e^{-|\\rho|}\\Big],\\ x_0=\\big(\\tfrac1m\\big)^{\\frac{1/m}{1-1/m}},\\ y_0=\\big(\\tfrac1m\\big)^{\\frac{1}{1-1/m}}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/output.py", "start": 193, "end": 214, "must": "tf.sign(rho) * (tf.pow(xoff + arho, mexp) - yoff)", "caption": "FSOut2ScalarTarget.f_exp_shsc"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 305, "end": 317, "must": "FSOut2ScalarTarget(origin=[instr_fs]", "caption": "FS 预设：只收缩到 len(fs_parameters) 个密度"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：缩放 + 元素参考能 + （可选）ZBL 近程排斥",
+      "plain": "原子能先乘全局缩放 s，再加每种元素的参考能（atomic_shift_map），然后对所有原子求和；能量写成原子能之和保证了广延性。若设置 zbl_cutoff，还会加入 ZBL 通用屏蔽库仑排斥，并在内外截断之间用多项式 S(r) 平滑接零，防止原子在高温/高压下过近“穿透”。",
+      "math": "E=\\sum_i\\big[s\\,E_i+e_0(Z_i)\\big]+\\frac{K}{2}\\sum_{i\\ne j}Z_iZ_j\\big[E^{\\text{ZBL}}_{ij}(r_{ij};a)+S(r_{ij})\\big],\\quad a=\\frac{0.46850}{Z_i^{0.23}+Z_j^{0.23}}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/output.py", "start": 744, "end": 774, "must": "return target * tf.cast(self.scale, target.dtype) + total_shift", "caption": "ConstantScaleShiftTarget：scale·E_i + 元素平移"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/tpmodel.py", "start": 402, "end": 409, "must": "total_energy = tf.reduce_sum(e_atomic, axis=0, keepdims=True)", "caption": "原子能求和得总能"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/instructions/compute.py", "start": 4897, "end": 4936, "must": "a = 0.46850 / (Zi**0.23 + Zj**0.23)", "caption": "ZBLPotential：屏蔽库仑 + 平滑切换"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对键向量自动微分得到成对力",
+      "plain": "在 GradientTape 中只“盯住”键向量，对原子能之和求一次梯度得到每条键上的成对力 f_ij，再把它加到键的终点、从起点减去，得到每个原子的力。这样的力严格保守（能量守恒、声子自洽），且成对力天然满足牛顿第三定律，便于 LAMMPS 区域分解。",
+      "math": "\\mathbf f_{b}=-\\frac{\\partial E}{\\partial \\mathbf r_{b}},\\qquad \\mathbf F_k=\\sum_{b:\\,j_b=k}\\mathbf f_b-\\sum_{b:\\,i_b=k}\\mathbf f_b",
+      "code": [{"repo": "grace-tensorpotential", "file": "tensorpotential/tpmodel.py", "start": 402, "end": 417, "must": "tape.gradient(e_atomic, input_data[constants.BOND_VECTOR])", "caption": "ComputeStructureEnergyAndForcesAndVirial：成对力 → 原子力"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：成对力 ⊗ 键向量的维里",
+      "plain": "既然已经有了每条键上的力，维里就是“成对力 × 键向量”在所有键上的求和，无需额外反传；ASE 计算器再除以体积并取负号得到应力（Voigt 顺序重排）。",
+      "math": "W_{\\alpha\\beta}=\\sum_{b}f_{b,\\alpha}\\,r_{b,\\beta},\\qquad \\boldsymbol\\sigma=-\\frac{\\mathbf W}{V}",
+      "code": [
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/tpmodel.py", "start": 198, "end": 224, "must": "tf.reduce_sum(pair_f * input_data[constants.BOND_VECTOR], axis=0)", "caption": "compute_structure_virials_from_pair_forces"},
+        {"repo": "grace-tensorpotential", "file": "tensorpotential/calculator/asecalculator.py", "start": 1279, "end": 1288, "must": "/ atoms.get_volume()", "caption": "TPCalculator：σ = −W/V"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "rcut", "value": "6.0 Å（1L 函数默认；2L 预设各尺寸均为 6；基础模型 6 Å）", "note": "截断半径（2L 函数签名默认 5.0）", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 355, "end": 370, "must": "rcut: float = 6.0"}},
+    {"name": "basis_type / n_rad_base", "value": "Cheb / 8", "note": "Chebyshev 径向基个数"},
+    {"name": "cutoff_function_order (p)", "value": "5", "note": "多项式包络阶数"},
+    {"name": "径向 MLP", "value": "[64, 64]，tanh", "note": "g_k(r) → R_nl", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 408, "end": 415, "must": "hidden_layers=[64, 64]"}},
+    {"name": "embedding_size", "value": "128", "note": "元素嵌入维度（FS 默认 64）"},
+    {"name": "lmax", "value": "1L: 4；2L: (3,3)，large (4,3)", "note": "球谐最高阶（第一层, 第二层）", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 527, "end": 553, "must": "\"lmax\": [4, 3]"}},
+    {"name": "n_rad_max", "value": "1L: 42（small/medium/large 20/32/48）；2L: (32, 48)", "note": "每层径向通道数"},
+    {"name": "max_order", "value": "4", "note": "乘积阶 → 每层 5 体"},
+    {"name": "indicator_lmax", "value": "1", "note": "2L 层间传递的等变特征最高 L", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 554, "end": 572, "must": "indicator_lmax: int = 1"}},
+    {"name": "n_mlp_dens / 读出 MLP", "value": "1L: 16；2L: 10；隐藏层 [64]", "note": "非线性读出输入维度与宽度", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 504, "end": 510, "must": "hidden_layers=[64],"}},
+    {"name": "fs_parameters（FS）", "value": "((1,1), (1,0.5), (1,2), (1,0.75))", "note": "FS 读出 (c_k, m_k)", "code": {"repo": "grace-tensorpotential", "file": "tensorpotential/potentials/presets.py", "start": 196, "end": 209, "must": "fs_parameters=((1.0, 1.0), (1.0, 0.5), (1.0, 2), (1.0, 0.75))"}},
+    {"name": "参数量（Matbench Discovery）", "value": "1L-OAM 3,447,148；2L-OAM 12,597,516；2L-OAM-L 26,394,284；3L-OAM-L 42,112,223", "note": "来自 matbench-discovery models/grace/*.yml 的 model_params"}
+  ],
+  "speedNotes": [
+    "开销主要在两处：边上的 R·Y·z（A 基，∝ 键数 × 通道 × (l_max+1)²）和节点上的逐通道 CG 乘积（AA/AAA/AAAA）。1L 只有这两步；2L/3L 每层还要在每条键上做一次 R·Y ⊗ I_j 的等变耦合，因此明显更贵（文档：1L 最快、3L 最准）。",
+    "力与应力来自对键向量的一次反传：成对力直接给出原子力，维里只是成对力与键向量的外积求和，几乎无额外成本。",
+    "基础模型默认 fp32（文档称约 2× 速度、一半内存，-fp64 变体用于精细有限差分）；训练与推理默认 XLA jit_compile；ASE 计算器有 uniform（稠密邻居 batched matmul）与 diverse（segment_sum）两种模式并做 padding 以减少重新编译。",
+    "LAMMPS：pair_style grace（TensorFlow SavedModel）、无 TF 的 grace/1l|2l|3l/kk（Kokkos GPU）以及 GRACE/FS 的纯 C++ grace/fs（MPI，文档称面向数百万原子）。"
+  ],
+  "weakNotes": [
+    "截断 6 Å（SMAX 模型 5.0–7.5 Å 元素相关）；1L 的原子能只依赖 6 Å 内原子，2L ≈12 Å、3L ≈18 Å；更远的色散 r⁻⁶ 尾与静电 r⁻¹ 被完全截掉。",
+    "基础模型训练集为 MPtrj / OMat24 / sAlex（PBE/PBE+U 级别）及 SMAX；模型本身不含色散项，仓库也未提供官方 D3 接口，层状 vdW 材料、分子晶体、物理吸附会欠结合，需要用户自行叠加 D3。",
+    "无总电荷/自旋输入、无静电：带电缺陷、离子液体、极性表面/界面电荷转移等长程问题无法正确描述；extra/gen_tensor 中的偶极倒空间 Ewald 求和属于实验性张量拟合代码，不在基础模型中。",
+    "近程可选 ZBL（zbl_cutoff）；UQ 文档的 HAL 主动学习在 LAMMPS 中用 hybrid/overlay zbl 防止原子过近；CALM γ>1 提示外推、结果不可靠。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 多项式包络 → 适合声子与热导：Matbench Discovery κ_SRME（越低越好）GRACE-1L-OAM 0.5166、GRACE-2L-MPtrj 0.5255、GRACE-2L-OAM 0.2943、GRACE-2L-OAM-L 0.1688、GRACE-3L-OAM-L 0.1211。",
+    "稳定性预测（Matbench Discovery 全测试集 F1）：GRACE-1L-OAM 0.808、GRACE-2L-OAM 0.861、GRACE-2L-OAM-L 0.862、GRACE-3L-OAM-L 0.905；仅用 MPtrj 训练的 GRACE-2L-MPtrj 为 0.687。",
+    "几何优化与弹性：TPCalculator 直接给出能量/力/应力（可配合 FrechetCellFilter 做晶胞弛豫）；无原生 Hessian，声子靠有限位移。",
+    "大规模 MD 与主动学习：1L/FS 严格局域适合 LAMMPS 大体系；CALM γ + grace_uq / HAL 偏置 MD 可自动挑选需补算 DFT 的结构；文档称 SMAX 模型面向大应变、相变、复杂合金缺陷与催化反应势垒。"
+  ],
+  "strengths": ["源自完备 ACE 基，每层 5 体 + 非线性读出，精度高", "1L/FS 严格局域，LAMMPS MPI/Kokkos 并行几乎无通信", "化学嵌入使元素数不受限，一套模型覆盖周期表", "内置 CALM 不确定度 γ，便于主动学习", "FS/1L/2L/3L 多档速度–精度可选"],
+  "weaknesses": ["无内置色散与长程静电，无电荷/自旋输入", "2L/3L 半局域，层间通信与边上等变耦合增加开销", "基于 TensorFlow，与 PyTorch 生态互通较弱", "ASL 学术许可，禁止商用", "无原生 Hessian、偶极等扩展输出"],
+  "pretrained": ["GRACE-1L-OMAT-medium / large（-base / -ft-E / -ft-AM）", "GRACE-2L-OMAT-medium / large（-base / -ft-E / -ft-AM）", "GRACE-3L-OMAT-large / GRACE-3L-OMAT-large-ft-AM（仅 fp32）", "GRACE-1L-SMAX-large / GRACE-1L-SMAX-OMAT-large", "GRACE-2L-SMAX-medium / large / GRACE-2L-SMAX-OMAT-medium / large", "旧版小模型（已弃用）：GRACE-1L-OAM、GRACE-2L-OAM、GRACE-1L-OMAT、GRACE-2L-OMAT、GRACE-FS-OAM、GRACE-FS-OMAT"],
+  "mbdKeys": ["grace-1l-oam", "grace-2l-mptrj", "grace-2l-oam", "grace-2l-oam-l", "grace-3l-oam-l"],
+  "arenaKeys": []
+}

@@ -1,0 +1,193 @@
+{
+  "id": "aenet",
+  "name": "ænet",
+  "fullName": "ænet: Atomic Energy NETwork（原子能量神经网络）",
+  "year": 2016,
+  "authors": "N. Artrith, A. Urban（Chebyshev 描述符另有 G. Ceder）",
+  "paper": {"title": "An implementation of artificial neural-network potentials for atomistic materials simulations: Performance for TiO2", "venue": "Comput. Mater. Sci. 114 (2016) 135–150", "url": "http://dx.doi.org/10.1016/j.commatsci.2015.11.047"},
+  "repos": ["aenet"],
+  "family": "descriptor-nn",
+  "tags": ["BPNN 类原子神经网络", "Chebyshev 描述符 (AUC)", "三体不变量", "每元素一个 ANN", "Fortran / 纯 CPU"],
+  "framework": "Fortran 95/2003（BLAS/LAPACK，可选 MPI）；C/Fortran 库 ænetLib；Python/ASE 接口",
+  "license": "MPL-2.0",
+  "oneLiner": "把每个原子周围的径向分布函数和角分布函数各用一组 Chebyshev 多项式展开，展开系数就是“结构指纹”；多元素时再加一份按元素权重 s 加权的副本，指纹长度与元素种类数无关。每种元素一个小前馈网络把指纹映射成原子能，总能 = 原子能之和，力由手写链式法则解析求出。",
+  "analogy": "像把每个原子周围的“邻居距离直方图”和“键角直方图”做一次傅里叶式压缩：不存整张直方图，只存它在一组标准波形（Chebyshev 多项式）上的投影系数；再给不同元素贴上 +1/−1 之类的标签，按标签加权再压一份。最后由该元素专属的小神经网络读这串系数，报出这个原子的能量。",
+  "arch": {
+    "geometry": "r_ij（径向 Chebyshev 展开）+ cos θ_ijk（角向 Chebyshev 展开）；或 Behler G1–G5（距离、夹角、r_jk）",
+    "equivariance": "E(3) 不变：描述符只含距离与夹角余弦，对旋转/平移/同种原子置换不变",
+    "lmax": "无球谐；角向用 Chebyshev T_n(cos θ)，n ≤ angular_N（文档示例 4）",
+    "bodyOrder": "3 体（径向 2 体 + 角向三元组）；ANN 对其做非线性组合，但几何信息不超过三体",
+    "layers": "无消息传递；每元素 1 个前馈 ANN，常用 2 个隐藏层（文档示例 10:twist 10:twist）",
+    "cutoff": "在 .stp 中分别设径向/角向截断；文档示例 8.0 / 6.5 Å，Python 助手默认 4.0 / 4.0 Å",
+    "receptiveField": "= max(radial_Rc, angular_Rc)，单个截断球（示例 8.0 Å）",
+    "message": "无消息；描述符直接对邻居求和：Σ_j f_c·T_n(r_ij)、Σ_{j<k} f_c·f_c·T_n(cos θ)，多元素时再加 typespin 加权副本",
+    "readout": "描述符按训练集均值/标准差标准化 → 元素专属 ANN（tanh/sigmoid/mtanh/twist，输出层线性）→ y/s + μ + E_atom",
+    "forces": "conservative",
+    "forcesDetail": "解析链式法则（无自动微分）：描述符求值时同时算 ∂G/∂r，再乘 ANN 逐层 Jacobian diag(f')·W 得到 ∂E/∂G",
+    "stress": "未实现：predict.x / ænetLib 只给能量与力，ASE 计算器 implemented_properties 仅 energy、forces",
+    "longRange": "无（严格局域，无静电/Ewald 模块）",
+    "dispersion": "无内置色散项，仓库未提供 D3 接口；只能从训练数据在截断内隐式学到",
+    "chargeSpin": "无总电荷/自旋输入；sfbasis 中的 typespin 只是元素编码权重，不是物理自旋",
+    "otherOutputs": "原子能（print_atomic_energies）、内聚能 E_coh；可由 Chebyshev 系数重构 RDF/ADF（sfb_reconstruct_*）",
+    "strictlyLocal": true,
+    "complexity": "描述符 O(N·(M·n_r + M²·n_a))（角向遍历邻居对）+ 小 MLP O(N·H²)；描述符长度与元素种类数无关",
+    "accel": "纯 CPU Fortran + BLAS/LAPACK；predict.x 用 MPI 按原子轮转分配；ænetLib C/Fortran API、ASE 计算器；无 GPU 内核"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "固定描述符 + 每元素小 MLP，属于最便宜的一类；但只有 CPU 实现，角向三元组循环 ∝ M²，没有压缩或 GPU 内核。"},
+    "expressiveness": {"v": 2, "why": "几何信息只到三体（距离 + 键角），多元素被压缩成“不加权 + typespin 加权”两份，远不及高体序/等变模型。"},
+    "longRange": {"v": 1, "why": "严格局域，没有任何色散、静电或电荷模块，也没有官方外挂。"},
+    "scalability": {"v": 3, "why": "严格局域、可按原子并行，但 predict.x 是复制数据式 MPI（每进程持有完整结构），仓库内无 LAMMPS 区域分解接口与 GPU 支持。"},
+    "physics": {"v": 4, "why": "保守解析力、余弦平滑截断、原子能求和保证广延性、描述符严格不变；但无 ZBL 等近程排斥先验，余弦截断仅 C¹ 连续。"},
+    "coverage": {"v": 1, "why": "官方只输出能量（含原子能/内聚能）与力，没有应力、Hessian、电荷、偶极等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：晶格、坐标、元素",
+      "plain": "predict.x 从 XSF 文件读入晶格矢量、（分数）坐标、元素类型以及是否周期性。核心例程 get_energy 一次性返回总能、内聚能，以及可选的力和每个原子的原子能。这里没有任何“可求导张量”的准备——ænet 的所有导数都是手写的解析式。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf A\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{\\text{T},\\text{F}\\}",
+      "code": [{"repo": "aenet", "file": "src/predict.F90", "start": 595, "end": 608, "must": "subroutine get_energy(latticeVec, nAtoms, cooLatt, atomType", "caption": "get_energy：输入晶格、坐标、元素、pbc；输出 Ecoh、Etot、力与原子能"}]
+    },
+    {
+      "stage": "graph",
+      "title": "近邻：每个原子截断球内的所有邻居（含周期镜像）",
+      "plain": "对每个原子，用自带的近邻表模块 lclist 找出最大截断 R_c^max（径向与角向截断中的较大者）内的全部邻居坐标与元素，包括周期镜像。注意这不是“边列表 + 消息传递”：每个原子只拿自己截断球里的邻居，独立算自己的能量，这就是“严格局域”。MPI 并行时，原子按序号轮流分给各进程。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j+\\mathbf A\\,\\mathbf T-\\mathbf r_i\\rVert\\le R_c^{\\max}\\,\\},\\qquad R_c^{\\max}=\\max(R_c^{\\text{rad}},R_c^{\\text{ang}})",
+      "code": [
+        {"repo": "aenet", "file": "src/predict.F90", "start": 650, "end": 661, "must": "call lcl_nbdist_cart(iatom, nnb, nbcoo, nbdist, aenet_Rc_max", "caption": "原子循环：按 MPI 进程分配原子，取截断内邻居"},
+        {"repo": "aenet", "file": "src/ext/lclist.f90", "start": 618, "end": 655, "must": "! in periodic images:", "caption": "lcl_nbdist_cart：本胞与周期镜像中的邻居坐标"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "截断函数：余弦平滑截断",
+      "plain": "每个邻居的贡献都乘以 f_c(r)=½[cos(πr/R_c)+1]。它在 r=R_c 处值和一阶导都为 0，所以邻居进出截断球时能量和力都连续变化。Chebyshev 描述符与 Behler 对称函数用的是同一个余弦形式（两个模块各写了一份）。",
+      "math": "f_c(r)=\\tfrac12\\big[\\cos(\\pi r/R_c)+1\\big]\\ \\ (r<R_c),\\qquad f_c(r)=0\\ \\ (r\\ge R_c)",
+      "code": [
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 719, "end": 732, "must": "0.5d0*(cos(PI/Rc*Rij) + 1.0d0)", "caption": "sfb_fc：Chebyshev 描述符的余弦截断"},
+        {"repo": "aenet", "file": "src/ext/symmfunc.f90", "start": 823, "end": 838, "must": "0.5d0*(cos(PI*Rij/Rc) + 1.0d0)", "caption": "sf_cut：Behler 对称函数的同一截断及其导数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符①：径向分布函数的 Chebyshev 展开（2 体）",
+      "plain": "把距离 r∈[0,R_c] 线性映射到 x∈[−1,1]，用递推 T_{n+1}=2xT_n−T_{n−1} 求出 n=0…N 的 Chebyshev 多项式，乘以截断函数后对所有邻居求和。得到的 N+1 个系数就是“径向分布函数（RDF）在 Chebyshev 基上的投影”，代码里还提供由系数重构 RDF 的函数。导数 ∂/∂r 也在同一处解析算出，供后面求力。",
+      "math": "c^{(2)}_{i,n}=\\sum_{j\\in\\mathcal N(i)}T_n\\!\\Big(\\tfrac{2r_{ij}}{R_c^{\\text{rad}}}-1\\Big)f_c(r_{ij}),\\ \\ n=0,\\dots,N_{\\text{rad}};\\qquad T_{n+1}(x)=2xT_n(x)-T_{n-1}(x)",
+      "code": [
+        {"repo": "aenet", "file": "src/ext/chebyshev.f90", "start": 51, "end": 75, "must": "T(i) = 2.0d0*x*T(i-1) - T(i-2)", "caption": "chebyshev_polynomial：区间缩放 + 三项递推"},
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 777, "end": 791, "must": "values(1:sfb%r_N) = w_ij*f(1:sfb%r_N)", "caption": "sfb_radial：f_c·T_n 及其对 r_i、r_j 的解析导数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符②：角分布函数的 Chebyshev 展开（3 体）",
+      "plain": "对角向截断内的每一对邻居 (j<k)，算出键角余弦 cos θ_ijk，用 T_n(cos θ) 展开，再乘两条边的截断函数 f_c(r_ij)f_c(r_ik) 后求和，相当于把键角分布函数（ADF）压缩成几个系数。因为要遍历邻居对，代价 ∝ 邻居数平方，所以角向截断和阶数通常比径向小。",
+      "math": "c^{(3)}_{i,n}=\\sum_{j<k}T_n(\\cos\\theta_{ijk})\\,f_c(r_{ij})\\,f_c(r_{ik}),\\qquad \\cos\\theta_{ijk}=\\frac{\\mathbf r_{ij}\\cdot\\mathbf r_{ik}}{r_{ij}\\,r_{ik}},\\ \\ n=0,\\dots,N_{\\text{ang}}",
+      "code": [
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 526, "end": 547, "must": "cos_ijk = dot_product(R_ij, R_ik)/(d_ij*d_ik)", "caption": "sfb_eval：k>j 的邻居对循环"},
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 821, "end": 827, "must": "values(1:sfb%a_N) = w_ijk*f", "caption": "sfb_angular：f_c(r_ij)·f_c(r_ik)·T_n(cos θ)"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "多元素：再加一份按元素权重 s 加权的副本",
+      "plain": "只做上面的求和，模型分不清邻居是 Ti 还是 O。Artrith–Urban–Ceder 的办法是给每种元素一个整数权重 s（T 种元素取 −⌊T/2⌋…⌊T/2⌋，T 为偶数时跳过 0，例如二元体系 s=±1），再算一份径向项乘 s_j、角向项乘 s_j·s_k 的加权系数。这样描述符长度只是单元素情形的 2 倍，与元素种类数无关——这是它相对 Behler 对称函数（个数随元素对/三元组增长）的主要优势。",
+      "math": "\\mathbf G_i=\\big[c^{(2)}_i,\\,c^{(3)}_i,\\,\\tilde c^{(2)}_i,\\,\\tilde c^{(3)}_i\\big],\\quad \\tilde c^{(2)}_{i,n}=\\sum_j s_{Z_j}T_n f_c,\\quad \\tilde c^{(3)}_{i,n}=\\sum_{j<k}s_{Z_j}s_{Z_k}T_n(\\cos\\theta_{ijk})f_cf_c",
+      "code": [
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 126, "end": 147, "must": "sfb%typespin(i) = dble(s)", "caption": "new_SFBasis：多元素时维度 ×2，并分配元素权重 typespin"},
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 509, "end": 522, "must": "s_j = sfb%typespin(sfb%typeid(itype1(j)))", "caption": "径向加权副本 s_j·f_c·T_n"},
+        {"repo": "aenet", "file": "src/ext/sfbasis.f90", "start": 550, "end": 556, "must": "s_j*s_k*sfb_values(1:N)", "caption": "角向加权副本 s_j·s_k·f_c·f_c·T_n"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "可选描述符：Behler–Parrinello 对称函数 G1–G5",
+      "plain": "在 .stp 文件里写 FUNCTIONS type=Behler2011 可改用经典的原子中心对称函数：径向 G2 是以 R_s 为中心的高斯乘截断函数，角向 G4 是 (1+λcos θ)^ζ 角度项乘三条边的高斯与截断函数。每个函数都要单独指定元素对/三元组与参数，所以多元素时数量增长很快。setup 层按 sftype 在两种描述符之间分派。",
+      "math": "G^{2}_i=\\sum_j e^{-\\eta(r_{ij}-R_s)^2}f_c(r_{ij}),\\qquad G^{4}_i=2\\sum_{j<k}\\Big[\\tfrac{1+\\lambda\\cos\\theta_{ijk}}{2}\\Big]^{\\zeta}e^{-\\eta(r_{ij}^2+r_{ik}^2+r_{jk}^2)}f_c(r_{ij})f_c(r_{ik})f_c(r_{jk})",
+      "code": [
+        {"repo": "aenet", "file": "src/sfsetup.f90", "start": 930, "end": 951, "must": "case('behler2011')", "caption": "stp_eval：chebyshev / behler2011 两种描述符分派"},
+        {"repo": "aenet", "file": "src/ext/symmfunc.f90", "start": 511, "end": 517, "must": "fexp = exp(-eta*arg*arg)", "caption": "sf_G2_ij：高斯径向函数"},
+        {"repo": "aenet", "file": "src/ext/symmfunc.f90", "start": 709, "end": 724, "must": "F1*F2ij*F2ik*F2jk", "caption": "sf_G4_update：角向 G4（含 k<j 的因子 2）"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：标准化指纹 → 元素专属前馈网络",
+      "plain": "每个描述符分量先用训练集统计量标准化（减均值、除以标准差），让各分量量级相当。然后送进中心原子所属元素的全连接网络：隐藏层可选 tanh、sigmoid、mtanh（1.7159·tanh(2x/3)）或 twist（mtanh + 0.1x），默认输出层为线性。网络很小（如 2×10 个隐藏节点），这是 ænet 便宜的根本原因。",
+      "math": "\\tilde G_{\\alpha}=\\frac{G_{\\alpha}-\\langle G_{\\alpha}\\rangle}{\\sigma_{\\alpha}},\\qquad \\mathbf h^{(l)}=f_a\\big(W^{(l)}\\mathbf h^{(l-1)}+\\mathbf b^{(l)}\\big),\\qquad y_i=W^{(\\text{out})}\\mathbf h^{(L)}+b^{(\\text{out})}",
+      "code": [
+        {"repo": "aenet", "file": "src/sfsetup.f90", "start": 1005, "end": 1033, "must": "sfval(isf) = scale*(sfval(isf)-shift)", "caption": "stp_normalize：按均值/标准差标准化指纹及其导数"},
+        {"repo": "aenet", "file": "src/ext/feedforward.f90", "start": 623, "end": 655, "must": "reshape(net%W(iw1:iw2), Wshape)", "caption": "ff_eval：逐层 W·[h;1] → 激活"},
+        {"repo": "aenet", "file": "src/ext/feedforward.f90", "start": 960, "end": 997, "must": "a*tanhbx + c*x", "caption": "ff_activate：linear / tanh / sigmoid / mtanh / twist"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "能量：原子能求和（并给出内聚能）",
+      "plain": "网络输出 y_i 先反归一化（除以训练时的能量缩放 s、加平移 μ），再加回训练前扣掉的该元素原子参考能 E_atom，得到原子能 E_i。总能是所有原子能之和，保证广延性；predict.x 同时报告内聚能 E_coh = Σ(E_i − E_atom)。势文件把网络、描述符设置（含标准化统计）和训练集信息打包在一起。",
+      "math": "E_i=\\frac{y_i}{s}+\\mu+E^{\\text{atom}}_{Z_i},\\qquad E_{\\text{tot}}=\\sum_i E_i,\\qquad E_{\\text{coh}}=\\sum_i\\big(E_i-E^{\\text{atom}}_{Z_i}\\big)",
+      "code": [
+        {"repo": "aenet", "file": "src/aenet.f90", "start": 431, "end": 437, "must": "aenet_pot(type_i)%E_scale*E_i_arr(1) + aenet_pot(type_i)%E_shift", "caption": "aenet_atomic_energy：描述符 → ANN → 反归一化 + E_atom"},
+        {"repo": "aenet", "file": "src/potential.f90", "start": 142, "end": 152, "must": "1.0d0/pot%ts%scale", "caption": "load_NNPot：网络、setup、训练集信息与 E_scale/E_shift/E_atom"},
+        {"repo": "aenet", "file": "src/predict.F90", "start": 691, "end": 700, "must": "Ecoh = Ecoh + E_i - aenet_free_atom_energy(type_i)", "caption": "累加总能与内聚能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：手写链式法则的解析导数",
+      "plain": "ænet 不用自动微分：计算描述符时同时得到 ∂G/∂r_i（中心原子）和 ∂G/∂r_j（每个邻居）；网络端由 ff_deriv 把各层“激活导数对角阵 × 权重矩阵”连乘得到 ∂y/∂G，两者相乘再乘 1/s 就是力。原子 i 的能量也依赖邻居坐标，所以力会累加到邻居 j 上。predict.F90 还有 CHECK_FORCES 编译开关，用中心差分核对解析力。",
+      "math": "\\mathbf F_k=-\\sum_i\\frac{1}{s}\\sum_{\\alpha}\\frac{\\partial y_i}{\\partial\\tilde G_{i\\alpha}}\\frac{\\partial\\tilde G_{i\\alpha}}{\\partial\\mathbf r_k},\\qquad \\frac{\\partial y}{\\partial\\tilde{\\mathbf G}}=D^{(L)}W^{(L)}\\cdots D^{(1)}W^{(1)},\\ \\ D^{(l)}=\\mathrm{diag}(f_a')",
+      "code": [
+        {"repo": "aenet", "file": "src/aenet.f90", "start": 497, "end": 514, "must": "matmul(sfderiv_j(1:3,1:nsf,j), dE_dG(1:nsf))", "caption": "aenet_atomic_energy_and_forces：F = −E_scale·(∂G/∂r)·(∂E/∂G)，同时加到中心原子与邻居"},
+        {"repo": "aenet", "file": "src/ext/feedforward.f90", "start": 745, "end": 770, "must": "temp_jacobian(:,:) = matmul(temp_diag, temp_weight)", "caption": "ff_deriv：逐层 diag(f')·W 连乘得 ∂y/∂G"},
+        {"repo": "aenet", "file": "src/predict.F90", "start": 667, "end": 690, "must": "(E_i2 - E_i1)/(2.0d0*d)", "caption": "CHECK_FORCES：中心差分校验解析力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "输出：能量、力、原子能；可做定胞弛豫",
+      "plain": "官方接口（predict.x、ænetLib、ASE 计算器）只提供能量与力，ASE 的 implemented_properties 里只有 energy 和 forces，没有应力。predict.x 可以用力做结构弛豫，但优化变量只有 3N 个原子坐标（晶胞固定）。",
+      "math": "\\{E_{\\text{tot}},\\,E_{\\text{coh}},\\,E_i,\\,\\mathbf F_i\\}\\qquad(\\text{no stress, no Hessian})",
+      "code": [
+        {"repo": "aenet", "file": "python3/aenet/ase_calculator.py", "start": 28, "end": 38, "must": "self.calculate_energy_and_forces", "caption": "ANNCalculator：只实现 energy / forces"},
+        {"repo": "aenet", "file": "src/predict.F90", "start": 236, "end": 251, "must": "call opt_init(inp%relax_method, 3*nAtoms", "caption": "结构弛豫：只优化 3N 个坐标"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "radial_Rc / radial_N", "value": "8.0 Å / 16（文档 TiO2 示例）", "note": "径向截断与 Chebyshev 展开阶数（得到 N+1 个函数）", "code": {"repo": "aenet", "file": "doc/aenet-doc.md", "start": 670, "end": 691, "must": "angular_Rc = 6.5"}},
+    {"name": "angular_Rc / angular_N", "value": "6.5 Å / 4（同一示例）", "note": "角向截断与展开阶数；角向遍历邻居对，取得比径向小"},
+    {"name": "描述符维度", "value": "(radial_N + angular_N + 2) × 2（多元素）；示例 (16+4+2)×2 = 44", "note": "与元素种类数无关", "code": {"repo": "aenet", "file": "src/sfsetup.f90", "start": 1122, "end": 1130, "must": "stp%nsf = r_N + a_N + 2"}},
+    {"name": "Python 助手默认", "value": "radial_rc=4.0, radial_n=6, angular_rc=4.0, angular_n=2", "note": "chebyshev_basis() 的默认参数", "code": {"repo": "aenet", "file": "python3/aenet/aenet.py", "start": 125, "end": 152, "must": "def chebyshev_basis(aenet, radial_rc=4.0, radial_n=6,"}},
+    {"name": "RMIN", "value": "0.75", "note": "允许的最小原子间距（近邻表用），文档示例与 generate_setup 默认", "code": {"repo": "aenet", "file": "python3/aenet/aenet.py", "start": 155, "end": 160, "must": "rmin=0.75"}},
+    {"name": "隐藏层 × 节点 : 激活", "value": "2 × 10 : twist（文档 train.in 示例）；模板为 2 × 5 : tanh", "note": "每元素一个网络，输出层默认线性", "code": {"repo": "aenet", "file": "doc/aenet-doc.md", "start": 1080, "end": 1095, "must": "10:twist 10:twist"}},
+    {"name": "激活函数常数", "value": "mtanh = 1.7159·tanh(0.6667x)；twist = mtanh + 0.1x", "note": "另有 linear / tanh / sigmoid", "code": {"repo": "aenet", "file": "src/ext/feedforward.f90", "start": 969, "end": 991, "must": "a = 1.7159d0"}},
+    {"name": "训练算法 METHOD", "value": "示例 lm（batchsize=5000, learnrate=0.1, iter=3, conv=0.001, adjust=5.0）；可选 bfgs / ekf / online_sd / adam", "note": "Fortran train.x 只拟合每原子能量", "code": {"repo": "aenet", "file": "src/optimize.f90", "start": 424, "end": 446, "must": "case('adam')"}},
+    {"name": "TESTPERCENT / ITERATIONS", "value": "10 % / 500（文档 train.in 示例）", "note": "留出测试集比例与训练迭代数"},
+    {"name": "原子参考能 E_atom", "value": "孤立原子能（TiO2 示例）或数据集平均原子能", "note": "训练前从总能中扣除；用孤立原子能时目标即内聚能", "code": {"repo": "aenet", "file": "doc/aenet-doc.md", "start": 859, "end": 875, "must": "corresponds to the *cohesive energy*"}}
+  ],
+  "speedNotes": [
+    "每个原子的开销 = 描述符 + 一个很小的 MLP（示例输入 44 维、2×10 隐藏节点）。描述符中角向部分要遍历截断内的邻居对 (j<k)，代价 ∝ M²，是主要热点；文档示例也把角向截断（6.5 Å）设得比径向（8.0 Å）小。",
+    "Chebyshev 描述符长度只取决于展开阶数（多元素时 ×2），与元素种类数无关；Behler G2/G4 的个数则随元素对/三元组数增长，多组分体系的输入层和描述符计算都会迅速变大。",
+    "力不靠自动微分：算描述符时顺带得到 ∂G/∂r（每个原子一个 3×n_G×M 的数组），再乘网络的逐层 Jacobian，因此算力的额外开销与能量同量级。",
+    "纯 CPU Fortran：predict.x 用 MPI 把原子轮流分给各进程（每个进程持有完整结构，最后 pp_sum 求和），没有 GPU 内核、模型压缩或查表加速；ASE 计算器在 Python 中逐原子调用 ænetLib，开销更大。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖 max(径向, 角向) 截断球内的原子（示例 8 Å），没有消息传递，截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 全部缺失。",
+    "没有内置色散、静电、Ewald，也没有总电荷/自旋输入；sfbasis 中的 typespin 只是给元素打的整数权重，不代表物理电荷或自旋。",
+    "ænet 不带通用训练集或基础模型，泛函完全由用户数据决定；若参考数据是 PBE，层状 vdW 材料、分子晶体、物理吸附的结合会明显不足，需要在数据层面用含色散的泛函或在外部程序叠加 D3（仓库不提供）。",
+    "多元素信息被压缩成“不加权 + typespin 加权”两份，元素分辨率有限；带电缺陷、离子液体、界面电荷转移等依赖长程静电的体系不适合直接使用。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 余弦截断（f_c 与 f_c′ 在 r_c 处为 0）→ 力连续，NVE MD 能量守恒；文档定位就是大尺度 MD 与蒙特卡洛采样，并附 ASE 计算器与 aenet-md.py 示例脚本。",
+    "predict.x 可做结构弛豫，但只优化原子坐标（优化器自由度为 3·nAtoms）；没有应力，所以不能直接做变胞弛豫、NPT 或弹性常数，需在外部对应变做有限差分。",
+    "没有解析 Hessian：声子需对解析力做有限位移；余弦截断的二阶导在 r_c 处不连续，力常数对截断附近的原子可能有小误差。",
+    "Fortran train.x 只拟合每原子能量（源码注明力项 not yet implemented）；力匹配训练需导出数据给 aenet-PyTorch（pyo_forces 选项），这对 MD 稳定性和力精度很关键。"
+  ],
+  "strengths": ["描述符 + 小 MLP，CPU 上每原子开销很低", "Chebyshev 描述符长度与元素种类数无关，适合多组分体系", "严格局域、解析力，代码简洁并提供 C/Fortran 库 ænetLib 便于嵌入其他程序", "同时支持 Chebyshev 与 Behler 对称函数，训练算法多样（LM / BFGS / EKF / Adam / SD）"],
+  "weaknesses": ["几何信息只到三体，元素信息高度压缩，表达力不及现代 MPNN/等变模型", "无应力、无 Hessian、无长程静电/色散、无电荷/自旋输入", "无 GPU 加速，仓库内无 LAMMPS 区域分解接口", "Fortran 训练只拟合能量，力训练需 aenet-PyTorch；无预训练模型"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

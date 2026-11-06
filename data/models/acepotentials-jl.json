@@ -1,0 +1,205 @@
+{
+  "id": "acepotentials-jl",
+  "name": "ACEpotentials.jl",
+  "fullName": "ACEpotentials.jl：原子团簇展开（ACE）线性势的 Julia 实现",
+  "year": 2023,
+  "authors": "W. C. Witt, C. van der Oord, E. Gelžinyté, …, G. Csányi, C. Ortner",
+  "paper": {"title": "ACEpotentials.jl: A Julia Implementation of the Atomic Cluster Expansion", "venue": "J. Chem. Phys. 159, 164101 (2023)", "url": "https://doi.org/10.1063/5.0158783"},
+  "repos": ["ACEpotentials.jl"],
+  "family": "linear-kernel",
+  "tags": ["线性 ACE", "完备多体基", "BLR + 平滑先验", "委员会不确定度", "严格局域", "Julia"],
+  "framework": "Julia（EquivariantTensors.jl / Polynomials4ML / ACEfit.jl；可经 juliac 导出 C 库供 LAMMPS、ASE 调用）",
+  "license": "MIT",
+  "oneLiner": "线性 ACE：把每个原子周围的邻居“密度”投影到“径向多项式 × 球谐函数”上（A 基），再把 A 基乘到 ν 阶并耦合成旋转不变的多体基（B 基）；能量就是这些基函数再加一个两体对势的线性组合，系数用带平滑先验的贝叶斯线性回归一次解出，而不是用梯度下降训练神经网络。",
+  "analogy": "像做一道“配方菜”：先把每位邻居按“多远、朝哪个方向”登记成标准化的配料清单（A 基）；再把配料两两、三三……组合成所有可能的“搭配”（B 基，对应多体关联）；最后只需给每种搭配定一个“用量”（线性系数），用最小二乘一次算好。因为模型对系数是线性的，训练就像解一个大线性方程组，而不是反复迭代地训练神经网络。",
+  "arch": {
+    "geometry": "邻居向量 r_ij：距离经 Agnesi 变换归一到 x∈[−1,1]，展开为 Jacobi 多项式 ×(1−x²)² 包络；方向用实球谐 Y_l^m",
+    "equivariance": "严格旋转/反演/置换不变：B 基只取 L=0 的 CG 耦合，对邻居求和保证置换不变",
+    "lmax": "无固定上限，由稀疏总次数决定：Σ(n′+w_L·l) ≤ totaldegree（w_L 默认 1.5）",
+    "bodyOrder": "相关阶 ν=order（用户指定，教程 3 → 4 体）+ 独立两体对势 + 一体 E0",
+    "layers": "无（单次线性展开，无隐藏层、无消息传递）",
+    "cutoff": "默认 2.5×r0（r0 为元素对典型键长，查表），各元素对取最大值；也可直接给数值（教程 5.5 Å）",
+    "receptiveField": "= r_cut（严格局域）",
+    "message": "无消息传递；A=Σ_j R_nl·Y_lm（密度投影）→ AA=A 的 ν 阶稀疏乘积 → B=A2B 耦合（L=0）",
+    "readout": "线性：E_i = c(Z_i)·B_i + w(Z_i)·Σ_j P^pair(r_ij) + E0(Z_i)；不同于 PACE 的 Finnis–Sinclair 型非线性嵌入",
+    "forces": "conservative",
+    "forcesDetail": "F=−∂E/∂R：evaluate_ed 前向求 R_nl、Y_lm 的导数，再经 EquivariantTensors.pullback 手写反传；设计矩阵的力行用 ForwardDiff.jacobian",
+    "stress": "位力 W=−Σ_i Σ_j (∂E_i/∂r_ij)⊗r_ij（_site_virial），应力 σ=−W/V（ASE 接口）",
+    "longRange": "无内置长程项；ETModels 的 StackedCalculator 可叠加用户提供的库仑/色散计算器",
+    "dispersion": "无内置 D3；截断内的色散只能从训练数据隐式学到",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "委员会能量/力（BLR 后验样本）、Hessian（自动微分）、逐基函数 E/F/V（可作描述符）",
+    "strictlyLocal": true,
+    "complexity": "推理 O(N·M·|R_nl| + N·|AA|)，对 N 线性；|AA| 随 ν、totaldegree 与元素数 N_Z 组合增长；拟合需组装 Σ(1+3N+6) × N_basis 设计矩阵",
+    "accel": "Julia 多线程（Folds + ChunkSplitters 按原子分块）、径向基三次样条查表；juliac 导出 C 共享库 → LAMMPS pair_style ace 插件（OpenMP）与 ASE 计算器"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "线性模型：每个原子只做一次样条查表、球谐、A 基求和、稀疏乘积和点积，无神经网络、无多层消息传递，与 SNAP/NEP 同属最快一档。"},
+    "expressiveness": {"v": 4, "why": "基在 ν、totaldegree 增大时系统地趋于完备，体序可调；但只是固定径向基上的线性组合，多元素时基数暴涨，实际容量低于可学习的 MACE 类模型。"},
+    "longRange": {"v": 1, "why": "严格局域，没有色散、静电或电荷项，也没有官方外挂。"},
+    "scalability": {"v": 4, "why": "严格局域、按原子分块并行，可导出到 LAMMPS（MPI + OpenMP）做空间分解；但没有 GPU 内核，导出链路较新。"},
+    "physics": {"v": 4, "why": "保守力、截断处 C¹ 平滑、严格对称、能量按原子分解；近程排斥靠 r⁻ᵖ 对势包络、可选 ZBL 或排斥约束，线性拟合本身不保证。"},
+    "coverage": {"v": 2, "why": "官方输出为能量/力/位力，另有委员会不确定度和自动微分 Hessian；没有偶极、电荷、磁矩等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：构型 + 少量超参数（ace1_model）",
+      "plain": "输入是原子坐标、元素、晶胞与周期性（AtomsBase 体系）。与神经网络不同，线性 ACE 的“结构”完全由少数超参数决定：元素列表、相关阶 order（ν）、总多项式次数 totaldegree、截断 rcut、孤立原子参考能 Eref、是否加 ZBL 等。ace1_model 用这些参数一次性生成全部基函数，之后需要学习的只剩线性系数。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C,\\ \\text{pbc}\\qquad \\text{hypers}=\\big(\\{Z\\},\\ \\nu,\\ D_{\\text{tot}},\\ w_L,\\ r_{\\text{cut}},\\ E_{\\text{ref}}\\big)",
+      "code": [{"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":rcut => (:bondlen, 2.5)", "caption": "ace1_model 的默认超参数：截断 2.5×键长、Agnesi(2,4) 变换、(:x,2,2) 包络、对势 (:r,2) 包络、ZBL 默认关闭"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：截断球内的所有邻居",
+      "plain": "用 AtomsCalculatorsUtilities 的 PairList 建邻居表（含周期镜像），截断半径取所有元素对 r_cut 的最大值。每个原子 i 只拿到截断球内邻居的相对位移 R_ij、邻居元素 Z_j 和自身元素 z0——这就是“严格局域”：原子能只依赖这一小团原子，所以总代价随原子数线性增长。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ r_{ij}=\\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_{\\text{cut}}\\,\\},\\qquad r_{\\text{cut}}=\\max_{Z,Z'}r_{\\text{cut}}^{ZZ'}",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/calculators.jl", "start": 74, "end": 77, "must": "maximum(x.rcut for x in V.model.rbasis.rin0cuts)", "caption": "cutoff_radius：取所有元素对截断的最大值"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/calculators.jl", "start": 124, "end": 127, "must": "get_neighbours(at, V, nlist, i)", "caption": "逐原子取邻居 (Js, Rs, Zs, z0)"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "径向：Agnesi 距离变换 → 正交多项式 × 包络",
+      "plain": "距离 r 先经广义 Agnesi 变换 y(r)，再线性归一化到 x∈[−1,1]（r_in→−1，r_cut→+1），使分辨率集中在典型键长 r0 附近。然后在 x 上展开正交多项式 P_q(x) 并乘包络 (1+x)²(1−x)²，基函数在截断处连同一阶导数平滑归零（力连续）。每个元素对 (Z_i,Z_j) 有各自的 r0、变换与系数矩阵 W。",
+      "math": "y(r)=\\frac{1}{1+a\\,s^{q}/(1+s^{q-p})},\\ s=\\frac{r-r_{\\text{in}}}{r_0-r_{\\text{in}}};\\quad x=-1+2\\,\\frac{y(r)-y(r_{\\text{in}})}{y(r_{\\text{cut}})-y(r_{\\text{in}})};\\qquad R^{Z_iZ_j}_{nl}(r)=\\sum_q W^{Z_iZ_j}_{nl,q}\\,P_q(x)\\,(1+x)^2(1-x)^2",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/radial_transforms.jl", "start": 25, "end": 32, "must": "return 1 / (1 + a * s^q / (1 + s^(q-p)))", "caption": "广义 Agnesi 变换"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/radial_envelopes.jl", "start": 75, "end": 85, "must": "return s * (x-x1)^p1 * (x2-x)^p2", "caption": "PolyEnvelope2sX：x 空间双侧多项式包络，(:x,2,2) 即 (1−x²)²"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/Rnl_learnable.jl", "start": 113, "end": 124, "must": "Rnl[:] .= Wij * (P .* e)", "caption": "R_nl = W(Z_i,Z_j)·[P(x)·env]"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "元素通道：Jacobi 基 + 邻居元素 one-hot + 样条化",
+      "plain": "ace1_model 沿用 ACE1 的约定：多项式取 Jacobi(α=β=4)，使 P_q 在权重 env(x)² 下正交，数值更稳定。径向通道 n 实际编码“(多项式阶 n′, 邻居元素 z′)”，系数 W 按 one-hot 设定且不参与拟合，于是每个元素对各有一套独立的径向函数。最后把每个元素对的 R_nl 在 x∈[−1,1] 上用 100 个节点的三次样条表格化，推理时只需查表。",
+      "math": "n\\leftrightarrow(n',z'):\\ R^{Z_iZ_j}_{nl}(r)=P_{n'}(x)\\,\\mathrm{env}(x)\\,\\delta_{z'Z_j},\\qquad \\int_{-1}^{1}P_p(x)P_q(x)\\,\\mathrm{env}(x)^2\\,dx=\\delta_{pq}",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 255, "end": 285, "must": "polys = (:jacobi, Float64(2*pin), Float64(2*pcut))", "caption": "包络并入正交性 → Jacobi 基，随后 splinify"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/Rnl_learnable.jl", "start": 83, "end": 102, "must": "z_ = mod1(nl.n, NZ)", "caption": "set_onehot_weights!：n ↔ (n′, z′) 的 one-hot 编码"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/Rnl_basis.jl", "start": 74, "end": 104, "must": "cubic_spline_interpolation(x_nodes, Rnl)", "caption": "splinify：三次样条表格化（默认 100 节点）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "A 基：邻居密度投影到 R_nl·Y_lm 上",
+      "plain": "对每个邻居计算实球谐 Y_l^m(r̂_ij)（ace1_model 使用 Ytype=:spherical），与径向 R_nl 相乘后对所有邻居求和，得到原子基 A_{nlm}。这是 ACE 的“密度技巧”：先把对邻居的求和做掉，后面的多体乘积只在 A 上进行，所以代价对邻居数 M 是线性的，而不是 M 的 ν 次方。",
+      "math": "A_{i,nlm}=\\sum_{j\\in\\mathcal N(i)}R^{Z_iZ_j}_{nl}(r_{ij})\\,Y_l^m(\\hat{\\mathbf r}_{ij})",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 44, "end": 52, "must": "return real_sphericalharmonics(lmax)", "caption": "_make_Y_basis：实球谐（或实立体谐）"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 262, "end": 275, "must": "EquivariantTensors.evaluate(model.tensor, Rnl, Ylm, NamedTuple(), NamedTuple())", "caption": "evaluate：R_nl、Y_lm → 稀疏等变张量 → 不变量 B"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "B 基：A 的 ν 阶乘积 + CG 耦合 → 旋转不变多体基",
+      "plain": "把 A 基两两、三三……自乘到 ν=order 阶（AA 基，相当于中心原子 + ν 个邻居的 ν+1 体关联），再用广义 Clebsch–Gordan 系数把 m 耦合成总角动量 L=0 的不变量 B。基函数不全取：只保留总次数 Σ(n′+w_L·l) ≤ totaldegree 且能耦合成 L=0 的组合（稀疏 total-degree 基），这是 ACE 的精度—代价旋钮。EquivariantTensors.sparse_equivariant_tensor 一次生成 A 基、AA 稀疏乘积与 A2B 耦合矩阵。",
+      "math": "\\mathbf{AA}_{i,\\mathbf{nlm}}=\\prod_{t=1}^{\\nu}A_{i,n_tl_tm_t},\\qquad B_{i,k}=\\sum_{\\mathbf m}\\mathcal C^{k}_{\\mathbf{nlm}}\\,\\mathbf{AA}_{i,\\mathbf{nlm}},\\qquad \\sum_{t}\\Big(\\frac{n_t}{N_Z}+w_L\\,l_t\\Big)\\le D_{\\text{tot}}",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 95, "end": 114, "must": "EquivariantTensors.sparse_equivariant_tensor(", "caption": "只构造 L=0（不变）输出的稀疏 ACE 张量"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/utils.jl", "start": 115, "end": 132, "must": "admissible = bb -> (length(bb) == 0) || (level(bb) <= max_levels[length(bb)])", "caption": "sparse_AA_spec：按 level 截断 + L=0 选择规则生成 AA 基"},
+        {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 86, "end": 105, "must": "return Models.TotalDegree(1.0*NZ, 1/wL), maxlevels", "caption": "ACE1 兼容的 total degree：level = n/N_Z + w_L·l"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "位点能：多体基 + 两体对势 + E0 的线性组合",
+      "plain": "每个原子的能量是 B 基与中心元素对应系数 c(Z_i) 的点积；另有一套只依赖距离的对势基（Legendre 多项式 × 对势包络，对邻居求和）给出两体项；再加上孤立原子参考能 E0（Eref）。总能是所有位点能之和，天然广延。整个模型对参数 (WB, Wpair) 严格线性，这正是可以用线性回归拟合的原因。",
+      "math": "E_i=\\sum_k c^{Z_i}_k B_{i,k}+\\sum_n w^{Z_i}_n\\sum_{j\\in\\mathcal N(i)}P^{\\text{pair}}_n(r_{ij};Z_i,Z_j)+E_0(Z_i),\\qquad E=\\sum_i E_i",
+      "code": [{"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 277, "end": 290, "must": "val = dot(B, (@view ps.WB[:, i_z0]))", "caption": "evaluate：多体项点积 + 对势 + Vref(E0)"}]
+    },
+    {
+      "stage": "energy",
+      "title": "近程排斥：r⁻ᵖ 对势包络、ZBL 与排斥约束",
+      "plain": "对势基默认使用 ACE1 式包络（p=2）：r→0 时按 (r/r0)⁻ᵖ 发散，在 r_cut 处值与斜率都归零，因而能表达强排斥。但线性拟合不保证系数符号，所以 acefit! 提供 repulsion_restraint：在 0.01 Å 处加入人工双原子“数据”，把对势钉向包络值。也可 ZBL=true，把 ZBL 屏蔽核库仑势作为参考势叠加（此时对势包络默认改为 (:x,0,2)）。",
+      "math": "f_{\\text{pair}}(r)=s^{-p}-s_c^{-p}+p\\,s_c^{-p-1}(s-s_c),\\ \\ s=\\frac{r}{r_0},\\ s_c=\\frac{r_{\\text{cut}}}{r_0};\\qquad E_{\\text{ref}}=\\sum_i E_0(Z_i)\\ \\big(+E_{\\text{ZBL}}\\big)",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/radial_envelopes.jl", "start": 38, "end": 43, "must": "return s^(-p) - scut^(-p) + p * scut^(-p-1) * (s - scut)", "caption": "ACE1_PolyEnvelope1sR：对势包络"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace_heuristics.jl", "start": 123, "end": 141, "must": "Vref_zbl = EmpiricalPotentials.ZBL(", "caption": "_make_Vref：E0 一体项，ZBL=true 时叠加 ZBL"},
+        {"repo": "ACEpotentials.jl", "file": "src/repulsion_restraint.jl", "start": 17, "end": 31, "must": "system.data[energy_key] = env_rin", "caption": "排斥约束：近距离双原子人工数据"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：手写反向传播（pullback）+ 牛顿第三定律组装",
+      "plain": "推理时 evaluate_ed 先前向算出 R_nl、Y_lm 及其对位置的导数（样条径向基用 ForwardDiff 对偶数），再把 ∂E_i/∂B = c(Z_i) 经 EquivariantTensors.pullback 反传到 ∂E_i/∂R_nl 和 ∂E_i/∂Y_lm，用链式法则得到 ∂E_i/∂r_ij；对势部分解析求导。随后按 F_j −= ∂E_i/∂r_ij、F_i += ∂E_i/∂r_ij 组装，力严格保守。拟合需要“每个基函数”的导数（设计矩阵的力行），则用 ForwardDiff.jacobian 前向求导。",
+      "math": "\\frac{\\partial E_i}{\\partial\\mathbf r_{ij}}=\\sum_{nl}\\frac{\\partial E_i}{\\partial R_{nl}}R'_{nl}(r_{ij})\\,\\hat{\\mathbf r}_{ij}+\\sum_{lm}\\frac{\\partial E_i}{\\partial Y_l^m}\\nabla Y_l^m(\\mathbf r_{ij}),\\qquad \\mathbf F_k=-\\sum_i\\sum_{j\\in\\mathcal N(i)}\\frac{\\partial E_i}{\\partial\\mathbf r_{ij}}\\,(\\delta_{jk}-\\delta_{ik})",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 356, "end": 379, "must": "EquivariantTensors.pullback([∂B], model.tensor, Rnl, Ylm, A)", "caption": "evaluate_ed：∂E/∂B = WB → pullback → 组装 ∂E_i/∂r_ij"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/calculators.jl", "start": 124, "end": 133, "must": "forces[Js[α]] -= dv[α] * uF", "caption": "energy_forces_virial_serial：力与位力的组装"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/ace.jl", "start": 683, "end": 694, "must": "dB_vec = ForwardDiff.jacobian(", "caption": "evaluate_basis_ed：逐基函数导数（拟合用）"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "位力与应力：同一组导数直接拼出",
+      "plain": "因为每个位点能只依赖相对位移 r_ij，位力可以直接由同一组导数拼出：W = −Σ_i Σ_j (∂E_i/∂r_ij) ⊗ r_ij，不需要额外的反传或应变技巧。ASE 接口再除以体积并变号得到应力（Voigt 6 分量）。拟合时位力的 6 个分量同样是设计矩阵的行。",
+      "math": "\\mathbf W=-\\sum_i\\sum_{j\\in\\mathcal N(i)}\\frac{\\partial E_i}{\\partial\\mathbf r_{ij}}\\otimes\\mathbf r_{ij},\\qquad \\boldsymbol\\sigma=-\\frac{\\mathbf W}{V}",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/calculators.jl", "start": 105, "end": 110, "must": "dVi * Ri' for (dVi, Ri) in zip(dV, Rs)", "caption": "_site_virial：位点位力"},
+        {"repo": "ACEpotentials.jl", "file": "export/ase-ace/src/ase_ace/julia_calculator.py", "start": 309, "end": 321, "must": "-virial[0, 0] / volume", "caption": "ASE 计算器：σ = −W/V（Voigt）"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "系数从哪来：加权最小二乘 + 平滑先验 + BLR",
+      "plain": "能量、力、位力对系数都是线性的，所以每个训练构型给出设计矩阵的若干行：1 行能量、3N 行力、6 行位力。默认权重 E:F:V = 30:1:1，能量与位力再除以 √N。平滑先验 Γ（默认代数型 p=4，惩罚高 n、高 l 的“粗糙”基函数）把问题变为对 c̃=Γc 的回归，默认用 ACEfit 的贝叶斯线性回归（BLR）自动确定正则强度，最后 c = Γ⁻¹c̃。若求解器返回后验样本，还会存为委员会参数。",
+      "math": "\\tilde{\\mathbf c}=\\arg\\min_{\\tilde{\\mathbf c}}\\big\\lVert \\mathbf W(\\mathbf A\\Gamma^{-1}\\tilde{\\mathbf c}-\\mathbf y)\\big\\rVert^2+\\lambda\\lVert\\tilde{\\mathbf c}\\rVert^2,\\quad \\mathbf c=\\Gamma^{-1}\\tilde{\\mathbf c},\\qquad \\Gamma_{kk}=\\sum_{t}\\Big[\\Big(\\frac{l_t}{w_l}\\Big)^{4}+\\Big(\\frac{n_t}{w_n}\\Big)^{4}\\Big]",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 133, "end": 164, "must": "Ap = Diagonal(W) * (A / P)", "caption": "acefit!：组装 → 加权与先验变换 → ACEfit.solve → 回代系数"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/smoothness_priors.jl", "start": 88, "end": 98, "must": "algebraic_smoothness_prior(model; p = 4, wl = 2/3, wn = 1.0)", "caption": "代数平滑先验（对角矩阵 Γ）"},
+        {"repo": "ACEpotentials.jl", "file": "src/atoms_data.jl", "start": 202, "end": 217, "must": "/ sqrt(length(d.system))", "caption": "weight_vector：能量/位力权重除以 √N"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：委员会不确定度与 Hessian",
+      "plain": "BLR 的后验样本给出 K 套系数（委员会）。@committee potential_energy(sys, model) 只算一次基函数值，再与 K 套系数各做一次点积，得到 K 个能量，其离散度可作不确定度指标；力等其他量目前逐个成员重算（官方注明为原型实现）。Hessian 通过 AtomsCalculatorsUtilities 的自动微分（ad_hessian_site）得到，可用于声子与振动分析。",
+      "math": "E^{(k)}=\\mathbf c^{(k)}\\cdot\\mathbf B(\\mathcal S)+E_{\\text{ref}},\\quad \\sigma_E^2=\\frac1K\\sum_{k=1}^{K}\\big(E^{(k)}-\\bar E\\big)^2;\\qquad H=\\frac{\\partial^2E}{\\partial\\mathbf r\\,\\partial\\mathbf r}",
+      "code": [
+        {"repo": "ACEpotentials.jl", "file": "src/models/committee.jl", "start": 51, "end": 58, "must": "co_E = [ dot(basis_E, destructure(model.co_ps[i])[1]) + eref", "caption": "co_potential_energy：一次基函数 + K 次点积"},
+        {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 166, "end": 170, "must": "set_committee!(model, co_ps_vec)", "caption": "拟合后存入委员会系数"},
+        {"repo": "ACEpotentials.jl", "file": "src/models/calculators.jl", "start": 86, "end": 92, "must": "ad_hessian_site(model, args...)", "caption": "Hessian：自动微分"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "order (ν)", "value": "用户必填；教程取 3（4 体）", "note": "相关阶，体序 = ν+1", "code": {"repo": "ACEpotentials.jl", "file": "docs/src/tutorials/basic_julia_workflow.jl", "start": 26, "end": 37, "must": "order = 3,"}},
+    {"name": "totaldegree", "value": "用户必填；教程取 6（注明仅为测试用的低次数）", "note": "稀疏基的总次数上限 D_tot", "code": {"repo": "ACEpotentials.jl", "file": "docs/src/tutorials/basic_julia_workflow.jl", "start": 26, "end": 37, "must": "totaldegree = 6,"}},
+    {"name": "wL", "value": "1.5", "note": "l 相对 n 的权重：level = n′ + wL·l", "code": {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":wL => 1.5"}},
+    {"name": "rcut", "value": "(:bondlen, 2.5) → 2.5 × r0", "note": "r0 = 两元素典型键长平均（查表）；variable_cutoffs=false 时各对取最大值", "code": {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":rcut => (:bondlen, 2.5)"}},
+    {"name": "transform", "value": "(:agnesi, 2, 4)；对势 (:agnesi, 1, 3)", "note": "距离 → x 的 Agnesi 变换参数 (p, q)", "code": {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":transform => (:agnesi, 2, 4)"}},
+    {"name": "envelope", "value": "(:x, 2, 2) → (1−x²)²，配 Jacobi(4,4) 多项式", "note": "多体径向基包络", "code": {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":envelope => (:x, 2, 2)"}},
+    {"name": "pair_envelope", "value": "(:r, 2)；ZBL=true 时默认改为 (:x, 0, 2)", "note": "两体对势包络（r⁻² 型，近程发散）", "code": {"repo": "ACEpotentials.jl", "file": "src/ace1_compat.jl", "start": 16, "end": 43, "must": ":pair_envelope => (:r, 2)"}},
+    {"name": "splinify nnodes", "value": "100", "note": "径向基三次样条节点数", "code": {"repo": "ACEpotentials.jl", "file": "src/models/Rnl_basis.jl", "start": 74, "end": 74, "must": "nnodes = 100"}},
+    {"name": "solver", "value": "ACEfit.BLR()", "note": "默认贝叶斯线性回归；也可 LSQR、ASP 等", "code": {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 75, "end": 90, "must": "solver = ACEfit.BLR(),"}},
+    {"name": "weights", "value": "E 30 / F 1 / V 1", "note": "能量、位力权重再除以 √N_atoms", "code": {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 17, "end": 17, "must": "default_weights() = Dict("}},
+    {"name": "smoothness", "value": "4", "note": "代数平滑先验阶 p（wl = 2/3, wn = 1）", "code": {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 75, "end": 90, "must": "smoothness = 4,"}},
+    {"name": "repulsion_restraint / restraint_weight", "value": "false / 0.01", "note": "可选的近程排斥人工数据及其权重", "code": {"repo": "ACEpotentials.jl", "file": "src/fit_model.jl", "start": 75, "end": 90, "must": "restraint_weight = 0.01,"}}
+  ],
+  "speedNotes": [
+    "推理时每个原子：M 个邻居的径向样条查表 + 球谐 → 求和成 A 基（∝ M·|A|）→ 稀疏乘积 AA 与 A2B 耦合（∝ |AA|）→ 一次点积。没有神经网络与多层消息传递，是最快的一类 MLIP。",
+    "基函数数目随 order、totaldegree 组合增长；ACE1 约定下径向通道 n=(n′,z′) 还随元素数 N_Z 成倍增加，多元素体系的基与设计矩阵会迅速变大，这是线性 ACE 最主要的扩展瓶颈。",
+    "训练开销在组装设计矩阵（每构型 1+3N+6 行 × N_basis 列，力/位力行用 ForwardDiff.jacobian 前向求导）和一次 BLR 求解；没有迭代式梯度训练，但内存 ∝ 观测数 × 基函数数。",
+    "部署：juliac --trim 导出 C 共享库，供 LAMMPS pair_style ace 插件（OpenMP）和 ASE ACELibraryCalculator 调用；v0.10 起内部迁移到 EquivariantTensors.jl 以支持不同执行后端，但仓库内未见专用 GPU 推理内核。",
+    "与 PACE（python-ace）对比：PACE 在 ACE 密度上加 Finnis–Sinclair 型非线性嵌入（fs_parameters），用梯度优化并按 ladder 逐级扩基；ACEpotentials.jl 坚持纯线性 + 一次性最小二乘/BLR，训练快、可复现，代价是缺少非线性带来的额外表达力。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖 r_cut（默认 2.5×典型键长，教程 Ti/Al 取 5.5 Å）以内的邻居，没有消息传递扩大感受野；截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失。",
+    "没有内置 D3、静电或电荷平衡，也不接受总电荷/自旋输入；带电缺陷、离子液体、界面电荷转移、电化学界面等无法正确描述。",
+    "仓库不提供预训练模型，训练泛函完全取决于用户的 DFT 数据；若用 PBE 等不含色散的数据，层状 vdW 材料、分子晶体、物理吸附的结合会被低估。",
+    "可借 ETModels 的 StackedCalculator 把 ACE 与用户提供的（无位点分解的）库仑/色散计算器相加，但这不是官方内置的长程模型。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 截断处 C¹ 平滑包络 + 平滑先验 → 势能面光滑，适合几何优化、长时间 MD、声子与弹性常数；Hessian 可由自动微分得到（README 提到 v0.10 暂时去掉了部分 Hessian 计算用的快速求值器）。",
+    "BLR 后验委员会给出能量/力的不确定度，可直接用于主动学习挑选构型或误差估计。",
+    "高能碰撞、辐照、高压等近程场景需开启 ZBL 或 repulsion_restraint，否则线性拟合在训练数据未覆盖的短距离可能出现非物理吸引。",
+    "可导出到 LAMMPS / ASE 做大规模 MD；没有偶极、极化率、电荷、磁矩等输出，光谱与磁性需另建模型。"
+  ],
+  "strengths": ["训练是凸的线性问题：快、可复现、无需 GPU", "系统完备的多体基 + 平滑先验，小数据集上精度与稳定性好", "推理极快、严格局域，易于大规模并行 MD", "BLR 后验委员会提供低成本的不确定度", "Julia 原生、代码可读，便于方法研究；可导出到 LAMMPS / ASE"],
+  "weaknesses": ["线性、径向基固定，表达力不如可学习径向/消息传递的 MACE 类模型", "多元素时基函数数目急剧增长，化学维度扩展差", "完全没有长程静电、色散与电荷", "没有预训练基础模型，需要自备 DFT 数据从头拟合", "线性拟合不保证近程排斥，需要 ZBL 或排斥约束"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

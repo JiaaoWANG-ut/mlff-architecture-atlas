@@ -1,0 +1,198 @@
+{
+  "id": "et",
+  "name": "TorchMD-ET",
+  "fullName": "TorchMD-NET Equivariant Transformer (ET)",
+  "year": 2022,
+  "authors": "P. Thölke, G. De Fabritiis",
+  "paper": {"title": "Equivariant Transformers for Neural Network based Molecular Potentials", "venue": "ICLR 2022", "url": "https://arxiv.org/abs/2202.02541"},
+  "repos": ["torchmd-net"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔向量等变 (l≤1)", "距离调制多头注意力", "SiLU 代替 softmax", "PaiNN 式门控读出", "TorchMD-NET（README 标为弃用）"],
+  "framework": "PyTorch（PyTorch Lightning 训练；NVIDIA Warp 邻居表内核）",
+  "license": "MIT",
+  "oneLiner": "把 Transformer 的多头注意力搬到原子邻居图上：注意力分数由 query、key 和“距离滤波器”三者逐元素相乘得到，并用 SiLU 代替 softmax；每个原子同时带标量和 3D 向量两套特征，向量只做“标量×向量”运算，因此严格旋转等变（PaiNN 式），模型轻而准。",
+  "analogy": "像一场圆桌会议：每位代表（原子）提出问题（query），邻座亮出名片（key），但谁的话分量大还要看两人坐得多远（距离滤波器）；而且发言权不必“加起来等于 1”（不用 softmax），人多的桌子自然信息更多。除了说话内容（标量），每人还用手指一个方向（向量），大家只能把方向放大缩小或沿彼此连线去指，所以整张桌子怎么转，结论都一样。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（ExpNormal 径向基 × 余弦截断）+ 单位方向 r̂_ij（l=1 笛卡尔向量）；无球谐、无显式键角",
+    "equivariance": "E(3) 等变：标量通道不变，向量通道（3×C）随旋转等变；只用“标量×向量”与向量内积，无 CG 系数",
+    "lmax": "l ≤ 1（标量 + 笛卡尔向量）",
+    "bodyOrder": "注意力消息是 2 体；节点上的向量内积 ⟨U₁v, U₂v⟩ 每层引入键角（3 体）信息，多层叠加后体序隐式升高",
+    "layers": "6（num_layers 默认；QM9 例子 8 层，SPICE 例子 5 层）",
+    "cutoff": "5 Å（默认及 QM9/MD17/ANI1 例子）；SPICE 例子 10 Å",
+    "receptiveField": "num_layers × r_c，默认 6 × 5 Å = 30 Å（理论上限）",
+    "message": "标量：SiLU(Σ q_i⊙k_j⊙d^K_ij) · φ(r_ij)(v_j⊙d^V_ij)；向量：v⃗_j⊙s² + s³·r̂_ij（向量消息不经注意力权重）",
+    "readout": "两个门控等变块（C → C/2 → 1，向量以范数参与）→ 原子能 e_i；×σ + Atomref → 求和 + μ",
+    "forces": "conservative",
+    "forcesDetail": "derivative=True 时 F = −∂E/∂R（torch.autograd.grad）；训练时 create_graph 做二阶反传；Warp 邻居核带自定义反向",
+    "stress": "未实现：无应变/维里代码，ASE 计算器 implemented_properties 只有 energy、forces",
+    "longRange": "本体无；可选 Coulomb 先验（电荷来自数据集 partial_charges，全原子对直接求和，无 Ewald）",
+    "dispersion": "可选 D2 先验（Grimme 2006 的 C6/R0 表，元素到 Xe；求邻居时不传 box，周期镜像不计）",
+    "chargeSpin": "无：forward 接受 q/s 参数，但 ET 表示网络不使用",
+    "otherOutputs": "偶极模长 |μ|（EquivariantDipoleMoment）、电子空间范围 ⟨R²⟩、体系向量输出；可叠加 ZBL 近程排斥先验",
+    "strictlyLocal": false,
+    "complexity": "每层 O(E·K·C)（RBF→d^K/d^V 逐边投影）+ O(E·C) 逐元素消息 + O(N·C²) 节点投影；默认暴力邻居搜索 O(N²)",
+    "accel": "NVIDIA Warp 邻居核（ET 用 brute 策略）、CUDA Graph（External，static_shapes）、torch.compile（ASE）、OpenMM-Torch / TorchMD / ACEMD；训练支持多 GPU/多节点"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "只有 l≤1 的笛卡尔向量、没有 CG 张量积，每层主要是逐边的 RBF→通道投影与逐元素乘法，属于 PaiNN 一类的轻量等变模型，文档也强调其推理/训练成本低。"},
+    "expressiveness": {"v": 3, "why": "距离调制的多头注意力 + 向量内积带来键角信息，强于纯距离 MPNN；但只到 l=1、没有显式高体序基，弱于 MACE/NequIP 类。"},
+    "longRange": {"v": 3, "why": "本体只有 6×r_c 的消息传递感受野；官方提供 D2 色散与 Coulomb（外部固定电荷）先验，但无 Ewald、无电荷预测。"},
+    "scalability": {"v": 1, "why": "整图推理、无空间分解或 LAMMPS 并行；ET 默认暴力 O(N²) 邻居搜索，周期盒还要求 r_c 不超过盒宽一半；多 GPU 只用于训练。"},
+    "physics": {"v": 3, "why": "保守力、精确 E(3) 对称、原子能求和、可选 ZBL；但代码默认 vector_cutoff=False 时截断处能量不连续（例子配置改为 true），余弦截断也只有 C¹ 光滑。"},
+    "coverage": {"v": 2, "why": "能量/力之外只有偶极模长、⟨R²⟩ 等少数分子性质输出头；无应力、无官方 Hessian 接口。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：原子序数、坐标、batch（可选周期盒）",
+      "plain": "输入只有原子序数 z、笛卡尔坐标 pos 和 batch 索引（多个分子拼成一张大图），可选周期盒 box。接口里的总电荷 q 和自旋 s 会被传给表示网络，但 ET 并不使用它们。derivative=True 时先打开坐标的 requires_grad，后面的力就是能量对坐标的导数。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i,b_i)\\}_{i=1}^{N},\\ \\ \\mathbf B\\in\\mathbb R^{3\\times3}\\ (\\text{optional})\\qquad \\mathbf r_i\\ \\text{requires grad}",
+      "code": [{"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 585, "end": 592, "must": "pos.requires_grad_(True)", "caption": "TorchMD_Net.forward：坐标设为可求导，调用 ET 表示网络与输出头"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：Warp GPU 内核找出截断内所有原子对",
+      "plain": "OptimizedDistance 找出距离在 [r_lower, r_c) 内的所有原子对，双向都存，并且 ET 打开了 loop=True，把每个原子自己（i→i）也当作一个“邻居”。底层是 NVIDIA Warp 写的 GPU 内核；ET 没有指定 strategy，所以用默认的 brute（暴力 O(N²) 枚举），对小分子最快。邻居对缓冲区固定为 max_num_neighbors × N，形状固定便于 CUDA Graph；周期体系要求约化三斜盒且 r_c 不超过盒宽一半。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ r_{\\text{lower}}\\le r_{ij}<r_c\\,\\}\\cup\\{i\\},\\qquad |\\mathcal E|\\le n_{\\max}\\,N",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 139, "end": 147, "must": "loop=True", "caption": "ET 构造邻居模块：含自环、返回边向量（未指定 strategy → brute）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 280, "end": 301, "must": "get_neighbor_pairs_kernel(", "caption": "OptimizedDistance.forward：调用邻居内核并检查缓冲区是否溢出"},
+        {"repo": "torchmd-net", "file": "torchmdnet/extensions/warp_ops/neighbors.py", "start": 412, "end": 441, "must": "WarpBruteNeighborAutograd.apply(", "caption": "Warp 邻居表分发：brute / cell 两种内核"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：ExpNormal 径向基 × 余弦截断；方向 = 单位向量",
+      "plain": "距离被展开成 K 个 ExpNormal 径向基（PhysNet 同款：先把 r 变成 e^{−αr}，再在其上放高斯），整体乘以余弦截断 φ(r)，让所有基函数在 r_c 处平滑归零。方向只用单位向量 r̂_ij（自环的零向量不做归一化）——ET 唯一的方向信息就是这一个 l=1 笛卡尔向量，没有球谐函数。",
+      "math": "f_k(r)=\\phi(r)\\exp\\!\\Big[-\\beta_k\\big(e^{\\alpha(r_{\\text{lower}}-r)}-\\mu_k\\big)^2\\Big],\\ \\alpha=\\frac{5}{r_c-r_{\\text{lower}}}\\qquad \\phi(r)=\\tfrac12\\Big[\\cos\\frac{\\pi r}{r_c}+1\\Big]\\mathbb 1_{r<r_c}\\qquad \\hat{\\mathbf r}_{ij}=\\frac{\\mathbf r_{ij}}{\\lVert\\mathbf r_{ij}\\rVert}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 372, "end": 408, "must": "torch.exp(self.alpha * (-dist + self.cutoff_lower))", "caption": "ExpNormalSmearing：PhysNet 式初始化与前向"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 501, "end": 529, "must": "torch.cos(distances * math.pi / self.cutoff_upper)", "caption": "CosineCutoff 余弦截断"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 199, "end": 208, "must": "edge_vec[mask] / torch.norm(edge_vec[mask], dim=1)", "caption": "距离 → RBF；边向量归一化（跳过自环）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入：元素嵌入 + 邻居嵌入，向量特征置零",
+      "plain": "每种元素有两张查找表：一张描述自己，另一张作为“邻居身份”。邻居嵌入把截断内每个邻居 j 的元素向量乘上一个距离滤波器（RBF 线性投影再乘 φ(r_ij)），求和后与自身嵌入拼接、线性混合（论文 eq. 3）。这样第 0 层就已经知道“周围有哪些元素、离多远”；向量特征初始化为 0，之后才由几何方向逐层“长出来”。",
+      "math": "\\mathbf x_i^{(0)}=W_c\\Big[\\,e(Z_i)\\ \\Vert\\ \\sum_{j\\ne i}\\phi(r_{ij})\\,\\big(W_d\\,\\mathbf f(r_{ij})\\big)\\odot e'(Z_j)\\Big],\\qquad \\vec{\\mathbf v}_i^{(0)}=\\mathbf 0\\in\\mathbb R^{3\\times C}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 197, "end": 213, "must": "x = self.neighbor_embedding(z, x, edge_index, edge_weight, edge_attr)", "caption": "TorchMD_ET.forward：元素嵌入 → 邻居嵌入 → 向量特征置零"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 102, "end": 118, "must": "self.combine(torch.cat([x, x_neighbors], dim=1))", "caption": "NeighborEmbedding.forward"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：距离调制的多头注意力（SiLU 代替 softmax）",
+      "plain": "每层先对标量特征做 LayerNorm，再线性投影出 query、key、value（8 个头）。注意力分数 = q_i、k_j 与距离滤波器 d^K_ij 三者逐元素相乘再求和，距离直接调制点积；与普通 Transformer 不同，它不经 softmax 归一化，而是过 SiLU，所以不需要在邻居间分配“总和为 1”的权重。value 同样被距离滤波器 d^V_ij 调制并一分为三：标量消息 s¹ 和两组向量系数 s²、s³。vector_cutoff=True（例子配置）时 φ(r) 乘在 value 上，否则只乘在注意力分数上。",
+      "math": "a^{h}_{ij}=\\mathrm{SiLU}\\Big(\\sum_{c}q^{hc}_{i}\\,k^{hc}_{j}\\,d^{K,hc}_{ij}\\Big),\\ \\ \\mathbf d^{K}_{ij}=\\mathrm{SiLU}\\big(W^{K}\\mathbf f(r_{ij})\\big)\\qquad \\big[\\mathbf s^{1},\\mathbf s^{2},\\mathbf s^{3}\\big]_{ij}=\\phi(r_{ij})\\,\\mathbf v_j\\odot\\mathrm{SiLU}\\big(W^{V}\\mathbf f(r_{ij})\\big)\\qquad \\mathbf m_i=\\sum_{j}a_{ij}\\,\\mathbf s^{1}_{ij}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 315, "end": 334, "must": "self.act(self.dk_proj(f_ij))", "caption": "EquivariantMultiHeadAttention.forward：LayerNorm、q/k/v 投影、距离滤波器 dk/dv"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 386, "end": 410, "must": "attn = (q_i * k_j * dk).sum(dim=-1)", "caption": "message：q·k·dk 注意力 → SiLU → 余弦截断 → 标量消息"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：向量消息与 PaiNN 式等变更新",
+      "plain": "向量消息 = 邻居的向量特征按通道缩放（s²）+ 沿键方向 r̂_ij 的新向量（s³），两项都只是“标量 × 向量”，因此旋转时严格跟着转，不需要任何 CG 系数。节点更新像 PaiNN：聚合后的标量 m_i 投影成 o¹、o²、o³；标量增量里有两个向量投影的内积 ⟨U₁v, U₂v⟩，它把不同邻居方向之间的夹角（键角，3 体信息）变成不变量。标量和向量都以残差方式累加，6 层之后再做一次 LayerNorm。",
+      "math": "\\vec{\\mathbf w}_i=\\sum_{j}\\big(\\vec{\\mathbf v}_j\\odot\\mathbf s^{2}_{ij}+\\mathbf s^{3}_{ij}\\,\\hat{\\mathbf r}_{ij}\\big)\\qquad [\\mathbf o^1,\\mathbf o^2,\\mathbf o^3]_i=W^{O}\\mathbf m_i\\qquad \\Delta\\mathbf x_i=\\langle U_1\\vec{\\mathbf v}_i,U_2\\vec{\\mathbf v}_i\\rangle\\odot\\mathbf o^2_i+\\mathbf o^3_i,\\ \\ \\Delta\\vec{\\mathbf v}_i=U_3\\vec{\\mathbf v}_i\\odot\\mathbf o^1_i+\\vec{\\mathbf w}_i",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 407, "end": 415, "must": "vec = vec_j * vec1.unsqueeze(1)", "caption": "向量消息：缩放邻居向量 + 沿 r̂_ij 的新向量"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 347, "end": 353, "must": "dx = vec_dot * o2 + o3", "caption": "节点更新：向量内积进入标量，o1 门控向量"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 215, "end": 219, "must": "vec = vec + dvec", "caption": "逐层残差累加，最后 out_norm"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：两个门控等变块得到原子能",
+      "plain": "ET 的能量输出头是 EquivariantScalar（配置里写 Scalar，create_model 会因为 ET 是等变模型自动加上 Equivariant 前缀）。它由两个 PaiNN 式门控等变块组成：每块把标量与向量投影的范数拼接进 MLP，输出新标量和一组门控系数去缩放向量；第一块 C→C/2 并接 SiLU，第二块 C/2→1 给出每个原子的能量 e_i。向量只以范数进入，所以 e_i 旋转不变。",
+      "math": "[\\mathbf x',\\mathbf g]=\\mathrm{MLP}\\big([\\mathbf x\\,\\Vert\\,\\lVert W_1\\vec{\\mathbf v}\\rVert]\\big),\\ \\ \\vec{\\mathbf v}'=\\mathbf g\\odot W_2\\vec{\\mathbf v}\\qquad e_i=\\mathrm{GEB}_{C/2\\to1}\\circ\\mathrm{GEB}_{C\\to C/2}(\\mathbf x_i,\\vec{\\mathbf v}_i)",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/output_modules.py", "start": 138, "end": 163, "must": "GatedEquivariantBlock(", "caption": "EquivariantScalar：两个门控等变块"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 627, "end": 656, "must": "v = v.unsqueeze(1) * vec2", "caption": "GatedEquivariantBlock.forward"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 135, "end": 136, "must": "output_prefix = ", "caption": "等变模型自动选用 Equivariant 前缀的输出头"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：σ·e_i + 元素参考能，求和后加 μ 和先验",
+      "plain": "原子能先乘数据集标准差 σ，再加元素参考能（Atomref 先验，在求和之前逐原子加入），对每个体系求和，然后加上均值 μ（按体系只加一次），最后叠加各“体系级”先验（ZBL、D2、Coulomb）。原子能之和保证了能量随体系大小可加；Atomref 让网络只需学习结合能部分。",
+      "math": "E=\\sum_{i}\\big[\\sigma\\,e_i+E_{\\text{ref}}(Z_i)\\big]+\\mu+\\sum_{p}E_{p}^{\\text{prior}}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 592, "end": 623, "must": "x = self.output_model.reduce(x, batch, num_systems=num_systems)", "caption": "pre_reduce → ×std → 原子级先验 → 求和 → +mean → 体系级先验"},
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/atomref.py", "start": 93, "end": 96, "must": "return x + self.atomref(z)", "caption": "Atomref：逐原子加元素参考能"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "物理先验：ZBL 近程排斥、D2 色散、Coulomb 静电",
+      "plain": "ET 本身只看 r_c 内的邻居，没有长程项；TorchMD-NET 用可叠加的“先验”模块把解析物理项加到能量上。ZBL 是屏蔽核排斥，防止原子靠得过近；D2 用 Grimme 2006 的 C6/R0 表和 Fermi 阻尼（d=20、s6=1）加色散；Coulomb 使用数据集提供的固定 partial_charges，用余弦开关在 lower/upper 距离之间逐渐打开，对所有原子对直接求和（无 Ewald）。ET 不预测电荷。",
+      "math": "E_{\\text{ZBL}}=\\tfrac12\\sum_{i\\ne j}\\frac{Z_iZ_je^2}{4\\pi\\varepsilon_0r_{ij}}\\,\\varphi\\big(r_{ij}/a_{ij}\\big)\\,\\phi(r_{ij})\\qquad E_{\\text{D2}}=-\\tfrac{s_6}{2}\\sum_{i\\ne j}\\frac{\\sqrt{C_6^iC_6^j}}{r_{ij}^6}\\,\\frac{1}{1+e^{-d(r_{ij}/R_{ij}-1)}}\\qquad E_{\\text{C}}=\\tfrac12\\sum_{i\\ne j}\\frac{q_iq_j}{4\\pi\\varepsilon_0r_{ij}}\\,\\frac{1-\\cos(\\pi\\xi_{ij})}{2}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/zbl.py", "start": 83, "end": 107, "must": "0.1818 * torch.exp(-3.2 * d)", "caption": "ZBL 屏蔽核排斥（乘余弦截断）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/d2.py", "start": 179, "end": 201, "must": "f_damp = 1 / (1 + pt.exp(-self.d * (R_ij / R_r - 1)))", "caption": "DFT-D2 色散（未传 box）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/coulomb.py", "start": 107, "end": 122, "must": "energy = (0.5 - 0.5 * torch.cos(torch.pi * phase)) * q[0] * q[1] / distance", "caption": "Coulomb：固定部分电荷 + 余弦开关"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对总能量做一次自动微分",
+      "plain": "derivative=True 时，对总能量（含先验）调用 torch.autograd.grad 得到 F = −∂E/∂R，力严格保守。训练时 create_graph=True，让力的误差还能再反传到参数（二阶反传）。Warp 邻居核注册了自定义反向：把对边向量和距离的梯度用 index_add 加回边两端的原子；ASE 计算器则是 energy.backward() 后取 −positions.grad。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i},\\qquad \\frac{\\partial E}{\\partial\\mathbf r_i}=\\sum_{e=(a,b)}\\big(\\delta_{ia}-\\delta_{ib}\\big)\\Big(\\frac{\\partial E}{\\partial\\mathbf r_e}+\\frac{\\partial E}{\\partial r_e}\\frac{\\mathbf r_e}{r_e}\\Big)",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 626, "end": 636, "must": "dy = grad(", "caption": "TorchMD_Net.forward：autograd 求 −dE/dR"},
+        {"repo": "torchmd-net", "file": "torchmdnet/extensions/neighbor_utils.py", "start": 11, "end": 46, "must": "grad_positions.index_add_(0, edge_index_safe[0], grad_vec)", "caption": "邻居核的自定义反向：边梯度 → 原子梯度"},
+        {"repo": "torchmd-net", "file": "torchmdnet/calculators.py", "start": 297, "end": 316, "must": "forces = -positions.grad", "caption": "ASE 计算器：可选 torch.compile，反传取力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "其他输出与部署：偶极、⟨R²⟩、CUDA Graph",
+      "plain": "换一个输出头就能预测别的量：EquivariantDipoleMoment 把“原子电荷 × 相对质心位置 + 向量通道给出的原子偶极”求和，再取模长 |μ|；EquivariantElectronicSpatialExtent 预测 ⟨R²⟩；EquivariantVectorOutput 输出体系向量。部署方面，External 适配器先预热再把“能量 + 力”整段录成 CUDA Graph 重放，供 TorchMD 一类的 MD 循环使用；OpenMM 则通过 OpenMM-Torch 调用。",
+      "math": "\\boldsymbol\\mu=\\sum_i\\big[q_i(\\mathbf r_i-\\mathbf r_{\\text{COM}})+\\vec{\\mu}_i\\big],\\qquad y=\\lVert\\boldsymbol\\mu\\rVert",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/output_modules.py", "start": 231, "end": 242, "must": "return x + v.squeeze()", "caption": "EquivariantDipoleMoment：电荷项 + 原子偶极，最后取模"},
+        {"repo": "torchmd-net", "file": "torchmdnet/calculators.py", "start": 117, "end": 128, "must": "torch.cuda.graph(self.cuda_graph)", "caption": "External：预热后录制 CUDA Graph"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "hidden_channels（embedding_dimension）", "value": "128（TorchMD_ET 类默认；CLI 默认 256；QM9 例子 256）", "note": "标量通道数 C；向量特征为 3×C", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 84, "end": 103, "must": "hidden_channels=128"}},
+    {"name": "num_layers", "value": "6（QM9 例子 8，SPICE 例子 5）", "note": "注意力交互层数", "code": {"repo": "torchmd-net", "file": "torchmdnet/scripts/train.py", "start": 95, "end": 95, "must": "--num-layers"}},
+    {"name": "num_heads", "value": "8", "note": "注意力头数，head_dim = C/8", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 84, "end": 103, "must": "num_heads=8"}},
+    {"name": "num_rbf / rbf_type", "value": "expnorm；类默认 50，CLI 默认 64；MD17/ANI1 例子 32", "note": "ExpNormal 径向基个数", "code": {"repo": "torchmd-net", "file": "torchmdnet/scripts/train.py", "start": 96, "end": 98, "must": "--num-rbf"}},
+    {"name": "trainable_rbf", "value": "类默认 True；CLI 默认与所有 ET 例子为 False", "note": "RBF 中心/宽度是否可学习", "code": {"repo": "torchmd-net", "file": "torchmdnet/scripts/train.py", "start": 99, "end": 99, "must": "--trainable-rbf"}},
+    {"name": "cutoff_upper r_c", "value": "5.0 Å（默认；QM9/MD17/ANI1 例子）；SPICE 例子 10.0 Å", "note": "余弦截断与邻居半径", "code": {"repo": "torchmd-net", "file": "examples/ET-SPICE.yaml", "start": 7, "end": 8, "must": "cutoff_upper: 10.0"}},
+    {"name": "max_num_neighbors", "value": "32（默认；QM9/ANI1 例子 64，SPICE 例子 128）", "note": "邻居对缓冲区 = 该值 × N，超出会报错", "code": {"repo": "torchmd-net", "file": "torchmdnet/scripts/train.py", "start": 126, "end": 126, "must": "--max-num-neighbors"}},
+    {"name": "distance_influence", "value": "both", "note": "距离滤波同时作用于 key（d^K）和 value（d^V）", "code": {"repo": "torchmd-net", "file": "torchmdnet/scripts/train.py", "start": 104, "end": 104, "must": "--distance-influence"}},
+    {"name": "activation / attn_activation", "value": "silu / silu", "note": "注意力分数用 SiLU 而非 softmax", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/torchmd_et.py", "start": 84, "end": 103, "must": "attn_activation=\"silu\""}},
+    {"name": "vector_cutoff", "value": "False（类/CLI 默认）；所有 ET 例子配置为 true", "note": "true 时向量消息也乘 φ(r)，能量在 r_c 处连续", "code": {"repo": "torchmd-net", "file": "examples/ET-MD17.yaml", "start": 59, "end": 61, "must": "vector_cutoff: true"}},
+    {"name": "输出头", "value": "EquivariantScalar：C → C/2 → 1（两个门控等变块）", "note": "配置写 Scalar，ET 自动换成 Equivariant 版本", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/output_modules.py", "start": 138, "end": 151, "must": "hidden_channels // 2"}}
+  ],
+  "speedNotes": [
+    "计算量主要在逐边部分：每条边要把 K 维 RBF 投影成 d^K（C 维）和 d^V（3C 维），再与 q、k、v 逐元素相乘；节点部分是 q/k/v/o/向量投影的稠密矩阵乘，O(N·C²)。没有 CG 张量积和球谐，属于便宜的等变模型。",
+    "注意力用 SiLU 而不是 softmax：不需要在每个原子的邻居间做归一化（scatter-softmax），消息直接 scatter 求和，内核更简单。",
+    "邻居表由 NVIDIA Warp 内核生成；ET 未设置 strategy，默认 brute（暴力 O(N²) 枚举），小分子很快，大体系会成为瓶颈（cell 策略存在于 OptimizedDistance，但 ET 构造器没有暴露）。缓冲区固定为 max_num_neighbors×N，便于静态形状。",
+    "力靠 autograd 反传，约等于再做一次前向；训练力时 create_graph=True 需要二阶反传，显存和时间明显增加。",
+    "推理加速：External 适配器支持 CUDA Graph（默认预热 12 步后录制重放）；ASE 计算器支持 torch.compile（inductor，reduce-overhead）；训练精度可选 16/32/64 位。"
+  ],
+  "weakNotes": [
+    "单层视野 r_c = 5 Å（SPICE 例子 10 Å），6 层后理论感受野约 30 Å；超出的静电 1/r 与色散 1/r⁶ 尾巴完全缺失。",
+    "示例训练集都是有机小分子数据（QM9、MD17、ANI1、SPICE），没有周期材料；周期边界虽受支持，但要求约化三斜盒且 r_c 不超过盒宽一半。",
+    "色散只能靠 D2 先验外加（Grimme 2006 参数，元素表只到 Xe）；D2 先验求邻居时不传 box，周期体系中不计镜像，层状 vdW 材料、分子晶体、物理吸附要格外小心。",
+    "静电只能用 Coulomb 先验，电荷来自数据集的 partial_charges（固定输入，非网络预测），全原子对直接求和、无 Ewald；带电体系、离子液体、电荷转移界面能力有限。",
+    "ET 不使用总电荷 q 和自旋 s，同一几何下不同电荷/自旋态会得到相同能量；ScalarPlusWeightedCoulomb 输出头没有 Equivariant 版本，ET 无法直接使用。"
+  ],
+  "downstreamNotes": [
+    "分子动力学：可经 OpenMM-Torch、TorchMD、ACEMD 或 External + CUDA Graph 运行，力严格保守；应使用 vector_cutoff=true 训练的模型，否则原子穿过截断时能量跳变会造成 NVE 漂移。",
+    "几何优化：ASE 计算器提供 energy/forces，可做分子结构优化；没有应力，无法做晶胞弛豫、NPT 或弹性常数。",
+    "振动/声子：Hessian 需要用户自己对 autograd 力再求导（无官方接口）；余弦截断只有 C¹，二阶导在 r_c 处不连续。",
+    "电性质/光谱：EquivariantDipoleMoment 只输出偶极模长 |μ|（post_reduce 取范数），不直接给偶极向量，IR 强度需要改写输出头。",
+    "可解释性：文档指出分析注意力权重可以提取不同元素之间相互作用的信息。"
+  ],
+  "strengths": ["轻量：只用 l≤1 笛卡尔向量，无 CG 张量积，推理快", "距离调制的多头注意力，文档称发表时在基准数据集上达到 SOTA", "注意力权重可用于解释原子间相互作用", "工程完善：Warp 邻居核、CUDA Graph、torch.compile、OpenMM/TorchMD/ASE 接口", "先验模块化：Atomref / ZBL / D2 / Coulomb 可叠加"],
+  "weaknesses": ["README 已把 ET 列为 Deprecated，官方主推 TensorNet / TensorNet2", "角分辨率只到 l=1，高体序依赖层数堆叠", "无应力、不使用电荷/自旋、无真正的长程静电", "原始版本截断处能量不连续（需 vector_cutoff=true）", "默认暴力邻居搜索、整图推理，不适合大体系并行"],
+  "pretrained": ["ET-QM9 (U0)", "ET-MD17 (aspirin)", "ET-ANI1"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

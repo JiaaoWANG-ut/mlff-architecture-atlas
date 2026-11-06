@@ -1,0 +1,201 @@
+{
+  "id": "dftd3",
+  "name": "DFT-D3",
+  "fullName": "Grimme DFT-D3 / D3(BJ) dispersion correction — torch-dftd (PyTorch implementation by Preferred Networks)",
+  "year": 2010,
+  "authors": "S. Grimme, J. Antony, S. Ehrlich, H. Krieg（BJ 阻尼：S. Grimme, S. Ehrlich, L. Goerigk 2011；torch-dftd：Preferred Networks）",
+  "paper": {"title": "A consistent and accurate ab initio parametrization of density functional dispersion correction (DFT-D) for the 94 elements H-Pu", "venue": "J. Chem. Phys. 132, 154104 (2010)", "url": "https://doi.org/10.1063/1.3382344"},
+  "repos": ["torch-dftd"],
+  "family": "long-range-module",
+  "tags": ["色散 / vdW 校正", "Grimme D3 · BJ 阻尼", "配位数相关 C6", "ATM 三体（可选）", "PyTorch GPU + autograd", "外挂于 PBE 基础 MLIP"],
+  "framework": "PyTorch（ASE Calculator；三体项可选 CuPy CUDA 内核）",
+  "license": "MIT",
+  "oneLiner": "不是神经网络，而是一个可以“外挂”到任何 MLIP 上的物理公式：先用配位数从 Grimme 参考表里插值出每对原子的 C6（再推出 C8），然后把带阻尼的 −C6/r⁶ − C8/r⁸ 色散吸引在约 50 Å 的大截断内逐对求和；torch-dftd 用 PyTorch 张量实现，可在 GPU 上运行，力和应力由自动微分得到。",
+  "analogy": "像给一张只拍清了近景的照片补“环境光”：MLIP 只看清几埃以内的邻居，而且 PBE 训练数据本身就缺少原子之间那种微弱却无处不在的范德华吸引。D3 是一盏按物理公式打的补光灯——每对原子按距离六次方反比补一点吸引，亮度随原子周围“挤不挤”（配位数）自动调节，太近处用阻尼函数调暗，免得和 MLIP 已经画好的近景重复。",
+  "arch": {
+    "geometry": "仅原子对距离 r_ij（内部单位 Bohr）；可选三体项用三角形三边长（等价于三个夹角余弦）",
+    "equivariance": "E(3) 不变（能量只依赖距离）；力 / 应力由 autograd 自动等变",
+    "lmax": "无（不使用球谐）",
+    "bodyOrder": "2 体 C6/C8 项（经配位数 CN 隐含多体环境依赖）+ 可选 3 体 ATM（abc=True）",
+    "layers": "无可训练层（解析公式 + 参考参数表）",
+    "cutoff": "成对能截断 cutoff 默认 95 Bohr（≈50 Å）；配位数 / 三体截断 cnthr 默认 40 Bohr（≈21 Å）；mace_mp 两者均为 40 Bohr",
+    "receptiveField": "成对能直达 cutoff；C6 又经 CN 依赖 cnthr 内的邻居，有效依赖范围 ≈ cutoff + cnthr",
+    "message": "无消息传递；唯一的“环境”信息是配位数 CN_i（费米型计数函数），再按 CN 高斯加权插值参考 C6",
+    "readout": "逐边 −½(s6·C6·f6 + s8·C8·f8) 求和（float64 累加）+ 可选 ATM 三体；Hartree × 27.211 → eV",
+    "forces": "conservative",
+    "forcesDetail": "E_disp.sum().backward() 后 F = −pos.grad；含经 CN→C6 的链式多体项",
+    "stress": "坐标 pos 与周期平移 shift_pos 同时求导，σ = (1/V)[Σ r⊗∂E/∂r + Σ s⊗∂E/∂s]（Voigt 6 分量）",
+    "longRange": "本身就是长程模块：补 r⁻⁶ / r⁻⁸ 色散尾巴（截断约 50 Å）；不含静电",
+    "dispersion": "DFT-D3：zero / BJ / zerom / bjm 四种阻尼，另含 DFT-D2（old=True）；泛函相关参数 s6、s8、a1/a2 或 s_r6/s_r8、α=14",
+    "chargeSpin": "无（只依赖元素与几何）",
+    "otherOutputs": "仅能量（free_energy = energy）、力、应力；无原子能 / Hessian 输出",
+    "strictlyLocal": false,
+    "complexity": "O(N·M_cut) 条边 × 25 个参考 CN 点插值；ATM 为 O(N·M_cn²) 三元组 + N×N 稠密 C6 矩阵；M 随截断立方增长",
+    "accel": "纯 PyTorch，device='cuda' 即上 GPU；三元组枚举用 CuPy ElementwiseKernel；n_chunks 分块省显存；batch_calculate 批处理；邻居表仍在 CPU（pymatgen/ASE）"
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：元素、坐标、晶胞 → 换算成原子单位",
+      "plain": "D3 的输入只有原子序数 Z、坐标和（可选的）晶胞——不需要任何训练好的权重。TorchDFTD3Calculator 先把 ASE Atoms 转成张量，周期体系里把邻居的整数镜像编号 S 乘上晶胞得到平移向量；随后所有长度换算成 Bohr、能量按 Hartree 计算，最后乘 27.211 换回 eV，与 Grimme 原始 Fortran 代码的单位约定一致。",
+      "math": "\\mathbf r_{\\text{bohr}}=\\mathbf r_{\\text{ang}}/0.52917726,\\qquad E_{\\text{eV}}=27.21138505\\,E_{\\text{Ha}}",
+      "code": [
+        {"file": "torch_dftd/torch_dftd3_calculator.py", "start": 95, "end": 113, "must": "shift_pos = torch.mm(S, cell.detach())", "caption": "_preprocess_atoms：Atoms → 张量；镜像编号 S 乘晶胞得到平移向量"},
+        {"file": "torch_dftd/nn/dftd3_module.py", "start": 83, "end": 90, "must": "pos_bohr = pos / d3_autoang", "caption": "坐标、晶胞、平移统一换算成 Bohr 后求边长"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "超大截断的原子对（含周期镜像）",
+      "plain": "色散是按 r⁻⁶ 缓慢衰减的作用，所以截断要比 MLIP 大得多：默认 95 Bohr（≈50 Å），而 MLIP 通常只有 5–6 Å。非周期体系直接算 N×N 距离矩阵；周期体系用 pymatgen 的 get_neighbor_list（失败时退回 ASE primitive_neighbor_list）找出所有周期镜像，并要求边双向存储。求距离时加了极小的 eps，避免两原子重合时 sqrt 反传出 NaN。",
+      "math": "r_{ij}=\\big\\lVert\\mathbf r_i-(\\mathbf r_j+\\mathbf S_{ij}\\mathbf C)\\big\\rVert,\\qquad r_{ij}<r_{\\text{cut}}=95\\,a_0\\approx 50\\,\\mathring{\\mathrm A}",
+      "code": [
+        {"file": "torch_dftd/functions/edge_extraction.py", "start": 85, "end": 113, "must": "calc_neighbor_by_pymatgen(pos, cell, pbc, cutoff)", "caption": "calc_edge_index：非周期用稠密距离矩阵，周期用 pymatgen / ASE 邻居表"},
+        {"file": "torch_dftd/functions/distance.py", "start": 28, "end": 36, "must": "Rj += shift_pos", "caption": "calc_distances：加周期平移后求距离"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "配位数 CN：用平滑台阶函数“数邻居”",
+      "plain": "D3 相对 D2 的关键改进：同一种元素在不同化学环境下可极化程度不同（如 sp³ 碳与 sp² 碳），所以先用一个费米型计数函数数一数每个原子有多少近邻。共价半径之和明显大于距离（成键）时计数≈1，远小于时≈0，k1=16 控制台阶陡度；只统计 r ≤ cnthr（默认 40 Bohr）的原子对。CN 连续可微，之后对坐标求导会自然产生“经由 CN”的多体力项。",
+      "math": "\\mathrm{CN}_i=\\sum_{j\\ne i,\\ r_{ij}\\le r_{\\text{cn}}}\\frac{1}{1+\\exp\\!\\Big[-k_1\\Big(\\dfrac{R^{\\text{cov}}_{Z_i}+R^{\\text{cov}}_{Z_j}}{r_{ij}}-1\\Big)\\Big]},\\qquad k_1=16,\\ r_{\\text{cn}}=\\texttt{cnthr}=40\\,a_0",
+      "code": [
+        {"file": "torch_dftd/functions/dftd3.py", "start": 47, "end": 68, "must": "damp = 1.0 / (1.0 + torch.exp(-k1 * (rr - 1.0)))", "caption": "_ncoord：只统计 r ≤ cnthr 的边，计数后 scatter_add 到原子"},
+        {"file": "torch_dftd/functions/dftd3.py", "start": 208, "end": 218, "must": "cutoff=cnthr,", "caption": "edisp 中以 cnthr 作为配位数截断"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "C6 插值（按 CN 高斯加权）与 C8",
+      "plain": "D3 原文预先为每对元素在若干参考配位数下（每种元素最多 5 个）算好了 C6，存成 c6ab 表（95×95×5×5×3：C6 值、参考 CN_i、参考 CN_j）。对实际的 CN，按到各参考点距离的高斯权重（k3 = −4）求加权平均——代码里正好写成一个 softmax，表中不存在的参考点被置为 −1e20 屏蔽。C8 不另查表，而是由 C6 乘上两种元素的 r2r4 常数（源自原子 ⟨r⁴⟩/⟨r²⟩）得到。",
+      "math": "C_6^{ij}=\\frac{\\sum_{a,b}C_{6,\\text{ref}}^{Z_iZ_j}(a,b)\\,L_{ab}}{\\sum_{a,b}L_{ab}},\\quad L_{ab}=e^{\\,k_3\\left[(\\mathrm{CN}_i-\\mathrm{CN}^{\\text{ref}}_{a})^2+(\\mathrm{CN}_j-\\mathrm{CN}^{\\text{ref}}_{b})^2\\right]},\\ k_3=-4\\qquad C_8^{ij}=3\\,C_6^{ij}\\,q_{Z_i}\\,q_{Z_j}\\ (q=\\texttt{r2r4})",
+      "code": [
+        {"file": "torch_dftd/functions/dftd3.py", "start": 110, "end": 131, "must": "r_ratio = torch.softmax(k3_rnc, dim=1)", "caption": "_getc6_impl：25 个参考 (CN_a, CN_b) 点的高斯权重用 softmax 归一化"},
+        {"file": "torch_dftd/functions/dftd3.py", "start": 220, "end": 224, "must": "c8 = 3 * c6 * r2r4[Zi]", "caption": "C8 由 C6 与逐元素 r2r4 常数得到"},
+        {"file": "torch_dftd/nn/dftd3_module.py", "start": 43, "end": 53, "must": "dftd3_params.npz", "caption": "参考表 c6ab / r0ab / rcov / r2r4 注册为 buffer"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "阻尼函数：BJ 与 zero 两种“近程关断”",
+      "plain": "r→0 时 C6/r⁶ 会发散，而短程部分本来已由 DFT（或 MLIP）描述，所以必须用阻尼函数把近程关掉。zero 阻尼（2010 原版）让色散能在 r→0 时趋于 0，参数为 s_r,6、s_r,8 与 α=14；BJ 阻尼（2011）把分母改成 r⁶+R0⁶，短程趋于有限常数，R0 由 √(C8/C6) 线性给出，代码注释也指出 zero 阻尼会引入虚假排斥。torch-dftd 还实现了修正版 zerom / bjm；mace_mp 默认使用 BJ。",
+      "math": "\\text{BJ: }f_n(r)=\\frac{1}{r^n+R_0^n},\\ R_0=a_1\\sqrt{C_8^{ij}/C_6^{ij}}+a_2\\qquad\\text{zero: }f_n(r)=\\frac{1}{r^n}\\cdot\\frac{1}{1+6\\,\\big(s_{r,n}R_0^{Z_iZ_j}/r\\big)^{\\alpha_n}},\\ \\alpha_6=14,\\ \\alpha_8=16",
+      "code": [
+        {"file": "torch_dftd/functions/dftd3.py", "start": 226, "end": 251, "must": "tmp = a1 * torch.sqrt(c8 / c6) + a2", "caption": "BJ（含 bjm）与 zero 阻尼的实现"},
+        {"file": "torch_dftd/dftd3_xc_params.py", "start": 129, "end": 132, "must": "rs6 = 0.4289", "caption": "PBE-D3(BJ) 参数：rs6→a1，s18→s8，rs18→a2（Bohr）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "成对求和：−s6·C6·f6 − s8·C8·f8",
+      "plain": "每条（双向存储的）边贡献 −½[s6·C6·f6 + s8·C8·f8]，两个方向相加正好是一对原子的完整色散能；累加时转成 float64，减小大量小项相加的舍入误差。若 cutoff_smoothing='poly'，在截断前最后 1 Bohr 内乘一个 6x⁵−15x⁴+10x³ 的平滑台阶（CN 计数也同样处理），使能量和力在截断处连续；默认 'none' 时截断处有微小不连续。最后整体乘 27.211 换算为 eV。",
+      "math": "E^{(2)}=-\\sum_{i<j}\\Big[s_6\\,C_6^{ij}f_6(r_{ij})+s_8\\,C_8^{ij}f_8(r_{ij})\\Big]\\,S(r_{ij}),\\qquad S=\\begin{cases}1 & r\\le r_c-1\\,a_0\\\\ 6x^5-15x^4+10x^3 & x=(r_c-r)/a_0\\in(0,1)\\\\ 0 & r\\ge r_c\\end{cases}",
+      "code": [
+        {"file": "torch_dftd/functions/dftd3.py", "start": 270, "end": 290, "must": "e6 = -0.5 * s6 * c6 * e6", "caption": "双向边各记一半 → 可选 poly 平滑 → float64 求和"},
+        {"file": "torch_dftd/functions/smoothing.py", "start": 15, "end": 25, "must": "6 * x5 - 15 * x4 + 10 * x3", "caption": "poly_smoothing：截断前 1 Bohr 内由 1 平滑降到 0"},
+        {"file": "torch_dftd/nn/dftd3_module.py", "start": 91, "end": 102, "must": "E_disp = d3_autoev * edisp(", "caption": "Hartree → eV，截断从 Å 换算为 Bohr 传入"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "可选三体项：Axilrod–Teller–Muto（abc=True）",
+      "plain": "成对求和忽略了“三个原子同时被极化”的效应。打开 abc=True 后加入 ATM 三体项：C9 取三对 C6 的几何平均，角度因子 (3cosθ_i cosθ_j cosθ_k + 1) 让近等边三角形的贡献为正（排斥）；阻尼用三边 R0 与 r 的几何平均、指数 α+2 = 16。只有三边都在 cnthr 内的三元组参与；三元组在 no_grad 下枚举（GPU 上用 CuPy 内核），但能量对坐标仍然可微。",
+      "math": "E^{(3)}=\\sum_{i<j<k}\\frac{\\sqrt{C_6^{ij}C_6^{jk}C_6^{ik}}\\,\\big(3\\cos\\theta_i\\cos\\theta_j\\cos\\theta_k+1\\big)}{(r_{ij}r_{jk}r_{ik})^{3}}\\cdot\\frac{1}{1+6\\big(\\tfrac43\\,\\bar R_0/\\bar r\\big)^{16}},\\qquad \\bar x=(x_{ij}x_{jk}x_{ik})^{1/3}",
+      "code": [
+        {"file": "torch_dftd/functions/dftd3.py", "start": 356, "end": 385, "must": "ang = (0.375 * t1 * t2 * t3 / tmp2 + 1.0) / (tmp2**1.5)", "caption": "ATM：几何平均阻尼 + C9 + 角度因子，计入总能"},
+        {"file": "torch_dftd/functions/dftd3.py", "start": 313, "end": 334, "must": "kj_within_cutoff = r_jk <= cnthr", "caption": "no_grad 下枚举三元组，并要求 jk 边也在 cnthr 内"},
+        {"file": "torch_dftd/functions/triplets.py", "start": 58, "end": 65, "must": "_calc_triplets_core_gpu(", "caption": "张量在 GPU 上时改用 CuPy 内核枚举三元组"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对色散能自动微分",
+      "plain": "力不手写公式：坐标张量设 requires_grad，算出总色散能后做一次 backward，F = −∂E/∂r。由于 C6 依赖 CN、CN 又依赖邻居坐标，力中含有“链式”多体项——原版 Fortran 需要手推这些导数，这里由 autograd 自动给出，并与能量严格一致（保守力）。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E_{\\text{disp}}}{\\partial\\mathbf r_i}=-\\sum_{j}\\frac{\\partial E}{\\partial r_{ij}}\\frac{\\partial r_{ij}}{\\partial\\mathbf r_i}-\\sum_{k}\\frac{\\partial E}{\\partial \\mathrm{CN}_k}\\frac{\\partial \\mathrm{CN}_k}{\\partial\\mathbf r_i}",
+      "code": [
+        {"file": "torch_dftd/nn/base_dftd_module.py", "start": 113, "end": 127, "must": "forces = -pos.grad", "caption": "calc_energy_and_forces：坐标与平移向量开梯度，一次 backward"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：坐标与周期平移的梯度组成维里",
+      "plain": "周期体系中，坐标 pos 和周期平移 shift_pos 同时参与求导，二者的梯度与自身做外积再求和就是维里（相当于对均匀应变求导），除以晶胞体积得到 Voigt 6 分量应力。同一次 backward 同时给出力和应力，可直接用于 NPT 模拟或晶胞弛豫。",
+      "math": "\\sigma_{\\alpha\\beta}=\\frac{1}{V}\\Big[\\sum_i r_{i\\alpha}\\frac{\\partial E}{\\partial r_{i\\beta}}+\\sum_{(ij)}s_{ij,\\alpha}\\frac{\\partial E}{\\partial s_{ij,\\beta}}\\Big],\\qquad \\mathbf s_{ij}=\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"file": "torch_dftd/nn/base_dftd_module.py", "start": 139, "end": 155, "must": "stress = cell_grad.to(cell.dtype) / cell_volume", "caption": "维里：pos⊗∂E/∂pos + shift⊗∂E/∂shift，再除以体积"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "外挂到基础 MLIP：E_tot = E_MLIP + E_D3",
+      "plain": "MACE-MP、CHGNet、UPET 等基础模型多在 PBE/PBE+U 或 r²SCAN 数据上训练，标签里没有（或几乎没有）vdW 吸引，网络无从学到；MLIP 截断只有几 Å，远程色散尾巴也不存在。最简单的修正就是能量相加：mace_mp(dispersion=True) 内部构造 TorchDFTD3Calculator（默认 BJ、xc='pbe'、截断与 CN 截断均 40 Bohr），再用 ASE 的 SumCalculator 把能量、力、应力逐项相加；UPET 文档给出同样写法（xc='r2scan'），CHGNet 的 dispersion 示例也使用 torch-dftd。TorchDFTD3Calculator 自身也可通过 dft= 参数叠加任意底层计算器。",
+      "math": "E_{\\text{tot}}=E_{\\text{MLIP}}+E_{\\text{D3}},\\qquad \\mathbf F_{\\text{tot}}=\\mathbf F_{\\text{MLIP}}+\\mathbf F_{\\text{D3}},\\qquad \\boldsymbol\\sigma_{\\text{tot}}=\\boldsymbol\\sigma_{\\text{MLIP}}+\\boldsymbol\\sigma_{\\text{D3}}",
+      "code": [
+        {"repo": "mace", "file": "mace/calculators/foundations_models.py", "start": 347, "end": 369, "must": "SumCalculator([mace_calc, d3_calc])", "caption": "mace_mp(dispersion=True)：TorchDFTD3Calculator + SumCalculator"},
+        {"repo": "mace", "file": "mace/calculators/foundations_models.py", "start": 272, "end": 276, "must": "dispersion_cutoff: float = 40.0 * units.Bohr", "caption": "mace_mp 默认：BJ、PBE、两种截断均 40 Bohr"},
+        {"file": "torch_dftd/torch_dftd3_calculator.py", "start": 133, "end": 147, "must": "return dft_result + dftd3_result", "caption": "get_property：底层计算器结果 + D3 结果"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "其他 MLIP 包里的 D3：同一物理，不同内核",
+      "plain": "并非所有包都调用 torch-dftd。SevenNet 把 Grimme 的 Fortran 代码移植为 CUDA（FP32），提供 ASE 的 D3Calculator / SevenNetD3Calculator 与 LAMMPS pair_style d3，截断以 Bohr² 给出（默认 9000 / 1600）。Orb 与 fairchem 调用 NVIDIA nvalchemiops 的 D3(BJ) 内核：Orb 的 AlchemiDFTD3 默认 PBE、22 Å，并以 torch-dftd 的 PBE-BJ 结果做单元测试；fairchem 的 DFTD3Calculator 默认 15 Å 截断、在外侧 20% 做 C5 平滑，提供 pbe 与 r2scan 两套 BJ 参数，其中 PBE 参数与 torch-dftd 相同。",
+      "math": "r_c:\\ 95\\,a_0\\ (\\text{torch-dftd}),\\ 40\\,a_0\\ (\\text{mace\\_mp}),\\ \\sqrt{9000}\\,a_0\\ (\\text{SevenNet}),\\ 22\\,\\mathring{\\mathrm A}\\ (\\text{Orb}),\\ 15\\,\\mathring{\\mathrm A}\\ (\\text{FAIRChem})",
+      "code": [
+        {"repo": "SevenNet", "file": "sevenn/calculator.py", "start": 251, "end": 266, "must": "vdw_cutoff: float = 9000", "caption": "SevenNetD3Calculator：自带 CUDA D3，截断单位 Bohr²"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/inference/d3_model.py", "start": 20, "end": 43, "must": "cutoff: float = 22.0", "caption": "Orb AlchemiDFTD3：nvalchemiops D3(BJ)，可 torch.compile"},
+        {"repo": "fairchem", "file": "packages/fairchem-core/src/fairchem/core/calculate/dftd3_calculator.py", "start": 448, "end": 469, "must": "cutoff: float = 15.0,", "caption": "fairchem DFTD3Calculator：BJ，pbe / r2scan，默认 15 Å"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "使用原则：训练数据已含色散就不要再加 D3",
+      "plain": "D3 只应补“训练标签里没有的东西”。如果标签已含色散——MACE-OFF23 的 SPICE 数据为 ωB97M+D3（MACE README），UMA 的 OMol 任务为含非局域色散的 ωB97M-V，OMC / ODAC 为 PBE+D3，OC25 为 RPBE+D3——MLIP 已在截断内学到了色散，再加完整 D3 会把吸引算两遍、造成过度结合。fairchem 文档明确要求不要给 ωB97M-D4rev 微调模型加色散，而对 r²SCAN 模型推荐 DFTD3Calculator(functional='r2scan')。",
+      "math": "E^{\\text{label}}=E^{\\text{DFT}}+E^{\\text{disp}}\\ \\Rightarrow\\ E^{\\text{MLIP}}\\approx E^{\\text{label}}\\ \\Rightarrow\\ E^{\\text{MLIP}}+E^{\\text{D3}}\\ \\text{counts dispersion twice}",
+      "code": [
+        {"repo": "fairchem", "file": "docs/core/uma.md", "start": 89, "end": 102, "must": "Do not add dispersion", "caption": "UMA 文档：含色散的模型不要再加 D3；r²SCAN 模型配 D3(BJ)"},
+        {"repo": "fairchem", "file": "docs/core/uma.md", "start": 63, "end": 68, "must": "including non-local dispersion", "caption": "UMA 各任务的训练泛函：哪些含色散、哪些 “No dispersion”"},
+        {"repo": "mace", "file": "README.md", "start": 276, "end": 276, "must": "DFT (wB97M+D3)", "caption": "MACE-OFF23 训练数据已含 D3"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "damping", "value": "\"zero\"（TorchDFTD3Calculator 默认）；mace_mp 默认 \"bj\"", "note": "阻尼函数：zero / bj / zerom / bjm", "code": {"file": "torch_dftd/torch_dftd3_calculator.py", "start": 38, "end": 53, "must": "damping: str = \"zero\","}},
+    {"name": "xc", "value": "\"pbe\"", "note": "决定 s6、s8、a1/a2 等泛函相关参数，须与 MLIP 训练数据的泛函一致"},
+    {"name": "cutoff", "value": "95 Bohr（≈50 Å）；mace_mp 为 40 Bohr", "note": "成对色散能截断", "code": {"file": "torch_dftd/torch_dftd3_calculator.py", "start": 46, "end": 47, "must": "cutoff: float = 95.0 * Bohr,"}},
+    {"name": "cnthr", "value": "40 Bohr（≈21 Å）", "note": "配位数与三体项截断；若大于 cutoff 则被截为 cutoff", "code": {"file": "torch_dftd/nn/dftd3_module.py", "start": 55, "end": 60, "must": "cnthr = cutoff"}},
+    {"name": "abc", "value": "False", "note": "ATM 三体项默认关闭"},
+    {"name": "dtype", "value": "torch.float32", "note": "内部计算精度；能量累加时转 float64"},
+    {"name": "k1 / k3", "value": "16 / −4", "note": "CN 计数函数陡度 / C6 插值高斯宽度", "code": {"file": "torch_dftd/functions/dftd3.py", "start": 14, "end": 20, "must": "d3_k1 = 16.000"}},
+    {"name": "PBE-D3(BJ)", "value": "s6=1.0, a1=0.4289, s8=0.7875, a2=4.4407 Bohr", "note": "代码中 rs6→a1、s18→s8、rs18→a2", "code": {"file": "torch_dftd/dftd3_xc_params.py", "start": 129, "end": 132, "must": "rs18 = 4.4407"}},
+    {"name": "PBE-D3(zero)", "value": "s6=1.0, s_r6=1.217, s8=0.722, s_r8=1.0, α=14", "note": "零阻尼参数", "code": {"file": "torch_dftd/dftd3_xc_params.py", "start": 349, "end": 373, "must": "rs6 = 1.217"}},
+    {"name": "参考表", "value": "c6ab (95,95,5,5,3)，r0ab (95,95)，rcov / r2r4 (95)", "note": "每种元素最多 5 个参考配位数（d3_maxc = 5）", "code": {"file": "torch_dftd/nn/dftd3_module.py", "start": 43, "end": 53, "must": "self.register_buffer(\"c6ab\", c6ab)"}},
+    {"name": "cutoff_smoothing", "value": "\"none\"（可选 \"poly\"）", "note": "\"poly\"：截断前 1 Bohr 内五次多项式平滑二体项与 CN"},
+    {"name": "bidirectional", "value": "True（计算器默认；周期体系必须为 True）", "note": "边双向存储时每条边能量乘 0.5"}
+  ],
+  "speedNotes": [
+    "计算量集中在“边”上：截断内所有原子对都要算，而邻居数随 r_c³ 增长——50 Å 截断下每个原子的邻居约是 6 Å 截断的 (50/6)³≈580 倍；每条边还要对 25 个参考 (CN_a, CN_b) 点做 softmax 插值。减小 cutoff（mace_mp 用 40 Bohr）或设置 n_chunks 分块可降低显存峰值。",
+    "周期体系的邻居表在 CPU 上用 pymatgen（失败时退回 ASE）生成再拷到 GPU；非周期体系则构建 N×N 稠密距离矩阵——大体系时邻居搜索可能成为瓶颈。",
+    "ATM 三体（abc=True）要枚举 cnthr 内全部三元组（GPU 上用 CuPy ElementwiseKernel，需要 cupy 与 pytorch-pfn-extras），并建立 N×N 稠密 C6 矩阵 c6_mem，内存 ∝ N²，因此默认关闭。",
+    "默认 float32 计算、能量累加转 float64；力与应力由同一次 backward 得到，无需手写解析导数；batch_calculate 可把多个结构合成一个批次。",
+    "其他 GPU 实现：SevenNet 的 CUDA pair_d3（FP32，ASE / LAMMPS，文档注明暂不支持多 GPU）；Orb 与 fairchem 使用 nvalchemiops（解析力与应力，Orb 可 torch.compile）。"
+  ],
+  "weakNotes": [
+    "D3 只描述色散（−C6/r⁶ − C8/r⁸ 吸引 + 可选三体），不含静电、极化与电荷转移，也没有总电荷 / 自旋输入；离子液体、带电缺陷、界面电荷仍需 LES、Ewald 等静电模块。",
+    "PBE 训练的基础 MLIP 为什么需要它：PBE/PBE+U（MPtrj、OMat）、RPBE（OC20）标签不含 vdW 吸引（fairchem 文档标注 “No dispersion”），网络无从学到；MLIP 5–6 Å 截断又截掉了远程尾巴。典型后果是层状材料层间结合过弱、分子晶体与物理吸附结合能偏低。",
+    "参数必须与训练泛函匹配：xc 决定 s6、s8、a1、a2（PBE 数据用 'pbe'，r²SCAN 数据用 'r2scan'，RPBE 数据用 'rpbe'）；阻尼类型也应与参考 DFT 一致。",
+    "双重计数：训练标签已含色散的模型（MACE-OFF23：ωB97M+D3；UMA OMol：ωB97M-V；OMC / ODAC：PBE+D3；OC25：RPBE+D3；ωB97M-D4rev 微调模型）不要再加 D3。",
+    "截断处理：cutoff_smoothing 默认 'none'，能量在截断处有微小跳变；'poly' 只平滑二体项与 CN，ATM 三体项在源码中标注 TODO，尚未平滑。"
+  ],
+  "downstreamNotes": [
+    "层状 / 二维材料的层间距与剥离能、分子晶体、气体在多孔材料或表面上的物理吸附：基础 MLIP + D3 是最常用、无需额外训练的修正。",
+    "能量 / 力 / 应力来自同一个可微能量，保守自洽，可直接用于 NVE / NPT MD、晶胞弛豫与状态方程；mace_mp 中 D3 的精度跟随 default_dtype（float32 / float64）。",
+    "声子与弹性常数需要光滑的导数：二体项本身光滑，但默认截断不平滑，必要时开启 cutoff_smoothing='poly'；torch-dftd 不输出 Hessian、原子能等额外性质。",
+    "与参考数据比较吸附能、反应能时，要确认参考 DFT 是否含 D3、使用哪种阻尼，否则 D3 本身就会带来系统偏差。"
+  ],
+  "strengths": ["无需训练，参数覆盖 H–Pu 共 94 种元素", "与 MLIP 完全解耦，任何 ASE 计算器都能用 SumCalculator 叠加", "纯 PyTorch，可上 GPU、可批处理，力 / 应力由 autograd 精确给出", "支持 zero / BJ / zerom / bjm、D2 与 ATM 三体及多种泛函参数预设"],
+  "weaknesses": ["经验成对模型：无静电与极化，多体效应只有可选的 ATM 三体", "大截断导致边数巨大，邻居表仍在 CPU 上构建", "ATM 三体需要 N×N 稠密矩阵，且不支持截断平滑", "需人工判断训练数据是否已含色散，否则会双重计数"],
+  "pretrained": ["无需训练：Grimme D3 参考参数表 dftd3_params.npz（c6ab / r0ab / rcov / r2r4）", "泛函参数预设 get_dftd3_default_params（如 pbe、rpbe、revpbe、r2scan；zero / bj / zerom / bjm / D2）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

@@ -1,0 +1,207 @@
+{
+  "id": "schnet",
+  "name": "SchNet",
+  "fullName": "SchNet: A Continuous-Filter Convolutional Neural Network（SchNetPack 实现）",
+  "year": 2017,
+  "authors": "K. T. Schütt, P.-J. Kindermans, H. E. Sauceda, S. Chmiela, A. Tkatchenko, K.-R. Müller",
+  "paper": {"title": "SchNet: A continuous-filter convolutional neural network for modeling quantum interactions", "venue": "NeurIPS 2017", "url": "http://papers.nips.cc/paper/6700-schnet-a-continuous-filter-convolutional-neural-network-for-modeling-quantum-interactions"},
+  "repos": ["schnetpack"],
+  "family": "invariant-mpnn",
+  "tags": ["不变 MPNN", "连续滤波卷积 cfconv", "高斯径向基 + 余弦截断", "shifted softplus", "SchNetPack"],
+  "framework": "PyTorch（SchNetPack：PyTorch Lightning + Hydra 训练，TorchScript 部署）",
+  "license": "MIT",
+  "oneLiner": "把图像 CNN 里“网格上的离散卷积核”换成“距离的连续函数”：每对原子的滤波器 W(r_ij) 由一个小网络从高斯展开的距离生成，再与邻居特征逐通道相乘并求和（cfconv）；堆叠 6 个这样的交互块后，逐原子 MLP 给出原子能，求和即总能。",
+  "analogy": "像在嘈杂的房间里听邻居说话：离得越近听得越清楚，到截断半径处完全听不见（余弦截断）；而“音量随距离怎么衰减”的曲线不是人为规定的，是网络自己学出来的（滤波生成网络），而且 128 个“频道”各有各的曲线。听上 6 轮后，每个原子对周围环境有了印象，再各自报出一个能量，加起来就是总能量。",
+  "arch": {
+    "geometry": "只用原子间距离 d_ij（20 个高斯径向基 × 余弦截断）；不用角度、方向或球谐",
+    "equivariance": "E(3) 不变（特征只依赖距离）；力由能量求梯度，自动随坐标旋转",
+    "lmax": "无（只有 l=0 标量特征，没有球谐）",
+    "bodyOrder": "每层消息只依赖成对距离（2 体）；多层非线性叠加可隐式获得多体关联，但没有显式角度",
+    "layers": "6 个交互块（schnet.yaml：n_interactions=6），默认各块权重不共享",
+    "cutoff": "5 Å（md17 / qm9_atomwise 实验配置 globals.cutoff=5.）",
+    "receptiveField": "6 × r_c ≈ 30 Å（信息逐层接力）",
+    "message": "cfconv：W_in2f·x_j 与滤波 W_ij=MLP(RBF(d_ij))·f_cut(d_ij) 逐通道相乘，Σ_j 求和，再经 Dense–ssp–Dense，残差加回 x_i",
+    "readout": "Atomwise：逐原子 MLP 128→64→1（SiLU），scatter_add 求和；后处理加回数据集均值/原子参考能",
+    "forces": "conservative",
+    "forcesDetail": "Forces 模块：F = −∂E/∂R，torch.autograd.grad 一次反传（训练时 create_graph=True，使力进入损失）",
+    "stress": "Strain 输入模块给晶胞、坐标、周期偏移加零值应变 ε，σ = (1/V)·∂E/∂ε（Forces(calc_stress=True) 或 Response）",
+    "longRange": "SchNet 本身无；SchNetPack 提供可选 EnergyCoulomb / EnergyEwald（配合潜在部分电荷）模块，需自行组装",
+    "dispersion": "无内置 D3/MBD 色散项，只能在截断内由训练数据隐式学习",
+    "chargeSpin": "可选 electronic_embeddings（ElectronicEmbedding：注意力式把总电荷/自旋分摊到原子）；默认不启用",
+    "otherOutputs": "偶极（潜在电荷 Σq_i r_i）、Hessian（Response 二阶导）；FieldSchNet 变体经外场求导得偶极、极化率、NMR 屏蔽等；可选 ZBL 近程排斥",
+    "strictlyLocal": false,
+    "complexity": "O(L·N·M·F)：每条边一个两层滤波网络（20→F→F）+ F 通道逐元素乘；F=128、L=6，无张量积，常数很小",
+    "accel": "spkdeploy 导出 TorchScript → LAMMPS pair_style schnetpack（CPU/CUDA，newton off）；ASE 计算器；自带 GPU MD（含路径积分 MD、恒温器、恒压器）"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "没有角度循环、球谐或张量积，每条边只有一个小 MLP 和逐通道乘法；但 6 层消息传递加自动微分求力，仍比 NEP/ACE 等描述符模型慢。"},
+    "expressiveness": {"v": 2, "why": "只有两体距离和标量特征，没有显式角度；多层叠加能间接获得多体信息，但表达力和数据效率明显弱于 DimeNet、PaiNN 和等变模型。"},
+    "longRange": {"v": 3, "why": "SchNet 本身只有 6 层消息传递的感受野；SchNetPack 另提供可选的潜在电荷 + 库仑/Ewald 模块和总电荷嵌入，但需用户自行组装。"},
+    "scalability": {"v": 2, "why": "6 层感受野约 30 Å，难以做空间分解；LAMMPS 接口按全局 tag 把全部原子拼成一张图，实现上假设所有原子都在同一进程，没有层间 ghost 特征通信。"},
+    "physics": {"v": 4, "why": "保守力、余弦截断使滤波在 r_c 处连同一阶导平滑归零、原子能求和保证广延性、可选 ZBL；但余弦截断的二阶导在 r_c 处不连续。"},
+    "coverage": {"v": 3, "why": "除 E/F/S 外官方可得 Hessian 与偶极（潜在电荷）；极化率、NMR 屏蔽等响应性质需换用 FieldSchNet，极化率张量读出头则要求 PaiNN 这类带矢量特征的表示。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：原子序数、坐标、晶胞与周期性",
+      "plain": "SchNetPack 把一个结构存成一个张量字典：原子序数 Z、坐标 R、晶胞 cell、周期性 pbc，以及批处理用的 idx_m（每个原子属于哪个结构）。NeuralNetworkPotential.forward 第一步为需要求导的量（坐标 R；要算应力时还有应变 strain）打开 requires_grad，然后依次执行输入模块 → SchNet 表示 → 输出模块 → 后处理。",
+      "math": "\\mathcal{S}=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{0,1\\}^3",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/model/base.py", "start": 101, "end": 107, "must": "inputs[p].requires_grad_()", "caption": "initialize_derivatives：为坐标/应变打开梯度"},
+        {"repo": "schnetpack", "file": "src/schnetpack/model/base.py", "start": 170, "end": 186, "must": "inputs = self.representation(inputs)", "caption": "NeuralNetworkPotential.forward：输入模块 → 表示 → 输出模块 → 后处理"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表与边向量：截断半径内的原子对（含周期镜像）",
+      "plain": "数据预处理阶段（transform）用 ASE / matscipy / vesin 等邻居表找出所有距离小于 r_c 的原子对，记下 idx_i、idx_j 和周期平移 offsets。模型里的 PairwiseDistances 再用 R_j − R_i + offset 算出边向量——这一步在计算图内，所以力能沿它反传回坐标。之后所有计算都只在这些边上进行，代价随原子数线性增长。",
+      "math": "\\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C,\\qquad \\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/transform/neighborlist.py", "start": 179, "end": 192, "must": "self._build_neighbor_list(Z, R, cell, pbc, self._cutoff)", "caption": "NeighborListTransform：生成 idx_i / idx_j / offsets"},
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/distances.py", "start": 12, "end": 24, "must": "Rij = R[idx_j] - R[idx_i] + offsets", "caption": "PairwiseDistances：可微的边向量"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 20 个高斯径向基；余弦截断",
+      "plain": "SchNet 只看距离 d_ij=|r_ij|，不看方向，所以天然对旋转、平移、反演不变。距离被展开成 20 个等间距高斯（中心从 0 到 r_c，宽度等于相邻中心间距），相当于把一个数“软分箱”成一个向量，方便后面的网络学出任意形状的距离依赖。余弦截断 f_cut 让每条边的贡献在 r_c 处连同一阶导数平滑归零，原子进出截断球时能量和力都不会跳变。",
+      "math": "e_k(d_{ij})=\\exp\\!\\Big(-\\frac{(d_{ij}-\\mu_k)^2}{2\\Delta^2}\\Big),\\ \\mu_k=\\frac{(k-1)\\,r_c}{19},\\ \\Delta=\\frac{r_c}{19},\\ k=1,\\dots,20\\qquad f_{\\text{cut}}(d)=\\tfrac12\\Big[1+\\cos\\frac{\\pi d}{r_c}\\Big]\\,\\mathbb 1[d<r_c]",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 154, "end": 157, "must": "f_ij = self.radial_basis(d_ij)", "caption": "SchNet.forward：距离 → 径向基与截断值"},
+        {"repo": "schnetpack", "file": "src/schnetpack/nn/radial.py", "start": 9, "end": 37, "must": "offset = torch.linspace(start, cutoff, n_rbf)", "caption": "gaussian_rbf / GaussianRBF：中心 linspace(0, r_c, n_rbf)，宽度 = 间距"},
+        {"repo": "schnetpack", "file": "src/schnetpack/nn/cutoff.py", "start": 30, "end": 34, "must": "torch.cos(input * math.pi / cutoff)", "caption": "cosine_cutoff：Behler 式余弦截断"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：原子序数 → 128 维可学习向量（可选电荷/自旋嵌入）",
+      "plain": "每种元素查一张可学习的表 nn.Embedding(100, 128)，得到初始特征 x_i⁽⁰⁾，等价于 one-hot 后接线性层。若配置了 electronic_embeddings，还会用一个类似单头注意力的模块把整个结构的总电荷或自旋“分摊”到各原子并加到特征上，使同一几何在不同电荷/自旋态下给出不同能量；默认不启用。",
+      "math": "x_i^{(0)}=\\mathbf E[Z_i]\\in\\mathbb R^{128}\\ \\Big(+\\textstyle\\sum_{\\text{emb}}\\Delta x_i^{\\,Q/S}\\Big)",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 125, "end": 133, "must": "nn.Embedding(100, n_atom_basis)", "caption": "默认核嵌入：最多支持 100 种元素"},
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 159, "end": 162, "must": "x = x + embedding(x, inputs)", "caption": "叠加可选的电子（总电荷/自旋）嵌入"},
+        {"repo": "schnetpack", "file": "src/schnetpack/nn/embedding.py", "start": 316, "end": 342, "must": "weights = torch.sum(k * q, dim=-1) / k.shape[-1] ** 0.5", "caption": "ElectronicEmbedding：注意力式分配总电荷/自旋"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：滤波生成网络 W(r_ij)——“连续卷积核”",
+      "plain": "普通 CNN 的卷积核是定义在网格上的离散权重；原子位置是连续的，所以 SchNet 让卷积核成为距离的连续函数：20 维高斯展开送入两层全连接网络（Dense–shifted softplus–Dense），输出 128 个通道各自的权重，再乘以余弦截断。shifted softplus ssp(x)=ln(1+eˣ)−ln2 处处光滑且 ssp(0)=0，保证能量对坐标的高阶导数存在、力光滑。",
+      "math": "W_{ij}=\\Big[W_2\\,\\mathrm{ssp}\\big(W_1\\,\\mathbf e(d_{ij})+\\mathbf b_1\\big)+\\mathbf b_2\\Big]\\,f_{\\text{cut}}(d_{ij})\\qquad \\mathrm{ssp}(x)=\\ln(1+e^{x})-\\ln 2",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 31, "end": 39, "must": "self.filter_network = nn.Sequential(", "caption": "SchNetInteraction：in2f / f2out / filter_network 三个子网络"},
+        {"repo": "schnetpack", "file": "src/schnetpack/nn/activations.py", "start": 9, "end": 22, "must": "functional.softplus(x) - math.log(2.0)", "caption": "shifted_softplus 激活函数"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：连续滤波卷积 cfconv + 残差更新",
+      "plain": "先把原子特征线性投影到滤波空间（in2f，无偏置），对每条边取邻居特征 x_j 与滤波 W_ij 逐通道相乘（⊙），再对所有邻居求和——这就是 cfconv。随后经 Dense–ssp–Dense（f2out）得到更新量 v_i，以残差方式加回 x_i。6 个交互块依次执行，信息每层向外多传一个截断半径。",
+      "math": "v_i=W_4\\,\\mathrm{ssp}\\Big(W_3\\sum_{j\\in\\mathcal N(i)}\\big(W_{\\text{in2f}}\\,x_j\\big)\\odot W_{ij}+\\mathbf b_3\\Big)+\\mathbf b_4,\\qquad x_i\\leftarrow x_i+v_i\\ \\ (\\times 6)",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 60, "end": 70, "must": "x_ij = x_j * Wij", "caption": "SchNetInteraction.forward：cfconv（逐通道相乘 + scatter_add）"},
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 164, "end": 170, "must": "x = x + v", "caption": "交互块残差堆叠，输出 scalar_representation"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：逐原子 MLP → 原子能",
+      "plain": "最后一层的 128 维标量特征送入 Atomwise 输出模块：默认是 2 层“金字塔”MLP（n_hidden=None 时每层宽度减半：128 → 64 → 1，SiLU 激活），每个原子得到一个标量 ε_i。读出只在最后一层做一次，不像 MACE 那样每层都读出。",
+      "math": "\\varepsilon_i=\\mathbf w_2^{\\top}\\,\\mathrm{SiLU}\\big(W_1\\,x_i^{(6)}+\\mathbf b_1\\big)+b_2,\\qquad W_1\\in\\mathbb R^{64\\times128}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/atomwise.py", "start": 60, "end": 75, "must": "self.outnet = spk.nn.build_mlp(", "caption": "Atomwise：构建并调用逐原子 MLP"},
+        {"repo": "schnetpack", "file": "src/schnetpack/nn/blocks.py", "start": 38, "end": 57, "must": "c_neurons = max(n_out, c_neurons // 2)", "caption": "build_mlp：金字塔式隐藏层宽度"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和 + 数据集均值 / 原子参考能",
+      "plain": "Atomwise 用 scatter_add 把同一结构的原子能加起来（aggregation_mode=sum），保证广延性：体系加倍，能量加倍。训练前数据变换 RemoveOffsets 从标签中减去每原子均值（qm9 示例还减单原子参考能），推理时后处理 AddOffsets 再加回去，网络只需学“偏离平均”的部分，数值更稳定。",
+      "math": "E=\\sum_{i=1}^{N}\\varepsilon_i\\;+\\;N\\,\\bar e\\;+\\;\\sum_{i=1}^{N}E^{\\text{ref}}(Z_i)",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/atomwise.py", "start": 77, "end": 88, "must": "y = snn.scatter_add(y, idx_m, dim_size=maxm)", "caption": "Atomwise：按结构求和"},
+        {"repo": "schnetpack", "file": "src/schnetpack/transform/atomistic.py", "start": 299, "end": 323, "must": "y0i = self.atomref[inputs[structure.Z]]", "caption": "AddOffsets：加回均值与原子参考能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分（及 Hessian）",
+      "plain": "Forces 输出模块对总能做一次 torch.autograd.grad，得到 −∂E/∂R，所以 SchNet 的力严格保守（是某个势能的梯度），NVE 分子动力学中能量守恒。训练时 create_graph=True，让力的误差也能反传到网络参数（md17 示例中力损失权重 0.99、能量 0.01）。Response 模块用同样机制再求一次导，就得到 Hessian。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}\\qquad \\mathbf H=\\frac{\\partial^2 E}{\\partial\\mathbf R\\,\\partial\\mathbf R}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/response.py", "start": 56, "end": 73, "must": "inputs[self.force_key] = -dEdR", "caption": "Forces.forward：一次反传得到力"},
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/response.py", "start": 186, "end": 199, "must": "results[properties.hessian] = d2EdR2", "caption": "Response：力与 Hessian"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对零值应变求导",
+      "plain": "需要应力时，Strain 输入模块先建一个全零、可求导的应变张量 ε，并把晶胞、坐标和周期偏移都随 ε 形变；能量对 ε 的梯度就是维里，Forces(calc_stress=True) 再除以晶胞体积得到应力。即使模型训练时没学应力，ASE / MD 接口也可用 activate_model_stress 事后打开（自动插入 Strain）。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon^{\\top}),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon^{\\top}),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/response.py", "start": 434, "end": 457, "must": "strain.requires_grad_()", "caption": "Strain：给晶胞、坐标、偏移加入应变依赖"},
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/response.py", "start": 75, "end": 87, "must": "inputs[self.stress_key] = stress / volume", "caption": "Forces：维里 / 体积 = 应力"},
+        {"repo": "schnetpack", "file": "src/schnetpack/md/utils/__init__.py", "start": 77, "end": 79, "must": "model.input_modules.insert(0, Strain())", "caption": "activate_model_stress：为已训练模型事后启用应力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/近程物理：可选库仑（Ewald）与 ZBL 模块",
+      "plain": "SchNet 本身没有色散或静电项，截断外的作用只能靠 6 层消息传递的感受野间接“看到”。SchNetPack 另外提供可组合的物理模块：EnergyCoulomb / EnergyEwald 用潜在部分电荷（例如 DipoleMoment 预测的 q_i）计算库仑能，可配合 FilterShortRange 使用单独的长程邻居表；ZBLRepulsionEnergy 给出带可学习屏蔽函数的核—核排斥，防止原子过近时塌缩。这些模块需用户自行放进 output_modules 并与 SchNet 能量相加。",
+      "math": "E_{\\text{Coul}}=\\frac{k_e}{2}\\sum_{i}\\sum_{j\\in\\mathcal N_{\\text{lr}}(i)}q_iq_j\\,\\phi(r_{ij})\\qquad E_{\\text{ZBL}}=\\frac{k_e}{2}\\sum_{i\\ne j}\\frac{Z_iZ_j}{r_{ij}}\\sum_{k=1}^{4}c_k\\,e^{-\\alpha_k a_{ij}r_{ij}}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/electrostatic.py", "start": 117, "end": 150, "must": "q_ij = q[idx_i] * q[idx_j]", "caption": "EnergyCoulomb：成对库仑求和（可选截断平移）"},
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/nuclear_repulsion.py", "start": 82, "end": 105, "must": "repulsion = (z[idx_i] * z[idx_j]) / d_ij", "caption": "ZBLRepulsionEnergy：可学习屏蔽的核排斥"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多性质：偶极（潜在电荷）与外场响应（FieldSchNet）",
+      "plain": "SchNet 只有标量特征，所以偶极用“潜在部分电荷”表示：DipoleMoment 为每个原子预测 q_i，并修正使 Σq_i 等于总电荷，再算 μ=Σq_i r_i。更进一步，FieldSchNet 在 SchNet 交互块里加入外电场/磁场与偶极特征的耦合，于是偶极 = −∂E/∂F、极化率 = −∂²E/∂F²、NMR 屏蔽等都能作为能量的响应性质求导得到。注意 Polarizability 读出头需要矢量特征（如 PaiNN），不能直接接在 SchNet 上。",
+      "math": "\\boldsymbol\\mu=\\sum_i q_i\\mathbf r_i,\\ \\ q_i=\\tilde q_i+\\frac{Q-\\sum_k\\tilde q_k}{N}\\qquad \\boldsymbol\\mu=-\\frac{\\partial E}{\\partial\\mathbf F},\\ \\ \\boldsymbol\\alpha=-\\frac{\\partial^2E}{\\partial\\mathbf F^2}",
+      "code": [
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/atomwise.py", "start": 183, "end": 207, "must": "y = positions * charges", "caption": "DipoleMoment：潜在电荷 → 偶极"},
+        {"repo": "schnetpack", "file": "src/schnetpack/atomistic/response.py", "start": 222, "end": 248, "must": "results[properties.polarizability] = d2EdF2", "caption": "Response：偶极 −∂E/∂F 与极化率 −∂²E/∂F²"},
+        {"repo": "schnetpack", "file": "src/schnetpack/representation/field_schnet.py", "start": 424, "end": 436, "must": "dq = dq + dq_field + dq_dipole", "caption": "FieldSchNet：SchNet 交互 + 外场/偶极耦合"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "n_atom_basis", "value": "128", "note": "原子特征维度", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/model/representation/schnet.yaml", "start": 4, "end": 6, "must": "n_atom_basis: 128"}},
+    {"name": "n_interactions", "value": "6", "note": "交互块（消息传递层）数", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/model/representation/schnet.yaml", "start": 4, "end": 6, "must": "n_interactions: 6"}},
+    {"name": "n_filters", "value": "= n_atom_basis（128）", "note": "cfconv 滤波通道数，未指定时等于 n_atom_basis", "code": {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 119, "end": 120, "must": "self.n_filters = n_filters or self.n_atom_basis"}},
+    {"name": "n_rbf", "value": "20", "note": "高斯径向基个数（0 → r_c 等间距）", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/model/representation/radial_basis/gaussian.yaml", "start": 1, "end": 3, "must": "n_rbf: 20"}},
+    {"name": "cutoff", "value": "5.0 Å", "note": "md17 / qm9_atomwise 实验配置；余弦截断", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/experiment/md17.yaml", "start": 10, "end": 12, "must": "cutoff: 5."}},
+    {"name": "activation", "value": "shifted softplus", "note": "滤波网络与 f2out 中的激活；shared_interactions 默认 False", "code": {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 97, "end": 101, "must": "activation: Callable | nn.Module = shifted_softplus"}},
+    {"name": "nuclear_embedding", "value": "nn.Embedding(100, 128)", "note": "元素查表嵌入", "code": {"repo": "schnetpack", "file": "src/schnetpack/representation/schnet.py", "start": 125, "end": 128, "must": "nn.Embedding(100, n_atom_basis)"}},
+    {"name": "Atomwise MLP", "value": "128 → 64 → 1，SiLU（n_layers=2, n_hidden=None）", "note": "逐原子能量读出", "code": {"repo": "schnetpack", "file": "src/schnetpack/atomistic/atomwise.py", "start": 21, "end": 30, "must": "activation: Callable = F.silu"}},
+    {"name": "loss_weight（md17）", "value": "能量 0.01 / 力 0.99", "note": "md17 实验配置（README 文字称默认 0.005 / 0.995）", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/experiment/md17.yaml", "start": 45, "end": 68, "must": "loss_weight: 0.99"}},
+    {"name": "CLI 表示选择", "value": "model/representation=schnet", "note": "model/nnp.yaml 默认表示是 painn，用 SchNet 需显式指定", "code": {"repo": "schnetpack", "file": "src/schnetpack/configs/model/nnp.yaml", "start": 1, "end": 2, "must": "representation: painn"}}
+  ],
+  "speedNotes": [
+    "FLOPs 几乎全在边上：每条边一次两层滤波网络（20 → 128 → 128）加 128 通道逐元素乘，再 scatter_add 回节点；没有球谐、张量积或三体角度循环，单层成本属于 MPNN 中最低的一档。",
+    "总代价 ∝ 层数 × 边数：默认 6 层、r_c=5 Å；致密固体里每个原子的邻居数随 r_c³ 增长，增大截断会让滤波网络的计算量迅速上升。",
+    "力和应力由 autograd 反传得到，反传成本与前向同量级；训练时 create_graph=True 需要二阶反传，显存占用更高。",
+    "邻居表在数据变换阶段计算（ASE / matscipy / vesin / Torch 实现可选），并有 SkinNeighborList、CachedNeighborList 减少重复建表；输入默认转 float32（CastTo32），后处理转 float64（CastTo64）。",
+    "部署：spkdeploy 用 torch.jit.script 导出模型供 LAMMPS（CPU/CUDA）调用；没有 cuEquivariance 那类专用融合内核。"
+  ],
+  "weakNotes": [
+    "单层只“看见” r_c=5 Å 内的原子，6 层后能量最多依赖约 30 Å 内的原子；但信息靠逐层接力传递，对远处弱相互作用（色散 r⁻⁶、静电 r⁻¹）描述很弱，截断外的尾巴完全缺失。",
+    "SchNet 无内置色散（D3/MBD）与静电；SchNetPack 的库仑/Ewald 模块依赖可靠的潜在部分电荷，需用户自行搭建并训练。",
+    "SchNetPack 不附带预训练通用模型，训练数据与泛函由用户决定；内置数据集包括 QM9、MD17/rMD17、MD22、ISO17、ANI-1、QM7-X（力为 PBE0+MBD）、Materials Project、OMDB 等。",
+    "只用距离、没有角度：层状 vdW 材料层间结合、分子晶体、物理吸附、带电缺陷、离子液体与界面电荷转移等体系容易出错；electronic_embeddings 可输入总电荷/自旋，但没有显式电荷平衡。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 余弦截断（一阶导连续）适合 NVE/NVT 分子动力学；SchNetPack 自带 GPU MD（含路径积分 MD、恒温器、恒压器）、ASE 计算器和 LAMMPS 接口。",
+    "声子/振动：Response 可直接给出 Hessian；但余弦截断的二阶导在 r_c 处不连续，二阶性质对截断附近更敏感，精度一般不如高体序等变模型。",
+    "几何优化与变胞：ASE 计算器和批量优化器（batchwise_optimization）可用；应力可用 activate_model_stress 事后开启，支持 NPT 与晶胞优化。",
+    "光谱：DipoleMoment（潜在电荷）给出偶极，可用于红外光谱；FieldSchNet 通过外场响应得到极化率（拉曼）、NMR 屏蔽，并能模拟溶剂/外场效应。",
+    "反应与大形变：可叠加 ZBL 防止近距离塌缩；没有磁矩/自旋极化输出。"
+  ],
+  "strengths": ["结构极简、易懂，是“连续滤波卷积”消息传递的开山之作", "无张量积，推理和训练快、显存占用低", "保守力，可微到 Hessian 与应力；FieldSchNet 扩展出完整的响应性质", "SchNetPack 提供训练 CLI、多数据集、ASE / LAMMPS / GPU MD 全流程"],
+  "weaknesses": ["只用距离，没有角度/方向信息，表达力和数据效率明显弱于 DimeNet、PaiNN 和等变模型", "没有内置色散与长程静电，需自行组装模块", "6 层消息传递感受野大，难以做空间分解并行", "官方不提供预训练通用（基础）模型"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

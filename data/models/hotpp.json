@@ -1,0 +1,208 @@
+{
+  "id": "hotpp",
+  "name": "HotPP",
+  "fullName": "HotPP: High order tensor Passing Potential（高阶笛卡尔张量消息传递势）",
+  "year": 2024,
+  "authors": "Junjie Wang 等（南京大学 孙建 课题组）",
+  "paper": {"title": "E(n)-Equivariant cartesian tensor message passing interatomic potential", "venue": "Nature Communications 15, 7607 (2024)", "url": "https://doi.org/10.1038/s41467-024-51886-6"},
+  "repos": ["hotpp"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔张量", "E(3) 等变", "缩并+外积代替 CG", "偶极/极化率", "保守力"],
+  "framework": "PyTorch + PyTorch Lightning（TorchScript 导出）",
+  "license": "MIT",
+  "oneLiner": "把 NequIP 式的等变消息传递整个搬到笛卡尔坐标里：方向用单位向量的 n 重外积 û⊗û⊗… 表示，特征之间的“张量积”就是普通的指标缩并与外积，不需要球谐和 Clebsch–Gordan 系数；同一套网络既能输出标量能量，也能直接输出偶极（向量）、极化率（矩阵）等张量。",
+  "analogy": "球谐方法像先把形状翻译成“频谱语言”（各角动量分量），再按查表规则（CG 系数）组合；HotPP 直接用“箭头与箭头相乘”说话：两个箭头点乘得一个数，并排摆放得一个矩阵，矩阵再乘箭头又得箭头——全是中学就会的向量/矩阵运算，整个分子转动时这些量自然跟着一起转。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（可训练频率 Bessel→MLP×多项式包络）+ 方向的笛卡尔矩张量 û^{⊗n}（n ≤ maxRWay=2），不用球谐/CG",
+    "equivariance": "E(3)/O(3) 等变（含反演）：特征都是普通极性笛卡尔张量，只用外积与缩并，不引入 Levi-Civita；论文称 E(n) 等变",
+    "lmax": "张量阶 way：边滤波 ≤2（maxRWay）、隐藏特征 ≤2（maxOutWay），可设更高；最后一层阶数 = 目标性质最高阶",
+    "bodyOrder": "每层消息对 h_j 线性（中心–邻居两体 × 已有特征），体序随层数与非线性逐层提升（类似 NequIP）",
+    "layers": "5（nLayer 默认）；碳示例 5 层，水极化率示例 4 层",
+    "cutoff": "代码无默认值（input.yaml 必填，数据类缺省 4.0 Å）；示例：碳 3.0 Å、水 4.0 Å",
+    "receptiveField": "nLayer × r_c，如碳示例 5×3.0 Å = 15 Å",
+    "message": "m_ij^(z) = Σ W_xyz[(U h_j^(x)) ·_k (f^(y)(r_ij) û^{⊗y})]，k=(x+y−z)/2；按阶求和后 ÷ 训练集平均邻居数",
+    "readout": "按目标阶取特征：TensorLinear(64→64) → 张量 SiLU → TensorLinear(64→1)；×std+mean，加 E0(Z)",
+    "forces": "both",
+    "forcesDetail": "默认 F = −∂E/∂r（torch.autograd.grad 一次反传）；可选 direct_forces 目标，用 1 阶读出直接预测力（非保守）",
+    "stress": "单位缩放矩阵 Λ 右乘坐标与周期平移，virial = −∂E/∂Λ，σ = (∂E/∂Λ)/V，与力同一次反传",
+    "longRange": "无；仅 nLayer × r_c 的消息传递感受野，无 Ewald/电荷平衡",
+    "dispersion": "无内置 D3/D4；可选的 Repulsion（Σ c_k r^{-k} 两体项，默认关闭）只管近程排斥",
+    "chargeSpin": "无总电荷/自旋多重度输入；另有实验性自旋模型 SpinMiaoNet/SOC 版本，输入原子磁矩向量",
+    "otherOutputs": "偶极、极化率、全对称 3 阶张量、逐原子 2/3 阶张量、direct_forces、描述符；自旋模型的磁力/自旋力矩；hotphono 的 Hessian 力常数",
+    "strictlyLocal": false,
+    "complexity": "每层 O(N·M·Σ_路径 C²·3^z)：通道线性层直接作用在边张量上；阶 ≤2 时中间层最多 11 条 (x,y,z) 路径",
+    "accel": "无自定义 CUDA 内核；@torch.jit.script + hotpp freeze 导出 TorchScript；LAMMPS pair_style miao（全邻居表、仅全局维里）及偶极/极化率 compute；ASE MiaoCalculator"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "笛卡尔缩并本身只是稠密广播乘加，但默认 5 层、每条路径的 64×64 通道线性层直接作用在边上，整体与 4–6 层 NequIP 类深层等变网络同档。"},
+    "expressiveness": {"v": 4, "why": "任意阶笛卡尔张量消息 + 范数门控非线性 + 5 层，角分辨率与等变网络相当；但每层不像 MACE/ACE 那样显式构造高体序。"},
+    "longRange": {"v": 2, "why": "没有静电或色散模块，只有 nLayer×r_c 的消息传递感受野。"},
+    "scalability": {"v": 2, "why": "5 层消息传递；LAMMPS 接口把邻居经 atom->map 映射回本地原子，未见层间 ghost 特征通信，看不出多进程空间分解支持。"},
+    "physics": {"v": 4, "why": "默认保守力、p=5 多项式包络（r_c 处值与一二阶导为零）、原子能求和保证广延、精确 O(3) 等变；近程排斥项可选但默认关闭。"},
+    "coverage": {"v": 4, "why": "官方支持偶极、极化率、3 阶张量、逐原子张量、direct force、自旋磁力，并提供 Hessian 工具；没有专门的电荷/BEC 输出头。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞（按需开启求导）",
+      "plain": "输入是 N 个原子的笛卡尔坐标、原子序数和晶胞；推理时还附带一个 3×3 单位“缩放矩阵” scaling 与体积。要算力时把坐标设为可求导；要算应力/维里时把缩放矩阵设为可求导，并让坐标、周期平移都乘上它——之后所有力和应力都是能量的梯度。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\qquad \\boldsymbol\\Lambda=\\mathbf 1_{3\\times3}\\ (\\text{requires grad})",
+      "code": [{"repo": "hotpp", "file": "hotpp/model/base.py", "start": 18, "end": 34, "must": "requires_grad_()", "caption": "AtomicModule.forward：按所需性质对坐标/缩放矩阵开启 requires_grad"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：截断半径内的所有有向原子对（含周期镜像）",
+      "plain": "用 ASE 的 neighbor_list('ijS') 找出所有距离小于 r_c 的有向原子对 (i, j)，并把整数周期平移 S 乘以晶胞得到 offset。之后的计算全部在这些边上进行，代价随原子数线性增长。LAMMPS 接口则直接用 LAMMPS 的全邻居表，在 C++ 里筛选 r<r_c 的对，并把邻居通过 atom->map 映射回本地原子编号。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j+\\mathbf S_{ij}\\mathbf C-\\mathbf r_i\\rVert<r_c\\,\\},\\qquad \\text{offset}_{ij}=\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/data/utils.py", "start": 32, "end": 47, "must": "neighbor_list(", "caption": "atoms_to_data：idx_i / idx_j 与周期平移 offset"},
+        {"repo": "hotpp", "file": "interface/lammps/src/pair_miao.cpp", "start": 183, "end": 202, "must": "atom->map(tag[j])", "caption": "LAMMPS pair_style miao：从全邻居表筛选 r<r_c 的边"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向编码：单位向量的 n 重外积（笛卡尔矩张量）",
+      "plain": "每条边的向量 r_ij 拆成长度和单位方向 û_ij。HotPP 不用球谐函数编码方向，而是把 û 自己做 n 次外积：n=0 是常数 1，n=1 是向量 û，n=2 是 3×3 矩阵 ûûᵀ。这些“矩张量”在旋转 R 下按笛卡尔规则（每个指标乘一个 R）变换，因此后面只要做外积和指标缩并就天然等变。结果按阶缓存，供各层复用。",
+      "math": "\\mathbf r_{ij}=\\mathbf r_j+\\mathbf S_{ij}\\mathbf C-\\mathbf r_i,\\quad \\hat{\\mathbf u}_{ij}=\\frac{\\mathbf r_{ij}}{\\lVert\\mathbf r_{ij}\\rVert},\\qquad \\mathcal M^{(n)}_{ij}=\\underbrace{\\hat{\\mathbf u}_{ij}\\otimes\\cdots\\otimes\\hat{\\mathbf u}_{ij}}_{n},\\ \\ n=0,1,2",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/utils.py", "start": 65, "end": 85, "must": "torch.norm(batch_data", "caption": "find_distances：r_ij（含 offset）、长度 d_ij、单位向量 u_ij"},
+        {"repo": "hotpp", "file": "hotpp/utils.py", "start": 31, "end": 44, "must": "out[..., None] * expand_to(v", "caption": "multi_outer_product：u 的 n 重外积"},
+        {"repo": "hotpp", "file": "hotpp/utils.py", "start": 105, "end": 111, "must": "multi_outer_product(", "caption": "find_moment：按阶缓存矩张量"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "径向编码：可训练频率 Bessel → MLP → 多项式截断包络",
+      "plain": "距离先展开成 8 个 sin(f_k r)/(f_k r) 基函数（频率初值 kπ/r_c，可训练），再经 SiLU 多层感知机（默认 [64,64,64]）变成 64 维径向特征，最后乘以 p=5 的多项式包络。该包络在 r_c 处的值、一阶、二阶导数都为零，保证邻居进出截断球时能量和力连续。默认每层各有一套独立的径向网络（shareRadialPara=False）。",
+      "math": "B_k(r)=\\frac{\\sin(f_k r)}{f_k r},\\ f_k^{\\text{init}}=\\frac{k\\pi}{r_c};\\qquad R(r)=\\mathrm{MLP}\\big(B(r)\\big)\\,f_{\\text{cut}}(r),\\ \\ f_{\\text{cut}}=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c}",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/layer/radial.py", "start": 66, "end": 73, "must": "torch.sin(d * self.freqs) / norm", "caption": "BesselPoly：可训练频率的 Bessel 基"},
+        {"repo": "hotpp", "file": "hotpp/layer/radial.py", "start": 87, "end": 97, "must": "self.mlp(self.radial_fn(d.squeeze(1)))", "caption": "MLPPoly：Bessel → SiLU MLP（besselMLP 模式）"},
+        {"repo": "hotpp", "file": "hotpp/layer/cutoff.py", "start": 47, "end": 55, "must": "cutoffs *= (x < 1).float()", "caption": "PolynomialCutoff（p=5）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：原子序数 → 64 维 0 阶特征",
+      "plain": "元素号直接查一张可训练嵌入表，得到每个原子 64 维的 0 阶（标量）特征。此时原子还没有任何向量/矩阵特征——它们要在第一层里由标量特征与边上的方向张量相乘才“长出来”。默认 eleMode=none，径向混合与读出层对所有元素共用权重，化学信息全部来自这张嵌入表。",
+      "math": "h^{(0)}_{i,c}=E_{Z_i,c},\\ \\ c=1,\\dots,64\\qquad(\\text{layer 0: only rank-0 features})",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/layer/embedding.py", "start": 57, "end": 72, "must": "nn.Embedding(max_atomic_number + 1, n_channel)", "caption": "AtomicEmbedding"},
+        {"repo": "hotpp", "file": "hotpp/model/miao.py", "start": 260, "end": 267, "must": "self.embedding_layer(batch_data=batch_data)", "caption": "get_init_info：初始节点只含 0 阶特征"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：笛卡尔张量积消息（指标缩并 + 外积）",
+      "plain": "这是 HotPP 的核心。对每条边，先把邻居 j 的各阶特征 h_j^(x) 用每阶一个线性层 U 混合通道，再与边滤波器 f^(y)(r_ij)·û^{⊗y} 做“笛卡尔张量积”：把 x 阶张量的最后 k 个指标与 y 阶张量的前 k 个指标对齐求和（缩并），其余指标保留为外积，得到 z=x+y−2k 阶张量。允许的 z 满足 |x−y| ≤ z ≤ min(x+y, z_max) 且与 x+y 同奇偶——相当于球谐 CG 选择规则里不需要 Levi-Civita（叉积）的那部分，所以所有特征都是普通极性张量。每条 (x,y,z) 路径再接一个无偏置的通道线性层后按 z 累加。",
+      "math": "m^{(z)}_{ij}=\\sum_{x,y}W_{xyz}\\Big[\\big(U^{(x)}h^{(x)}_{j}\\big)\\cdot_{k}\\big(f^{(y)}(r_{ij})\\,\\hat{\\mathbf u}_{ij}^{\\otimes y}\\big)\\Big],\\ \\ k=\\tfrac{x+y-z}{2},\\qquad (A\\cdot_k B)_{\\mathbf a\\mathbf b}=\\sum_{m_1\\dots m_k}A_{\\mathbf a\\,m_1\\dots m_k}B_{m_1\\dots m_k\\,\\mathbf b}",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/layer/equivalent.py", "start": 326, "end": 353, "must": "find_moment(batch_data, r_way).unsqueeze(1)", "caption": "GraphConvLayer.forward：U(h_j) 与滤波张量 f^(y)(r)·u^{⊗y}"},
+        {"repo": "hotpp", "file": "hotpp/layer/equivalent.py", "start": 161, "end": 187, "must": "_aggregate_new(x[x_way], y[y_way], x_way, y_way, z_way)", "caption": "TensorProductLayer：枚举 (x,y,z) 路径，每条路径一个 TensorLinear"},
+        {"repo": "hotpp", "file": "hotpp/utils.py", "start": 245, "end": 262, "must": "torch.sum(output_tensor, dim=sum_axis)", "caption": "_aggregate_new：广播外积后对 k 个公共指标求和"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：聚合、自相互作用、张量非线性、残差",
+      "plain": "每个原子把所有入边消息按阶相加，并除以训练集统计的平均邻居数 n̄。随后每一阶各用一个线性层混合通道（只有 0 阶带偏置，偏置加在高阶张量上会破坏等变），再过“张量 SiLU”：标量直接 SiLU；高阶张量乘以由自身范数决定的门控 sigmoid(w‖T‖²+b)，只改大小不改方向，因此仍然等变。结果以残差形式加回原特征；默认堆叠 5 层，每层输入的最高阶等于上一层输出的最高阶。",
+      "math": "h^{(z)}_i\\leftarrow h^{(z)}_i+\\sigma_z\\Big(W^{(z)}\\frac{1}{\\bar n}\\sum_{j\\in\\mathcal N(i)}m^{(z)}_{ij}+b\\,\\delta_{z0}\\Big),\\qquad \\sigma_0=\\mathrm{SiLU},\\ \\ \\sigma_{z>0}(T)=T\\cdot\\mathrm{sigmoid}\\big(w\\lVert T\\rVert^2+b'\\big)",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/model/miao.py", "start": 60, "end": 71, "must": "_scatter_add(message[way], idx_i, dim_size=n_atoms) / self.norm_factor", "caption": "UpdateNodeBlock.forward：求和 ÷ n̄ → 自相互作用 → 非线性 → 残差"},
+        {"repo": "hotpp", "file": "hotpp/layer/equivalent.py", "start": 99, "end": 118, "must": "bias=(way == 0 and bias)", "caption": "SelfInteractionLayer：每阶一个线性层，仅 0 阶带偏置"},
+        {"repo": "hotpp", "file": "hotpp/layer/activate.py", "start": 42, "end": 56, "must": "factor = torch.sigmoid(norm)", "caption": "TensorSilu：范数门控的张量激活"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：按目标性质的张量阶取特征",
+      "plain": "根据要学的性质取对应阶的特征：能量用 0 阶，偶极用 1 阶，极化率同时用 0 阶（各向同性部分）和 2 阶（各向异性部分）。读出是“通道线性 64→64 → 张量 SiLU → 通道线性 64→1”，只有 0 阶带偏置。最后一层的最高阶被自动设成目标所需的最高阶，只训练能量时最后一层只产生标量，省掉无用的高阶计算。",
+      "math": "o^{(z)}_i=W_2\\,\\sigma_z\\big(W_1 h^{(z)}_i\\big),\\qquad \\varepsilon_i=o^{(0)}_i,\\ \\ \\boldsymbol\\mu_i=o^{(1)}_i,\\ \\ (a_i,\\mathbf B_i)=(o^{(0)}_i,\\,o^{(2)}_i)",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/layer/readout.py", "start": 12, "end": 29, "must": "self.layer2(self.activate_fn(self.layer1(input_tensor)))", "caption": "ReadoutMLP"},
+        {"repo": "hotpp", "file": "hotpp/layer/readout.py", "start": 64, "end": 88, "must": "input_tensors[way], batch_data", "caption": "ReadoutLayer：每个目标性质取对应阶 way 的特征"},
+        {"repo": "hotpp", "file": "hotpp/entrypoints/train.py", "start": 327, "end": 358, "must": "max_out_way[-1] = max(target_way.values())", "caption": "get_model：性质 → 阶（energy 0、dipole 1、polarizability 0+2、l3_tensor 1+3）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：缩放平移 + 元素参考能（+ 可选近程排斥）",
+      "plain": "网络输出的原子能先乘以训练集力分量的标准差 s（默认 std: force）并加上均值 μ（默认 0），再加上按“结构组成 → 总能”最小二乘拟合出的每元素参考能 E0(Z)。若在 input.yaml 设 Repulsion=K>0，还会加一项可学习系数的 Σ c_k r^{-k} 两体排斥（同样乘截断包络），约束近距离行为。主网络、参考能、排斥项的原子能相加后再对结构求和，能量天然广延。",
+      "math": "E=\\sum_i\\Big[s\\,\\varepsilon_i+\\mu+E_0(Z_i)+\\sum_{j\\in\\mathcal N(i)}\\sum_{k=1}^{K}c_k(Z_i,Z_j)\\,r_{ij}^{-k}f_{\\text{cut}}(r_{ij})\\Big]",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/model/miao.py", "start": 232, "end": 241, "must": "* self.std + self.mean", "caption": "MiaoNet.calculate：逐层交互 → 读出 → ×std + mean"},
+        {"repo": "hotpp", "file": "hotpp/model/base.py", "start": 241, "end": 249, "must": "output_tensors[target] += output_tensors_[target]", "caption": "MultiAtomicModule：main + ground_energy（+ repulsion）原子能相加"},
+        {"repo": "hotpp", "file": "hotpp/model/repulsion.py", "start": 29, "end": 35, "must": "torch.pow(dij, -i)", "caption": "TwoBody：可选的 r^{-k} 多项式排斥"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "默认的力是总能对坐标的负梯度：对 Σ 原子能调用一次 torch.autograd.grad，同时得到力和（若需要）维里。这样的力场严格保守，NVE 下能量守恒，声子与弹性常数自洽。也可把 direct_forces 设为训练目标，用 1 阶读出直接预测力（不保守，但省一次反传）。LAMMPS 中 pair_style miao 调用导出的 TorchScript 模型，取回 forces_p 写入力数组。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}\\qquad(\\text{optional direct head: }\\mathbf F^{\\text{direct}}_i=s\\,o^{(1)}_i)",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/model/base.py", "start": 116, "end": 136, "must": "torch.autograd.grad(", "caption": "energy_p = Σ 原子能；autograd 一次反传得到力"},
+        {"repo": "hotpp", "file": "interface/lammps/src/pair_miao.cpp", "start": 251, "end": 259, "must": "module.forward({batch_data, properties, false})", "caption": "LAMMPS：调用 TorchScript 模型并写回力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对单位缩放矩阵求导",
+      "plain": "每个结构带一个单位缩放矩阵 Λ，坐标和周期平移向量都先右乘 Λ；因为 Λ=I，前向结果不变，只多了一条求导路径。能量对 Λ 的梯度取负就是维里，除以体积就是应力，与力在同一次反传中得到。ASE 计算器只对周期体系返回（对称化后的）应力；LAMMPS 只支持全局维里，不支持逐原子维里。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i\\boldsymbol\\Lambda,\\ \\ \\mathbf S_{ij}\\mathbf C\\to\\mathbf S_{ij}\\mathbf C\\boldsymbol\\Lambda,\\qquad \\mathbf W=-\\frac{\\partial E}{\\partial\\boldsymbol\\Lambda}\\Big|_{\\boldsymbol\\Lambda=\\mathbf 1},\\ \\ \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\Lambda}\\Big|_{\\boldsymbol\\Lambda=\\mathbf 1}",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/utils.py", "start": 47, "end": 62, "must": "has_add_scaling", "caption": "add_scaling：坐标与 offset 右乘缩放矩阵"},
+        {"repo": "hotpp", "file": "hotpp/model/base.py", "start": 138, "end": 146, "must": "dE_dl / batch_data", "caption": "virial = −∂E/∂Λ，stress = (∂E/∂Λ)/V"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "张量性质与二阶导：偶极、极化率、Hessian、自旋",
+      "plain": "因为特征本身就是笛卡尔张量，张量性质可以原样读出：偶极 = 各原子 1 阶输出之和；极化率 = 各原子 0 阶输出 × 单位阵 + 2 阶输出的对称化，保证对称且随分子一起转动。代码还支持全对称 3 阶张量（1 阶⊗δ 与 3 阶输出做 6 种指标置换平均）和逐原子 2/3 阶张量，LAMMPS 有对应的偶极/极化率 compute。tools/hotphono.py 可直接对能量做 autograd Hessian 求力常数；实验性的自旋模型还能给出磁力与自旋力矩。",
+      "math": "\\boldsymbol\\mu=\\sum_i\\boldsymbol\\mu_i,\\qquad \\boldsymbol\\alpha=\\Big(\\sum_i a_i\\Big)\\mathbf 1+\\sum_i\\big(\\mathbf B_i+\\mathbf B_i^{\\top}\\big),\\qquad \\Phi^{\\alpha\\beta}_{ij}=\\frac{\\partial^2E}{\\partial r_i^{\\alpha}\\partial r_j^{\\beta}}",
+      "code": [
+        {"repo": "hotpp", "file": "hotpp/model/base.py", "start": 50, "end": 63, "must": "polar_off_diagonal.transpose(1, 2)", "caption": "偶极 = 原子向量求和；极化率 = 标量×单位阵 + 对称化 2 阶张量"},
+        {"repo": "hotpp", "file": "tools/hotphono.py", "start": 133, "end": 150, "must": "torch.autograd.functional.hessian(get_energy, coordinate)", "caption": "hotphono：autograd Hessian 直接得力常数"},
+        {"repo": "hotpp", "file": "hotpp/model/base.py", "start": 148, "end": 158, "must": "magnetic_forces_p", "caption": "自旋模型：磁力 −∂E/∂S 与自旋力矩"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "无代码默认；示例 3.0 Å（碳）/ 4.0 Å（水）", "note": "截断半径，input.yaml 必填", "code": {"repo": "hotpp", "file": "examples/carbon/input.yaml", "start": 1, "end": 1, "must": "cutoff: 3.0"}},
+    {"name": "nLayer", "value": "5", "note": "消息传递层数（水极化率示例用 4）", "code": {"repo": "hotpp", "file": "hotpp/entrypoints/train.py", "start": 61, "end": 75, "must": "\"nLayer\": 5"}},
+    {"name": "nEmbedding / nHidden", "value": "64 / 64", "note": "元素嵌入维度 / 每层通道数"},
+    {"name": "maxRWay", "value": "2", "note": "边滤波矩张量 û^{⊗n} 的最高阶"},
+    {"name": "maxOutWay", "value": "2", "note": "隐藏特征最高阶；最后一层自动改为目标最高阶"},
+    {"name": "CutoffLayer", "value": "poly，p = 5", "note": "多项式截断包络", "code": {"repo": "hotpp", "file": "hotpp/entrypoints/train.py", "start": 76, "end": 79, "must": "\"type\": \"poly\""}},
+    {"name": "RadialLayer", "value": "besselMLP：nBasis 8，nHidden [64, 64, 64]，SiLU", "note": "示例 yaml 用 nHidden [64, 64]", "code": {"repo": "hotpp", "file": "hotpp/entrypoints/train.py", "start": 80, "end": 85, "must": "\"nBasis\": 8"}},
+    {"name": "activateFn", "value": "silu", "note": "高阶张量用范数门控版 TensorSilu"},
+    {"name": "convMode / updateEdge / eleMode", "value": "node_j / no_update / none", "note": "消息只用 h_j、不更新边特征、线性层与读出不分元素"},
+    {"name": "n̄ / s / E0", "value": "训练集平均邻居数 / 力分量标准差 / 组成最小二乘", "note": "由数据统计得到的归一化常数与参考能", "code": {"repo": "hotpp", "file": "hotpp/data/data_interface.py", "start": 90, "end": 105, "must": "np.linalg.lstsq(A, energy, rcond=None)"}},
+    {"name": "Repulsion", "value": "0（关闭）", "note": "设为 K>0 时加 Σ_{k≤K} c_k r^{-k} 两体排斥"},
+    {"name": "训练默认", "value": "Adam（amsGrad），lr 0.01；loss 权重 energy 0.1 / forces 1.0", "note": "示例改用 AdamW lr 1e-3 + reduceOnPlateau", "code": {"repo": "hotpp", "file": "hotpp/entrypoints/train.py", "start": 94, "end": 108, "must": "\"learningRate\": 0.01"}}
+  ],
+  "speedNotes": [
+    "主要 FLOPs 在边上：每层对每条边、每条 (x,y,z) 路径先做一次广播乘加（_aggregate_new），再把 64×64 通道线性层直接作用在边张量 [E, C, 3^z] 上，开销 ∝ 边数 × 路径数 × C² × 3^z。默认阶 ≤2 时中间层最多 11 条路径，首层（只有标量输入）和只学能量时的末层各只有 3 条。",
+    "笛卡尔 n 阶张量有 3^n 个分量（球谐 l 阶只需 2l+1 个），其中含迹、反对称等冗余部分；阶数升高时内存与计算按指数增长，所以默认只用到 2 阶。",
+    "没有 CG 系数和稀疏索引，全部是 PyTorch 稠密运算；_aggregate_new 等用 @torch.jit.script 编译，hotpp freeze 一键导出 TorchScript，但没有专门的融合 CUDA 内核。",
+    "默认 5 层 × 64 通道，且每层径向 MLP 互相独立；力与维里共享同一次 autograd 反传。"
+  ],
+  "weakNotes": [
+    "感受野 = nLayer × r_c（示例 r_c 为 3–4 Å，5 层约 15–20 Å）；超出部分的静电 1/r 与色散 1/r⁶ 尾巴完全缺失。",
+    "代码里没有 D3/D4 色散、Ewald 静电或电荷平衡，也不接受总电荷/自旋多重度输入；带电缺陷、离子液体、电极界面等强长程静电体系不适用。",
+    "仓库不提供预训练模型，也未说明训练泛函——精度上限取决于用户数据：若用 PBE 数据训练，层状 vdW 材料、分子晶体、物理吸附的结合会被低估，需要自行外加色散修正（如在 ASE 中叠加 D3 计算器，非官方功能）。",
+    "偶极/极化率被拆成局域原子贡献之和，适合分子与液体（如水示例）的光谱；长程介电屏蔽、局域场效应只能靠截断内信息隐式学习。"
+  ],
+  "downstreamNotes": [
+    "默认保守力 + 二阶导连续的多项式包络，适合 MD 与声子；tools/hotphono.py 既可用 phonopy 有限位移，也可直接对能量求 autograd Hessian 得力常数。",
+    "偶极、极化率读出头加上 LAMMPS 的偶极/极化率 compute，可沿 MD 轨迹输出时间序列，用于 IR / Raman 光谱（官方水示例即训练偶极与极化率）。",
+    "可训练并输出维里/应力（碳示例同时拟合 energy、forces、virial），支持变胞优化、NPT 与弹性常数计算。",
+    "实验性的 SpinMiaoNet / SOC 版本可读入原子磁矩，输出磁力与自旋力矩，配合 tools/spindynamic.py 做自旋—晶格动力学。",
+    "没有通用基础模型，所有下游任务都需先针对目标体系训练。"
+  ],
+  "strengths": ["等变性来自普通的外积与指标缩并，不需要球谐/CG 系数，概念直观、实现只用稠密张量运算", "同一框架直接输出任意阶张量：偶极、极化率、3 阶张量、逐原子张量", "LAMMPS（含偶极/极化率 compute）与 ASE 接口齐全，TorchScript 一键导出", "支持应力、Hessian 力常数、direct force 与实验性自旋模型"],
+  "weaknesses": ["笛卡尔张量分量按 3^n 增长且含冗余，高阶代价大，默认只到 2 阶", "通道线性层作用在边上且默认 5 层，推理成本与深层等变网络相当", "无长程静电/色散模块，无总电荷/自旋多重度输入", "没有预训练基础模型；LAMMPS 接口未见多进程空间分解支持，仅全局维里"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

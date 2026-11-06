@@ -1,0 +1,211 @@
+{
+  "id": "esen",
+  "name": "eSEN",
+  "fullName": "eSEN: equivariant Smooth Energy Network",
+  "year": 2025,
+  "authors": "X. Fu, B. M. Wood, L. Barroso-Luque, D. S. Levine, M. Gao, M. Dzamba, C. L. Zitnick",
+  "paper": {"title": "Learning Smooth and Expressive Interatomic Potentials for Physical Property Prediction", "venue": "arXiv:2502.12147 (2025)", "url": "https://arxiv.org/abs/2502.12147"},
+  "repos": ["fairchem"],
+  "family": "spherical-equivariant",
+  "tags": ["SO(2) 卷积（eSCN 路线）", "Wigner-D 边坐标系", "光滑势能面", "直接力预训练 → 保守微调", "UMA 的前身"],
+  "framework": "PyTorch（Hydra 配置；e3nn 仅用于构造 S2 网格投影矩阵）",
+  "license": "MIT（代码）；eSEN-30M 权重为 Meta Research 许可；fairchem-lammps 为 GPLv2",
+  "oneLiner": "eSEN 以 eSCN 的 SO(2) 卷积为骨架，逐项排查“会让势能面不光滑或不守恒”的设计：力一律由能量求导、邻居数不设过小的硬上限、每条边的消息用多项式包络平滑淡出，从而得到既有高阶等变表达力、又能稳定做 MD、声子和热导率计算的势函数。",
+  "analogy": "像修一条山路：为了赶工（直接预测力、只取最近 30 个邻居）铺出的路面有小台阶，短途（单点能量误差）看不出来，长途驾驶（MD、声子、热导率）却会被颠簸不断放大。eSEN 先用便宜的办法铺好路基（直接力预训练），再用“能量求导”把路面压平（保守微调），并让每个邻居进出截断球时都缓慢淡入淡出（包络）。",
+  "arch": {
+    "geometry": "边向量 r_ij：方向 → 逐边 Wigner-D 旋转到 y 轴（滚转角随机）；长度 → 512 个 Gaussian × p=5 多项式包络；无显式角度/二面角",
+    "equivariance": "SO(3) 旋转等变（Wigner-D + SO(2) 卷积严格等变；节点 S2 网格前馈为近似等变；特征不区分宇称）",
+    "lmax": "代码默认 lmax=2、mmax=2；UMA 配置 lmax 2/4/6、mmax=2；eSEN-30M 的取值未在仓库中列出",
+    "bodyOrder": "无显式体序展开：每层为 (i,j) 两体消息 + gate/网格非线性，层数叠加后有效体序升高",
+    "layers": "num_layers 代码默认 2；UMA 配置 4/10/16；eSEN-30M 层数保存在检查点中",
+    "cutoff": "6 Å（eSEN-30M，Matbench Discovery）；代码默认 5 Å",
+    "receptiveField": "num_layers × r_c（例：4 层 × 6 Å = 24 Å）",
+    "message": "Norm 后 [x_j‖x_i] 经 Wigner-D 转入边坐标系 → SO(2) 卷积（径向调制）→ gate → SO(2) 卷积 → 逆旋转 × 包络 → 邻居求和 + 残差",
+    "readout": "最终 RMSNorm → 取 l=0 通道 → MLP(C→H→H→1, SiLU) → 原子能求和",
+    "forces": "both",
+    "forcesDetail": "正式模型：F = −∂E/∂r（autograd）；预训练 / direct 检查点：SO3_Linear 从 l=1 通道直接读出力",
+    "stress": "autograd 同时求 ∂E/∂r 与 ∂E/∂h，拼成对称维里，σ = W/V（等价于对对称应变求导）",
+    "longRange": "无内置长程项；仅靠多层消息传递的半局域感受野",
+    "dispersion": "模型内无；fairchem 提供 DFTD3Calculator 外挂 D3(BJ)（pbe / r2scan 参数，默认 15 Å）",
+    "chargeSpin": "v2 主干内置总电荷/自旋/数据集嵌入（sin/cos 编码 → SiLU 混合 → 加到 l=0）；OMol25 任务需提供 charge/spin",
+    "otherOutputs": "Hessian（vmap 二阶导，单体系）、节点嵌入；无偶极/电荷/磁矩读出头",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·(L³C + m_max·L²C²))：逐边 Wigner 旋转 + SO(2) 线性；另加 O(N·G·C·H) 的节点网格 MLP",
+    "accel": "四元数 Wigner-D 自定义核、fused edgewise 后端、activation checkpointing、图并行多 GPU、LAMMPS fix external、ASE、TorchSim"
+  },
+  "scores": {
+    "speed": {"v": 1, "why": "30M 参数级深层等变网络：每条边两次 Wigner 旋转 + 两次 SO(2) 卷积，6 Å 截断且邻居上限放宽到 300，保守力还要整网反传，属于最慢的一档。"},
+    "expressiveness": {"v": 5, "why": "多 l 球谐通道 + SO(2) 卷积 + 多层非线性，容量很大；Matbench Discovery 上 eSEN-30M-OAM 的 F1=0.925（unique prototypes）、κ_SRME=0.170。"},
+    "longRange": {"v": 3, "why": "网络本身只有多层消息传递的半局域感受野、无静电项；但 fairchem 提供官方 D3(BJ) 外挂，v2 主干还有总电荷/自旋嵌入。"},
+    "scalability": {"v": 3, "why": "多层消息传递需逐层交换邻居特征；fairchem 支持图并行（all-gather / all-to-all）多 GPU 推理与 LAMMPS fix external，但不是严格局域模型。"},
+    "physics": {"v": 4, "why": "保守力、C² 多项式包络、取消过小的邻居上限、原子能求和保证广延；但没有 ZBL 近程排斥，节点网格前馈只近似等变。"},
+    "coverage": {"v": 2, "why": "官方输出为能量/力/应力与 autograd Hessian（另有电荷/自旋条件输入）；没有偶极、电荷、磁矩等额外物理量读出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、元素、晶胞（+ 总电荷/自旋）",
+      "plain": "输入是原子坐标 R、元素 Z、晶胞 h 与周期性标志；fairchem v2 的 eSCNMD 主干还读取每个体系的总电荷、自旋多重度（以及数据集名），先把它们编码成一个“体系向量”。要预测保守力/应力时，前向一开始就对坐标（和晶胞）打开 requires_grad，让后面所有边向量都留在计算图里。v2 中的 eSEN 检查点就是以 num_experts=0 的同一主干加载的。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\quad \\mathbf h\\in\\mathbb R^{3\\times3},\\quad \\text{pbc}\\in\\{0,1\\}^3,\\quad Q,\\ S\\in\\mathbb Z",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 765, "end": 786, "must": "requires_grad_(True)", "caption": "forward 开头：电荷/自旋/数据集嵌入；保守模式下坐标与晶胞设为可求导"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/compat.py", "start": 49, "end": 51, "must": "(e.g. eSEN)", "caption": "eSEN 检查点 = num_experts 为 0 的 eSCNMD 主干（非 MoE 的 UMA）"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 截断，邻居上限不能太小",
+      "plain": "在截断半径 r_c 内找出所有原子对（含周期镜像），边向量为 r_j − r_i + S·h。eSEN 强调的一个细节：如果像早期大规模模型那样只保留最近 30 个邻居，某个原子跨过“第 30 名”时会被突然加入或剔除，势能面出现台阶；因此保守微调阶段把 max_neighbors 放宽到 300，文档称显存不够时 100 通常也足以保证光滑。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf h\\rVert<r_c\\,\\},\\qquad |\\mathcal N(i)|\\le N_{\\max}\\ (30\\to300)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 639, "end": 657, "must": "max_neighbors=self.max_neighbors", "caption": "_generate_graph：按 cutoff 与 max_neighbors 在线建图"},
+        {"repo": "fairchem", "file": "docs/core/common_tasks/fine_tuning.md", "start": 147, "end": 147, "must": "ensure smoothness of the potential", "caption": "官方文档：max_neighbors 关系到势能面光滑性（引用 eSEN 论文）"},
+        {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_direct_pretrain.yaml", "start": 31, "end": 32, "must": "max_neighbors: 30", "caption": "直接力预训练阶段只取 30 个邻居、截断 6 Å"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "边坐标系：Wigner-D 把每条边转到 y 轴",
+      "plain": "eSCN 系列的核心技巧：为每条边求一个旋转 R_ij，把边方向转到 y 轴，再用 Wigner-D 矩阵把两端原子的球谐系数特征一起“转进”边坐标系。绕边轴的滚转角 γ 是随机采样的——后面的 SO(2) 卷积对绕该轴的旋转严格等变，所以结果与 γ 无关。v2 代码默认用四元数构造 Wigner-D（数值更稳定），旧的欧拉角路径仍保留。",
+      "math": "\\mathbf R_{ij}=R_y(\\gamma)\\,R_{\\hat{\\mathbf r}_{ij}\\to\\hat{\\mathbf y}},\\ \\gamma\\sim\\mathcal U[0,2\\pi);\\qquad \\mathbf D_{ij}=\\bigoplus_{l=0}^{L}D^{l}(\\mathbf R_{ij}),\\qquad \\tilde{\\mathbf x}_{ij}=\\mathbf D_{ij}\\,[\\mathbf x_j\\,\\|\\,\\mathbf x_i]",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/rotation.py", "start": 43, "end": 58, "must": "gamma = torch.rand_like(alpha) * 2 * torch.pi", "caption": "欧拉角路径：边方向 → (α, β)，滚转角 γ 随机"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/quaternion/wigner_d_hybrid.py", "start": 185, "end": 194, "must": "q_combined = quaternion_multiply(q_gamma, q_edge_to_y)", "caption": "默认四元数路径：边→y 轴旋转与随机 γ 合成"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/execution_backends.py", "start": 195, "end": 198, "must": "return torch.bmm(wigner, x_message)", "caption": "拼接源/目标原子特征并用 Wigner-D 旋转（bmm）"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：512 个 Gaussian + p=5 多项式包络",
+      "plain": "距离用 512 个等间距 Gaussian 展开（宽度为间距的 2 倍），再与两端原子的元素嵌入拼成边特征 e_ij，供每层的径向 MLP 使用。光滑性的另一半来自 p=5 的多项式包络：它在 r_c 处的函数值以及一、二阶导数都为零。代码把包络直接乘进逆 Wigner 矩阵，于是每条边的消息都随距离平滑淡出，邻居进出截断球时能量和力都连续。",
+      "math": "\\phi_k(r)=\\exp\\!\\Big(-\\frac{(r-\\mu_k)^2}{2(2\\Delta)^2}\\Big),\\ \\mu_k=k\\Delta,\\ \\Delta=\\frac{r_c}{511};\\qquad f_{\\text{env}}(d)=1-21d^{5}+35d^{6}-15d^{7},\\ d=\\frac{r}{r_c}<1;\\qquad \\mathbf e_{ij}=[\\boldsymbol\\phi(r_{ij})\\,\\|\\,\\mathbf a_{Z_j}\\,\\|\\,\\mathbf b_{Z_i}]",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/radial.py", "start": 22, "end": 58, "must": "torch.where(d_scaled < 1, env_val, 0)", "caption": "PolynomialEnvelope 与 GaussianSmearing"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 837, "end": 865, "must": "wigner_inv_envelope = wigner_inv * edge_envelope", "caption": "边特征 = Gaussian ‖ 源元素 ‖ 目标元素；包络预乘进逆 Wigner 矩阵"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素 + 体系向量 + 边度嵌入",
+      "plain": "每个原子的特征是一组球谐系数 x_i ∈ R^{(L+1)²×C}，起始时只有 l=0 通道非零：元素嵌入加上体系向量（总电荷/自旋/数据集嵌入经 SiLU 混合）。随后做一次“边度嵌入”：每条边用径向 MLP 产生各 l 的 m=0 系数，经含包络的逆 Wigner 旋转转回全局坐标后加到中心原子上并除以 5（注释称≈√平均邻居数），使 l>0 通道一开始就带有方向信息。",
+      "math": "\\mathbf x^{(0)}_{i,l=0}=\\mathbf E_{Z_i}+\\mathbf c_{\\text{sys}},\\quad \\mathbf c_{\\text{sys}}=\\mathrm{SiLU}\\big(W[\\mathbf e_Q\\|\\mathbf e_S\\|\\mathbf e_{\\text{data}}]\\big);\\qquad \\mathbf x^{(0)}_i\\mathrel{+}=\\frac{1}{5}\\sum_{j\\in\\mathcal N(i)}f_{\\text{env}}(r_{ij})\\,\\mathbf D_{ij}^{-1}\\big[\\mathrm{MLP}(\\mathbf e_{ij})\\big]_{m=0}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 810, "end": 821, "must": "self.sphere_embedding(", "caption": "元素嵌入写入 l=0 通道，并加上体系向量"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 588, "end": 599, "must": "self.mix_csd(", "caption": "csd_embedding：电荷、自旋、数据集嵌入 → 线性混合 → SiLU"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/execution_backends.py", "start": 263, "end": 279, "must": "x_edge_embedding / rescale_factor", "caption": "edge_degree_scatter：m=0 径向输出逆旋转后累加到节点"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：边上的 SO(2) 卷积",
+      "plain": "每层先做 RMSNorm，并再次把体系向量加到 l=0 通道。消息由邻居 j 与中心 i 的特征拼接后转入边坐标系：在这个坐标系里，等变卷积退化为 SO(2) 卷积——每个 m 只需一组“复数乘法”式的线性层（m=0 为普通线性层），系数由径向 MLP 逐边调制，|m|>m_max 的分量直接舍去。两次 SO(2) 卷积之间夹一个 gate 激活（由 m=0 额外输出的标量做门控），再逆旋转、乘包络、对邻居求和并加残差。相比 CG 张量积的 O(L⁶)，SO(2) 卷积只需 O(L³)，因此能负担更高的 L。",
+      "math": "\\mathbf x_i\\leftarrow\\mathbf x_i+\\sum_{j\\in\\mathcal N(i)}f_{\\text{env}}(r_{ij})\\,\\mathbf D_{ij}^{-1}\\,\\mathrm{SO2}_2\\Big(\\sigma_{\\text{gate}}\\big(\\mathrm{SO2}_1(\\tilde{\\mathbf x}_{ij};\\,\\mathbf e_{ij})\\big)\\Big);\\qquad \\mathbf y_{+m}=W^{m}_{r}\\mathbf u_{+m}-W^{m}_{i}\\mathbf u_{-m},\\ \\ \\mathbf y_{-m}=W^{m}_{r}\\mathbf u_{-m}+W^{m}_{i}\\mathbf u_{+m},\\ \\ \\mathbf u_{\\pm m}=\\rho_m(\\mathbf e_{ij})\\odot\\tilde{\\mathbf x}_{\\pm m}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 234, "end": 246, "must": "self.so2_conv_1(x_message, x_edge)", "caption": "Edgewise：旋转 → SO2 卷积 → gate → SO2 卷积 → 逆旋转并散射到节点"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 631, "end": 667, "must": "x_m = self.so2_m_conv[m - 1](x_m)", "caption": "SO2_Convolution：径向调制后按 m 分块做线性变换"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 67, "end": 80, "must": "x_m_r = x_r_0 - x_i_1", "caption": "SO2_m_Conv：±m 分量的“复数乘法”式混合"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：节点上的 S2 网格前馈",
+      "plain": "节点内的前馈网络默认是“网格”式：把每个原子的球谐系数投影到球面上一组固定采样点（纬度 2(L+1) × 经度 2(L+1)+1，用 e3nn 的 ToS2Grid 构造矩阵），在每个采样点上用同一个无偏置的 SiLU MLP 混合通道，再投影回球谐系数并加残差。网格固定、与坐标无关，因此对原子位置仍然光滑；但有限分辨率上的逐点非线性只近似保持旋转等变。代码另有 spectral（门控 SO3_Linear）可选；消息传递里的非线性默认是 gate，不经过网格。",
+      "math": "\\mathbf x_i\\leftarrow\\mathbf x_i+\\mathcal G^{-1}\\Big(\\mathrm{MLP}_{\\text{SiLU}}\\big(\\mathcal G(\\mathrm{Norm}(\\mathbf x_i))\\big)\\Big),\\qquad \\mathcal G(\\mathbf x)(\\hat{\\mathbf s}_g)=\\sum_{l\\le L}\\sum_{m}x_{lm}\\,Y_{lm}(\\hat{\\mathbf s}_g),\\ g\\in 2(L+1)\\times\\big(2(L+1)+1\\big)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 339, "end": 370, "must": "x_grid = self.grid_mlp(x_grid)", "caption": "GridAtomwise：to_grid → 逐点 MLP → from_grid"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 447, "end": 473, "must": "x = self.atom_wise(x)", "caption": "eSCNMD_Block：Norm → 边消息 + 残差 → Norm → 节点前馈 + 残差"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/common/so3.py", "start": 186, "end": 193, "must": "self.lat_resolution = 2 * (self.lmax + 1)", "caption": "SO3_Grid 的默认采样分辨率"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "读出与总能：只用 l=0 通道，原子能求和",
+      "plain": "最后一层之后再做一次归一化，只取旋转不变的 l=0 通道，经 3 层 MLP（C→H→H→1，SiLU）得到每个原子的能量，再按体系求和——能量是原子能之和，保证了广延性。pretrained_models.json 中 OMol25 / OC25 / ODAC25 版 eSEN 检查点还指定了元素参考能文件（atom_refs）。",
+      "math": "E=\\sum_{i=1}^{N}\\varepsilon_i,\\qquad \\varepsilon_i=W_3\\,\\mathrm{SiLU}\\Big(W_2\\,\\mathrm{SiLU}\\big(W_1\\,[\\mathrm{Norm}(\\mathbf x^{(T)}_i)]_{l=0}+\\mathbf b_1\\big)+\\mathbf b_2\\Big)+b_3",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1088, "end": 1096, "must": "self.energy_block = nn.Sequential(", "caption": "MLP_EFS_Head 的能量 MLP"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 114, "end": 134, "must": "node_energy = energy_block(scalar_embedding)", "caption": "compute_energy：取 l=0 → 原子能 → 按体系求和"},
+        {"repo": "fairchem", "file": "src/fairchem/core/calculate/pretrained_models.json", "start": 64, "end": 90, "must": "esen-sm-conserving-all-omol", "caption": "OMol25 版 eSEN 检查点及其元素参考能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：先直接预测，再改为能量梯度",
+      "plain": "eSEN 的核心结论：力必须是能量的负梯度。代码保留两种力：直接力头用 SO3_Linear 从 l=1 通道读出一个向量（便宜，但不是任何能量的梯度，NVE 下能量会漂移）；保守力则对 E 反传得到。官方配方是两阶段：先用直接力快速预训练，再切换成保守力微调（Matbench Discovery 记录：eSEN-30M-MP 为 70 epoch 直接预训练（含 DeNS）+ 30 epoch 保守微调），提交的 eSEN-30M 用梯度力。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}\\ \\ (\\text{conservative})\\qquad \\text{vs.}\\qquad \\mathbf F_i^{\\text{direct}}=\\big[W\\,\\mathbf x^{(T)}_{i}\\big]_{l=1}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 152, "end": 162, "must": "torch.autograd.grad(", "caption": "compute_forces：F = −∂E/∂r"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1221, "end": 1233, "must": "SO3_Linear(backbone.sphere_channels, 1, lmax=1)", "caption": "Linear_Force_Head：直接力（仅预训练 / direct 检查点）"},
+        {"repo": "matbench-discovery", "file": "models/esen/esen-30m-mp.yml", "start": 72, "end": 73, "must": "conservative fine-tuning", "caption": "eSEN-30M-MP 的两阶段训练记录"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对坐标和晶胞同时求导",
+      "plain": "应力同样来自自动微分：一次反传同时得到 ∂E/∂r 与 ∂E/∂h，拼成对称维里张量再除以体积，这与对对称应变 ε 求导完全等价。因为来自同一个能量函数，应力与力、能量自洽，可直接用于变胞优化、状态方程和弹性常数。",
+      "math": "\\mathbf W=\\mathrm{sym}\\Big(\\sum_i\\frac{\\partial E}{\\partial\\mathbf r_i}\\otimes\\mathbf r_i\\Big)+\\mathrm{sym}\\Big(\\mathbf h^{\\top}\\frac{\\partial E}{\\partial\\mathbf h}\\Big),\\qquad \\boldsymbol\\sigma=\\frac{\\mathbf W}{|\\det\\mathbf h|}=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 196, "end": 224, "must": "virial = (pos_virial + pos_virial.mT + cell_virial + cell_virial.mT) / 2", "caption": "compute_forces_and_stress：位置维里 + 晶胞维里 → 应力"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1135, "end": 1145, "must": "forces, stress = compute_forces_and_stress(", "caption": "MLP_EFS_Head：保守模式下一次反传得到力和应力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/色散：官方 D3(BJ) 外挂",
+      "plain": "eSEN 网络本身没有显式静电或色散项，截断外的相互作用只能靠多层消息传递“接力”。fairchem 提供 DFTD3Calculator：把任意 ASE 计算器（如 eSEN/UMA）与 nvalchemiops 的 D3(BJ) 解析核相加，阻尼参数可选 pbe 或 r2scan，默认 15 Å 截断并在最外 20% 区间平滑。",
+      "math": "E_{\\text{tot}}=E_{\\text{eSEN}}+E_{\\text{D3(BJ)}},\\qquad E_{\\text{D3}}=-\\sum_{i<j}\\sum_{n=6,8}s_n\\frac{C_n^{ij}}{r_{ij}^{n}+\\big(a_1R_0^{ij}+a_2\\big)^{n}},\\ r_{ij}<15",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/calculate/dftd3_calculator.py", "start": 448, "end": 469, "must": "_NValChemiDFTD3Calculator(", "caption": "DFTD3Calculator：基础计算器 + D3 修正"},
+        {"repo": "fairchem", "file": "src/fairchem/core/calculate/dftd3_calculator.py", "start": 362, "end": 377, "must": "a1=self.damping_parameters.a1", "caption": "调用 D3(BJ) 核：a1/a2/s6/s8 阻尼参数与平滑截断"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "Hessian：光滑势能面的直接收益",
+      "plain": "能量对坐标二次可微且光滑，因此可以对力再做向量-雅可比积得到完整 Hessian（vmap 并行，仅限单体系），用于振动频率、声子和过渡态分析。热导率 κ 需要由力的有限位移得到二、三阶力常数，势能面上任何小台阶都会被放大——这正是 eSEN 追求光滑性的原因。",
+      "math": "H_{i\\alpha,j\\beta}=\\frac{\\partial^2E}{\\partial r_{i\\alpha}\\,\\partial r_{j\\beta}}=-\\frac{\\partial F_{i\\alpha}}{\\partial r_{j\\beta}}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 248, "end": 265, "must": "torch.vmap(compute_grad_component)", "caption": "compute_hessian_vmap"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1152, "end": 1169, "must": "hessian = compute_hessian(", "caption": "MLP_EFS_Head：可选输出 Hessian"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff r_c", "value": "6.0 Å（eSEN-30M-MP/OAM）；代码默认 5.0 Å", "note": "Matbench Discovery graph_construction_radius；UMA 训练配置 cutoff_radius 6", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 290, "end": 297, "must": "cutoff: float = 5.0"}},
+    {"name": "max_neighbors", "value": "30（直接力预训练）→ 300（保守微调；代码默认 300）", "note": "邻居上限过小会让势能面不连续", "code": {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_conserve_finetune.yaml", "start": 29, "end": 30, "must": "max_neighbors: 300"}},
+    {"name": "lmax / mmax", "value": "代码默认 2 / 2；UMA 配置 2/2、4/2、6/2", "note": "eSEN-30M 的取值保存在检查点中，仓库未列出", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 283, "end": 288, "must": "mmax: int = 2"}},
+    {"name": "sphere / hidden / edge channels", "value": "128 / 128 / 128", "note": "eSCNMDBackbone 代码默认", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 284, "end": 306, "must": "hidden_channels: int = 128"}},
+    {"name": "num_layers", "value": "代码默认 2；UMA 配置 4 / 10 / 16", "note": "eSEN-30M 层数未在仓库中给出", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 304, "end": 309, "must": "num_layers: int = 2"}},
+    {"name": "num_distance_basis", "value": "512 个 Gaussian（0→r_c，宽度 2Δ）", "note": "与源/目标元素嵌入拼成边特征", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 454, "end": 460, "must": "self.distance_expansion = GaussianSmearing("}},
+    {"name": "envelope", "value": "多项式包络 p = 5", "note": "r_c 处函数值及一、二阶导为 0", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 487, "end": 487, "must": "PolynomialEnvelope(exponent=5)"}},
+    {"name": "norm / act / ff", "value": "rms_norm_sh / gate / grid", "note": "代码默认；另有 layer_norm、s2 激活、spectral 前馈", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 307, "end": 309, "must": "norm_type: str ="}},
+    {"name": "参数量", "value": "30,085,121（MP）/ 30,161,153（OAM）", "note": "Matbench Discovery model_params", "code": {"repo": "matbench-discovery", "file": "models/esen/esen-30m-oam.yml", "start": 55, "end": 57, "must": "model_params: 30161153"}},
+    {"name": "训练配方（eSEN-30M-MP）", "value": "70 epoch 直接力预训练（DeNS）→ 30 epoch 保守微调", "note": "仅 MPtrj（合规模型）", "code": {"repo": "matbench-discovery", "file": "models/esen/esen-30m-mp.yml", "start": 72, "end": 73, "must": "70-epoch direct pre-training on MPtrj with DeNS"}},
+    {"name": "训练配方（eSEN-30M-OAM）", "value": "OMat24 直接 2 epoch → OMat24 保守 2 epoch → MPtrj+sAlex 保守 1 epoch", "note": "使用 OMat24，非合规模型", "code": {"repo": "matbench-discovery", "file": "models/esen/esen-30m-oam.yml", "start": 72, "end": 73, "must": "1-epoch conservative fine-tuning on MPtrj+sAlex"}},
+    {"name": "direct_forces 开关", "value": "预训练 True → 微调 False（并开启 regress_stress）", "note": "fairchem 中 UMA 训练配置沿用同样的两阶段", "code": {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_conserve_finetune.yaml", "start": 147, "end": 157, "must": "direct_forces: False"}}
+  ],
+  "speedNotes": [
+    "计算量集中在边上：每条边要做 Wigner-D 旋转（bmm，(L+1)² 个系数）和两次 SO(2) 卷积（按 m 分块的线性层 + 径向 MLP 调制）；SO(2) 化把等变卷积从 CG 张量积的 O(L⁶) 降到 O(L³)，m_max=2 截断进一步削减。",
+    "光滑性的代价：保守微调阶段 max_neighbors 从 30 放宽到 300、截断 6 Å，致密体系的边数显著增加；文档建议显存不足时用 100。",
+    "保守力/应力需要整网反传（约多一次前向），训练时还要 create_graph 做二阶导；所以官方先用便宜的直接力预训练，再短时间保守微调。",
+    "加速手段：四元数 Wigner-D（l≤4 用自定义核）、可选 fused edgewise GPU 后端、按 131072 条边分块的 activation checkpointing、bf16 训练、图并行多 GPU 推理。"
+  ],
+  "weakNotes": [
+    "单层只看 r_c = 6 Å（eSEN-30M），多层后感受野为层数 × r_c；截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 都被截掉，模型内没有长程模块。",
+    "材料版 eSEN-30M 训练于 MPtrj / OMat24 / sAlex（PBE/PBE+U 数据），几乎不含 vdW：层状材料层间结合、分子晶体、物理吸附应外挂 DFTD3Calculator（functional=\"pbe\"）。",
+    "OMol25 版 eSEN 训练于 ωB97M-V/def2-TZVPD 数据，截断内的色散被隐式学到；v2 主干的总电荷/自旋嵌入只是全局条件，并不产生显式静电。",
+    "带电缺陷、电极/电解质界面、离子液体等需要真正长程静电的体系可能失效；仓库中没有为 eSEN 配套的 Ewald / 电荷平衡模块。",
+    "MOF 中 N₂/O₂ 的物理吸附：官方文档建议使用 ODAC25 专门训练的 eSEN 模型（UMA 未见过这些吸附物）。"
+  ],
+  "downstreamNotes": [
+    "声子与热导率：κ 依赖二、三阶力常数，对势能面台阶极敏感；保守力 + C² 包络 + 放宽邻居上限让 eSEN 在 Matbench Discovery 的 κ_SRME 达到 0.340（30M-MP）/ 0.170（30M-OAM）。",
+    "MD：保守版的力 = −∇E，可做 NVE 能量守恒模拟；OMol25、OC25 同时发布 direct 与 conserving 检查点，做 MD/振动应选 conserving。",
+    "几何优化与稳定性预测：Matbench Discovery F1 = 0.831（MP）/ 0.925（OAM，unique prototypes），弛豫结构 RMSD 0.0752 / 0.0608。",
+    "Hessian 可由 autograd 直接得到（单体系），用于振动频率与过渡态分析；应力来自同一能量，弹性常数、状态方程自洽。"
+  ],
+  "strengths": ["力严格为 −∇E 且势能面光滑：MD 能量守恒，声子与热导率表现突出", "SO(2) 卷积（eSCN 路线）让高 L 等变网络算得动", "“直接力预训练 → 保守微调”兼顾训练成本与守恒性", "同一主干演化为 UMA；材料/分子/催化/MOF/分子晶体均有检查点"],
+  "weaknesses": ["30M 级深层网络，推理慢、显存占用大", "无内置长程静电与色散，需外挂 D3", "节点网格前馈只近似等变；没有 ZBL 近程排斥", "Matbench 版 eSEN-30M 依赖 fairchem v1（1.10），v2 尚未恢复该模型代码", "direct 检查点不守恒，使用时需区分 direct / conserving"],
+  "pretrained": ["eSEN-30M-MP（MPtrj）", "eSEN-30M-OAM（OMat24 预训练 → MPtrj+sAlex 微调）", "esen-sm-conserving-all-omol / esen-sm-direct-all-omol / esen-md-direct-all-omol（OMol25）", "esen-sm-conserving-all-oc25 / esen-md-direct-all-oc25（OC25）", "esen-sm-filtered-odac25 / esen-sm-full-odac25（ODAC25）", "eSEN（OMC25 分子晶体，HuggingFace facebook/OMC25）"],
+  "mbdKeys": ["esen-30m-mp", "esen-30m-oam"],
+  "arenaKeys": ["eSEN"]
+}

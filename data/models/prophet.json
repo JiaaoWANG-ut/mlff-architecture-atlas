@@ -1,0 +1,208 @@
+{
+  "id": "prophet",
+  "name": "Prophet",
+  "fullName": "Prophet — Kairos Materials 原子基础模型（多截断谱分解 MCSD；含 Prophet-Spin 磁性分支）",
+  "year": 2026,
+  "authors": "J. Tan, Y. Yu, K. Bao, Z. Lu（Kairos Materials）",
+  "paper": {"title": "Prophet technical report", "venue": "Kairos Materials 技术报告（2026）", "url": "https://www.kairosmaterials.com/papers/Prophet.pdf"},
+  "repos": ["prophet"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "多截断 MCSD（3 Å + 7 Å）", "Nequix 衍生 + 等变 FFN", "C² 光滑能量", "Prophet-Spin 磁矩输入", "OMat24 / ELEMENTA 预训练"],
+  "framework": "PyTorch + e3nn（可选 OpenEquivariance CUDA 张量积内核）",
+  "license": "MIT（代码）；权重 CC-BY-4.0",
+  "oneLiner": "在 Nequix/NequIP 式球谐张量积消息传递的基础上加入“多截断谱分解”（MCSD）：每层并行跑 3 Å 与 7 Å 两条张量积卷积分支，各自经 RMS 归一化和等变前馈层（EQFFN）后再线性融合；发布的 Prophet-OAME-MBD 为 62.3M 参数、10 层、l≤4，能量 C² 光滑，力和应力由自动微分得到。仓库包含完整模型代码（不只是计算器封装），另有把局域磁矩作为输入的 Prophet-Spin。",
+  "analogy": "像同时戴两副眼镜观察邻居：一副“近视镜”（3 Å）只看紧挨着的成键原子、看得细；一副“远视镜”（7 Å）看更大一圈的环境。每一轮先分别做笔记、各自整理（归一化 + 前馈），再把两份笔记合并成一份，连续做 10 轮，最后只根据笔记里与方向无关的“结论”（标量）给每个原子打能量分。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（每个截断各自的 Bessel 基 sin(nπr/c)/r × p=6 多项式包络；prophet-06 变体用高斯展开）+ 方向（实球谐 Y_l^m，l ≤ 4）",
+    "equivariance": "E(3) 等变（e3nn irreps + CG 张量积；隐藏层只用 0e/1o/2e/3o/4e 自然宇称 irreps）",
+    "lmax": "边球谐 l≤4；隐藏特征 256×0e+96×1o+64×2e+32×3o+32×4e（Prophet-OAME-MBD）；代码默认 l≤3",
+    "bodyOrder": "每层张量积对邻居特征线性（NequIP 式 2 体 + 角度）；高体序靠 10 层堆叠 + 门控 / EQFFN 非线性获得",
+    "layers": "10（Prophet-OAME-MBD；代码默认 5），每层 2 个截断分支并行；最后一层只输出 0e 标量",
+    "cutoff": "双截断 3 Å 与 7 Å（建图半径 = max(cutoffs) = 7.0 Å）；代码默认 [3.0, 6.0] Å",
+    "receptiveField": "形式上 ≈ (1 + 10) × 7 Å ≈ 77 Å（初始邻居嵌入 + 10 层，每跳最远 7 Å）",
+    "message": "每个截断 c：Σ_{r_ij<c} MLP_c(e_ij) ⊙ [W₁h_j ⊗_CG Y(r̂_ij)] / √n̄（uvu），e_ij=(s_i+s_j)·W·B_c(r)·f_c(r) → 线性 + 跳连 → Gate → RMSNorm → EQFFN → 两支线性融合 + 残差",
+    "readout": "独立标量通道 s_i（256×0e）→ o3.Linear → 原子能 × scale + shift + 逐元素 E0 → 求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R：一次 torch.autograd.grad 同时对坐标和对称虚拟应变求导，得到力与维里",
+    "stress": "对称虚拟应变同时作用于坐标与晶胞，σ = (1/|det C|)·∂E/∂ε；仅三向全周期时计算（MBD targets = EFS_G）",
+    "longRange": "无显式长程项；只靠 7 Å × 10 层的消息传递感受野",
+    "dispersion": "无内置色散，仓库无 D3/D4 接口；训练数据为 OMat24、ELEMENTA、MPtrj、sAlex 等 DFT 数据",
+    "chargeSpin": "MBD 模型无总电荷/自旋输入；Prophet-Spin（prophet-v1-mag）以每个原子的局域磁矩 M（共线 (N,) 或非共线 (N,3)）为输入，学习 E(R, M)",
+    "otherOutputs": "Prophet-Spin：给定磁构型下的 E/F/S（可选海森堡式交换读出）；MagmomPredictor：由种子磁序预测局域磁矩（共线）",
+    "strictlyLocal": false,
+    "complexity": "O(L·Σ_c E_c·C·P_TP)：L=10 层 × 2 个截断分支（E_c 为截断 c 内边数，7 Å 分支主导）；每条边一次 l≤4 的 uvu 张量积 + 256 宽径向 MLP；归一化 / EQFFN 为 O(N·C)",
+    "accel": "OpenEquivariance TensorProductConv 融合 TP+scatter（use_kernel，需 CUDA + nvcc JIT）；make_fx + torch.compile（use_compile）；仅 ASE 计算器，无 LAMMPS / 多 GPU MD 接口"
+  },
+  "scores": {
+    "speed": {"v": 1, "why": "62.3M 参数、10 层、l≤4，且每层对 3 Å 与 7 Å 两组边各做一次张量积卷积，属于最重的一档；OpenEquivariance 内核与 torch.compile 只能部分缓解。"},
+    "expressiveness": {"v": 5, "why": "严格等变 + l≤4 + 10 层 + 62.3M 参数 + EQFFN 非线性，容量属全领域最高一档；但每层张量积对邻居仍是线性的（NequIP 式），高体序靠层叠而非 MACE 式显式收缩。"},
+    "longRange": {"v": 2, "why": "没有色散、静电或电荷模块，只靠 7 Å × 10 层的半局域消息传递感受野。"},
+    "scalability": {"v": 1, "why": "只能整图推理：官方仅提供 ASE 计算器，没有 LAMMPS 或空间分解；10 层 × 7 Å 的感受野也会让 ghost 区域极大。"},
+    "physics": {"v": 4, "why": "保守力、p=6 多项式包络保证 C² 光滑、原子能求和 + E0（广延）、张量积严格等变；但没有 ZBL 等近核排斥先验。"},
+    "coverage": {"v": 2, "why": "MBD 模型只有能量/力/应力；Prophet-Spin 额外支持磁矩输入与磁矩预测，但没有 Hessian、偶极、电荷等官方输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞",
+      "plain": "输入是 N 个原子的笛卡尔坐标、元素（按 checkpoint 头里的 atomic_numbers 排序映射成种类编号）和晶胞。只有三个方向都周期时才保留晶胞，此时模型才计算应力。前向一开始就对坐标打开 requires_grad，因为力和应力都靠对能量求导得到。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3}\\ (\\text{only if pbc}=(1,1,1))",
+      "code": [
+        {"repo": "prophet", "file": "prophet/graph.py", "start": 12, "end": 28, "must": "if atoms.pbc.all() else None", "caption": "preprocess_graph：matscipy 邻居表、种类编号；仅全周期时保留晶胞"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 883, "end": 887, "must": "positions.requires_grad_(True)", "caption": "forward：坐标可求导，并创建零应变 ε（用于应力）"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：一次建 7 Å 邻居表，再按 3 Å / 7 Å 分组",
+      "plain": "计算器用 max(cutoffs)=7 Å 调用 matscipy 的 neighbour_list，得到所有原子对和周期平移 S；边向量在模型内部由坐标重新计算，保证对坐标和晶胞都可微。随后按距离给每条边打两个掩码：r<3 Å 的边进入“近程”分支，r<7 Å 的边进入“远程”分支（近程边同时属于两支）。这就是 MCSD 的“多截断”：同一张图，不同分支看不同半径。",
+      "math": "\\mathcal N_c(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<c\\,\\},\\ c\\in\\{3.0,\\,7.0\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "prophet", "file": "prophet/calculator.py", "start": 28, "end": 38, "must": "self.cutoff = max(", "caption": "KairosCalculator：建图半径取 max(cutoffs)"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 892, "end": 901, "must": "torch.baddbmm(", "caption": "带应变的边向量 r_ij = r_j − r_i + S·C"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 797, "end": 798, "must": "medge_masks = [edge_distance<c for c in self.cutoffs]", "caption": "每个截断一个边掩码"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：每个截断各自的 Bessel 基 × C² 包络；方向 → l≤4 球谐",
+      "plain": "距离按所属截断 c 分别展开成 Bessel 基（发布配置每支 64 个），再乘以 p=6 的多项式包络 f_c。这个包络在 r=c 处函数值、一阶、二阶导数都为零，正是 README 所说的 C² 光滑能量：力连续、力的导数也连续，对声子很重要。方向用 e3nn 实球谐 Y_l^m（l≤4，component 归一化）编码，旋转时按已知规律变换，是等变性的来源。若 checkpoint 的 model_name 为 prophet-06，则径向基改为 0–c 的高斯展开。",
+      "math": "B^{(c)}_n(r)=\\frac{2}{c}\\,\\frac{\\sin(n\\pi r/c)}{r},\\quad f_c(r)=1-28x^{6}+48x^{7}-21x^{8},\\ x=\\tfrac{r}{c}<1;\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l\\le 4",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 76, "end": 94, "must": "torch.sin(bessel_weights * x / r_max) / x", "caption": "bessel_basis 与 polynomial_cutoff（默认 p=6）"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 840, "end": 845, "must": "o3.spherical_harmonics(", "caption": "边方向实球谐（component 归一化）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：多截断“邻居元素”求和 + 各层共享的边标量",
+      "plain": "初始特征不是简单的元素查表：对每个截断，把邻居的元素嵌入 e₁(Z_j) 乘上径向基投影和包络后求和，相当于统计“3 Å 和 7 Å 球内各有哪些元素、离多远”；两支结果拼接过 MLP，再与中心元素嵌入 e₂(Z_i) 拼接得到 256 维标量 s_i。接着为每条边构造边标量 e_ij=(s_i+s_j)⊙W·B(r)⊙f_c(r)，它在所有层共享，作为各层径向 MLP 的输入，所以张量积权重既依赖距离，也依赖两端原子的化学环境。",
+      "math": "s_i^{(0)}=\\mathrm{MLP}_u\\Big[e_2(Z_i)\\,\\Vert\\,\\mathrm{MLP}_{mc}\\big(\\Vert_{c}\\textstyle\\sum_{j\\in\\mathcal N_c(i)}e_1(Z_j)\\odot W^{(1)}_cB^{(c)}(r_{ij})\\,f_c(r_{ij})\\big)\\Big],\\qquad e^{(c)}_{ij}=(s_i+s_j)\\odot W^{(2)}_cB^{(c)}(r_{ij})\\,f_c(r_{ij})",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 794, "end": 818, "must": "node_scalars = self.update_mlp(", "caption": "多截断邻居元素求和 → mc_proj → update_mlp"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 821, "end": 837, "must": "edge_scalar = (node_scalars[senders_] + node_scalars[receivers_])", "caption": "每个截断的边标量（各层共享）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：每个截断一支张量积卷积（NequIP / Nequix 式）",
+      "plain": "每层对 3 Å 与 7 Å 两组边各跑一个 TPConvolution：邻居特征先过线性层，再与边方向球谐做 uvu 型 CG 张量积，权重由边标量经无偏置的 SiLU-MLP 给出（宽度等于标量通道数）；对邻居求和后除以 √(平均邻居数)。因为 MLP 无偏置且 SiLU(0)=0，边标量随包络归零时张量积权重也严格归零，截断处保持光滑。之后是线性层 + 线性跳连，再经门控非线性（标量用 SiLU，非标量 irreps 乘以 SiLU 门）。use_kernel=True 时由 OpenEquivariance 融合内核完成同样的计算。",
+      "math": "m^{(c)}_i=\\frac{1}{\\sqrt{\\bar n}}\\sum_{j\\in\\mathcal N_c(i)}\\mathrm{MLP}^{(c)}\\big(e^{(c)}_{ij}\\big)\\odot\\Big[(W_1h_j)\\otimes_{\\mathrm{CG}}Y(\\hat{\\mathbf r}_{ij})\\Big],\\qquad h^{(c)}_i=\\mathrm{Gate}\\big(W_2\\,m^{(c)}_i+W_{\\text{skip}}\\,h_i\\big)",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 405, "end": 417, "must": "instructions_tp.append((i, j, k, ", "caption": "只保留输出 irreps 中存在的 uvu 张量积路径"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 448, "end": 455, "must": "+ [scalar_dim] * radial_mlp_layers", "caption": "径向 MLP：边标量 → 每条路径的权重（无偏置）"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 487, "end": 508, "must": "messages = self.tp(messages[senders], sh, radial_message)", "caption": "TPConvolution.forward：张量积 → scatter → /√n̄ → 线性 + 跳连 → Gate"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：RMS 归一化 + 等变前馈 EQFFN + 双截断融合",
+      "plain": "每支输出先做等变 RMS 层归一化（各 l 阶按维度平衡后统一缩放，不破坏等变性）。然后进入等变前馈层 EQFFN：对线性变换后的每个通道算旋转不变的“模长²”，与标量拼接送入 4 倍宽的 MLP，输出一部分作为标量增量、一部分作为逐通道门控去缩放 irreps——非线性只作用在不变量上，所以仍严格等变。最后把两支结果拼接，用等变线性层（irreps）和普通线性层（标量）融合并加残差；Prophet 同时维护一条独立的标量通道 s 和一条 irreps 通道 h。",
+      "math": "\\mathbf x=W h^{(c)},\\ [\\Delta s,\\mathbf g]=\\mathrm{MLP}\\big(\\{\\overline{\\lVert\\mathbf x_u\\rVert^2}\\}_u\\,\\Vert\\,h^{(c)}_{0e}\\big),\\ \\tilde h^{(c)}=h^{(c)}+\\mathbf g\\odot\\mathbf x,\\ \\tilde s^{(c)}=h^{(c)}_{0e}+\\Delta s\\qquad h_i\\leftarrow W_{\\text{mix}}[\\tilde h^{(3)}\\Vert\\tilde h^{(7)}]+h_i,\\ \\ s_i\\leftarrow W_s[\\tilde s^{(3)}\\Vert\\tilde s^{(7)}]+s_i",
+      "code": [
+        {"repo": "prophet", "file": "prophet/layer_norm.py", "start": 57, "end": 78, "must": "norm = torch.pow(norm + self.eps, -0.5)", "caption": "RMSLayerNorm：按 l 阶平衡的 RMS 归一化"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 546, "end": 589, "must": "out_scalars_feat = scalars_feat + m1", "caption": "EQFFN：不变量 MLP → 标量增量 + 逐通道门控"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 673, "end": 692, "must": "self.mix_irreps(torch.cat(multi_irreps,dim=-1))", "caption": "ProphetBlock：两支归一化 → EQFFN → 线性融合 + 残差"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：10 层后只用标量通道预测原子能",
+      "plain": "前 9 层输出完整 irreps，最后一层只输出 256 个 0e 标量。读出层把标量通道 s_i 线性映射成一个数，再乘全局 scale、加全局 shift 和逐元素孤立原子参考能 E0。这些统计量（scale、shift、E0、avg_n_neighbors）都存放在 checkpoint 的 JSON 头里，仓库代码本身不含数值。",
+      "math": "E_i=\\sigma\\,\\mathbf w^{\\top}s_i^{(10)}+\\mu+E_0(Z_i)",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 739, "end": 764, "must": "if i < n_layers - 1", "caption": "Prophet.__init__：最后一层只输出 0e；读出为 o3.Linear → 1x0e"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 847, "end": 868, "must": "node_energies = self.readout(node_scalars)", "caption": "逐层更新 → 读出 → scale / shift / E0"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和",
+      "plain": "模型返回每个原子的能量，计算器按结构把它们求和得到总能。能量是原子能之和，保证了广延性；E0 让网络只需学习相对孤立原子的“结合部分”。Prophet-OAME-MBD 的能量参考专门对齐 Matbench Discovery 所用的 MP 能量参考，README 提醒其他 Prophet checkpoint 的能量不能直接互换。",
+      "math": "E=\\sum_{i=1}^{N}E_i",
+      "code": [
+        {"repo": "prophet", "file": "prophet/calculator.py", "start": 60, "end": 73, "must": "energy = scatter(energy_per_atom, graph.n_graph", "caption": "KairosCalculator：原子能求和得到总能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分（保守）",
+      "plain": "力不是网络直接输出的，而是对总能做一次反向传播得到的负梯度，所以力场严格保守，NVE 分子动力学中能量守恒。有晶胞时同一次 autograd.grad 同时对坐标和虚拟应变求导，一次反传拿到力和维里；无晶胞时只对坐标求导。Matbench Discovery 模型卡中 targets 为 EFS_G，即力与应力都来自能量梯度。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 904, "end": 911, "must": "inputs=[positions, eps]", "caption": "周期体系：一次反传得到 −F 与维里"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 915, "end": 925, "must": "minus_forces = torch.autograd.grad(", "caption": "非周期体系：只求力；返回 −minus_forces"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对对称虚拟应变求导",
+      "plain": "构造一个全零、可求导的应变张量 ε，对称化后同时作用于坐标和晶胞，边向量随之形变；能量对 ε 的导数就是维里，除以晶胞体积 |det C| 得到应力。计算器再把 3×3 应力转成 Voigt 6 分量交给 ASE，用于 FrechetCellFilter 变胞优化等。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon_{\\text{sym}}),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon_{\\text{sym}}),\\qquad \\boldsymbol\\sigma=\\frac{1}{|\\det\\mathbf C|}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "prophet", "file": "prophet/model.py", "start": 884, "end": 891, "must": "eps_sym = (eps + eps.swapaxes(1, 2)) / 2", "caption": "对称应变同时作用于坐标与晶胞"},
+        {"repo": "prophet", "file": "prophet/model.py", "start": 913, "end": 914, "must": "stress = virial / det", "caption": "维里 / 体积 = 应力"},
+        {"repo": "prophet", "file": "prophet/calculator.py", "start": 75, "end": 79, "must": "full_3x3_to_voigt_6_stress(", "caption": "转成 Voigt 6 分量"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "Prophet-Spin：把局域磁矩作为输入，学习 E(R, M)",
+      "plain": "Prophet-Spin（checkpoint prophet-v1-mag.pt）复用同一骨架，但额外读入每个原子的局域磁矩 m_i（ASE 初始磁矩，共线或非共线）。MagmomGraft 把旋转不变量 |m_i|²、p_ij=m_i·m_j、q_ij=|m_i|²+|m_j|² 展开成高斯基，经零初始化的线性层加到初始节点标量和边标量上（heisenberg_mode 下不用 p_ij）；可选的 ExchangeReadout 再加一项海森堡形式的交换能，J_ij 由 MLP 根据原子特征、距离和 q_ij 预测。于是同一结构的不同磁序会得到不同的能量、力和应力。",
+      "math": "s_i\\leftarrow s_i+W_m\\,\\phi(|\\mathbf m_i|^2),\\quad e_{ij}\\leftarrow e_{ij}+\\big[W_q\\phi(q_{ij})+W_p\\phi(p_{ij})\\big]f_c(r_{ij}),\\qquad E_i^{\\text{ex}}=\\sum_{j}\\tfrac12 J_{ij}\\,p_{ij}\\,f(r_{ij})",
+      "code": [
+        {"repo": "prophet", "file": "prophet_spin/backbone.py", "start": 574, "end": 588, "must": "def edge(self, i, magmoms, senders, receivers):", "caption": "MagmomGraft：磁矩不变量 → 高斯基 → 节点 / 边标量增量"},
+        {"repo": "prophet", "file": "prophet_spin/backbone.py", "start": 613, "end": 626, "must": "return scatter(0.5 * j * p * env", "caption": "ExchangeReadout：海森堡式交换能"},
+        {"repo": "prophet", "file": "prophet_spin/backbone.py", "start": 767, "end": 786, "must": "self.magmom_graft.node(magmoms)", "caption": "SpinBackbone：在初始嵌入与边标量处注入磁矩"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "磁矩预测：MagmomPredictor（种子磁序 → 局域磁矩 → E/F/S）",
+      "plain": "发布包另带 prophet-v1-mag-head.pt：它包含骨架和一个磁矩预测头，不是第三个模型。用户给出种子初始磁矩（编码磁有序方式），程序按元素查表把种子换成该元素的典型磁矩大小，取骨架倒数第二层输出中的 256 维标量特征，由预测头输出每个原子的（共线）磁矩，再用 Prophet-Spin 在这组磁矩下计算能量、力和应力。README 提醒它不保证找到磁基态。",
+      "math": "m^{(0)}_i=\\mathrm{sign}(m^{\\text{seed}}_i)\\,\\mathrm{LUT}(Z_i)\\ \\to\\ \\hat m_i=\\mathrm{Head}\\big(m^{(0)},h_i\\big)\\ \\to\\ E(\\mathbf R,\\hat{\\mathbf m}),\\ \\mathbf F,\\ \\boldsymbol\\sigma",
+      "code": [
+        {"repo": "prophet", "file": "prophet_spin/predictor.py", "start": 60, "end": 86, "must": "pred = self.head(batch.magmoms, h, e_site)", "caption": "predict_moments：查表种子 → 骨架特征 → 磁矩头"},
+        {"repo": "prophet", "file": "prophet_spin/predictor.py", "start": 88, "end": 102, "must": "out = self.runtime.efs(atoms, moments)", "caption": "用预测磁矩计算 E / F / S"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoffs", "value": "[3.0, 7.0] Å（建图半径 7.0 Å）", "note": "MCSD 双截断；代码默认 [3.0, 6.0]", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 74, "end": 83, "must": "cutoffs: [3.0, 7.0]"}},
+    {"name": "num_layers", "value": "10", "note": "交互块层数；代码默认 5", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 76, "end": 83, "must": "num_layers: 10"}},
+    {"name": "lmax", "value": "4", "note": "边球谐最高阶；代码默认 3", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 76, "end": 83, "must": "lmax: 4"}},
+    {"name": "hidden irreps", "value": "256x0e+96x1o+64x2e+32x3o+32x4e", "note": "标量通道 256；代码默认 128x0e + 128x1o + 128x2e + 128x3o", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 76, "end": 83, "must": "irreps: 256x0e+96x1o+64x2e+32x3o+32x4e"}},
+    {"name": "radial_basis_size", "value": "64", "note": "每个截断的 Bessel 基个数；代码默认 8", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 76, "end": 83, "must": "radial_basis_size: 64"}},
+    {"name": "径向 MLP", "value": "radial_mlp_layers = 2；宽度 = 标量通道数", "note": "TPConvolution 中隐藏宽度取 scalar_dim，模型卡里的 radial_mlp_size=64 未被该层使用", "code": {"repo": "prophet", "file": "prophet/model.py", "start": 448, "end": 455, "must": "+ [scalar_dim] * radial_mlp_layers"}},
+    {"name": "包络阶数 p", "value": "6", "note": "polynomial_cutoff 默认值，调用时未传 p → C² 截断", "code": {"repo": "prophet", "file": "prophet/model.py", "start": 87, "end": 94, "must": "p= 6.0"}},
+    {"name": "model_params", "value": "62,296,064（≈62.3M）", "note": "Matbench Discovery 模型卡", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 55, "end": 57, "must": "model_params: 62296064"}},
+    {"name": "预训练 + 两段对齐", "value": "OMat24（3 epoch）→ ELEMENTA（3 epoch）→ MPtrj + sAlex（10 epoch），Muon，lr 0.01", "note": "MAE 损失，E/F/S 权重 20/20/5", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 84, "end": 109, "must": "optimizer: Muon"}},
+    {"name": "第 3 阶段微调", "value": "ELEMENTA Vib + MPtrj/sAlex 回放，AdamW(AMSGrad)，lr 1e-4 → 1e-6，50000 步", "note": "热（振动）数据只监督力", "code": {"repo": "matbench-discovery", "file": "models/prophet/prophet-oame-mbd.yml", "start": 110, "end": 121, "must": "thermal sources force-only"}},
+    {"name": "代码默认值", "value": "lmax 3、n_layers 5、radial_basis_size 8、cutoffs [3.0, 6.0]", "note": "Prophet.__init__ 默认；发布模型以 checkpoint JSON 头为准", "code": {"repo": "prophet", "file": "prophet/model.py", "start": 698, "end": 717, "must": "cutoffs: list = [3.0, 6.0]"}}
+  ],
+  "speedNotes": [
+    "FLOPs 主要在边上的 uvu 张量积：每层对 3 Å 与 7 Å 两组边各做一次。同样密度下 7 Å 球内的邻居数约为 3 Å 球的 (7/3)³ ≈ 12.7 倍，所以开销几乎由 7 Å 分支决定。",
+    "发布模型 lmax=4、隐藏 irreps 256×0e+96×1o+64×2e+32×3o+32×4e、10 层、62.3M 参数；每层每个分支每条边还要跑一次宽 256 的径向 MLP。",
+    "use_kernel=True 时用 OpenEquivariance 的 TensorProductConv 把张量积与 scatter 融合（需 CUDA 与 nvcc JIT）；use_kernel=False 为纯 e3nn 路径，可在 CPU 上跑；use_compile=True 时先 make_fx 符号追踪再 torch.compile。",
+    "力与应力由一次 autograd 反传同时得到，反传开销与前向同量级。",
+    "训练代价很高：Matbench Discovery 模型卡记录 4 个训练阶段各用 120 张 A800，每卡分别 36 / 76 / 28 / 7.25 小时。"
+  ],
+  "weakNotes": [
+    "两个截断 3 Å 与 7 Å；10 层加初始邻居嵌入使形式感受野约 77 Å，但这只是半局域的多跳传播，没有显式的 r⁻⁶ 色散或 r⁻¹ 静电项。",
+    "预训练用 OMat24 与 ELEMENTA，再用 MPtrj + sAlex 对齐 MP 能量参考；仓库没有 D3/D4 接口，层状 vdW 材料层间结合、分子晶体、物理吸附需要用户自行外挂色散校正。",
+    "MBD 模型没有总电荷 / 自旋输入；带电缺陷、离子液体、界面电荷转移等需要真正长程静电的体系没有官方修正。",
+    "Prophet-Spin 的磁矩输入只增加了磁性自由度（局域交换能有截断包络），不是长程相互作用；MagmomPredictor 只支持共线磁矩，且需要种子磁序。"
+  ],
+  "downstreamNotes": [
+    "声子 / 热导：保守力 + C² 包络；第 3 阶段微调专门加入 ELEMENTA Vib 振动数据（热数据只监督力）。Matbench Discovery：κ_SRME 0.0648，κ_failure_rate 0.0，imaginary_mode_rate 0.0。",
+    "结构优化与稳定性：Matbench Discovery 用 FIRE + FrechetCellFilter（fmax 0.02 eV/Å，最多 500 步），几何 RMSD 0.0591；全测试集 F1 0.91、DAF 5.286、能量 MAE 0.018 eV/atom。模型卡注明已删除 ELEMENTA 中与 WBM 测试集重叠的结构。",
+    "分子动力学：Matbench Discovery MD 测试（17 个体系）RDF 误差 3.48%、压力 MAE 0.76 GPa；但只有 ASE 接口、无 LAMMPS，大体系 MD 需要整图推理。",
+    "磁性：Prophet-Spin 可比较同一结构不同磁序的能量，并给出对应磁构型下的力和应力；MagmomPredictor 由种子磁序预测局域磁矩。",
+    "没有 Hessian、偶极、极化率、电荷等官方输出接口。"
+  ],
+  "strengths": ["Matbench Discovery 指标领先（F1 0.91、κ_SRME 0.0648）", "3 Å / 7 Å 双截断分支兼顾近程分辨率与较大径向视野", "严格 E(3) 等变 + C² 光滑能量，力 / 应力保守", "完整模型代码与权重开源（MIT / CC-BY-4.0），另有磁矩输入的 Prophet-Spin"],
+  "weaknesses": ["62.3M 参数、10 层、l≤4，推理开销很大", "无色散、静电或电荷输入", "仅 ASE 接口，无 LAMMPS / 空间分解并行", "能量参考专门对齐 MBD，不同 checkpoint 能量不可互换；发布版为研究预览", "scale、shift、E0 与完整结构配置只在 checkpoint 头中，仓库代码不含"],
+  "pretrained": ["Prophet-OAME-MBD（prophet-oame-mbd.pt，62.3M，Matbench Discovery 提交）", "Prophet-V1-Mag（prophet-v1-mag.pt，Prophet-Spin）", "prophet-v1-mag-head.pt（Prophet-Spin 的磁矩预测 bundle）"],
+  "mbdKeys": ["prophet-oame-mbd"],
+  "arenaKeys": []
+}

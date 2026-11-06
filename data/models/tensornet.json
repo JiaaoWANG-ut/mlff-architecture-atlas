@@ -1,0 +1,208 @@
+{
+  "id": "tensornet",
+  "name": "TensorNet",
+  "fullName": "TensorNet: Cartesian Tensor Representations for Efficient Learning of Molecular Potentials",
+  "year": 2023,
+  "authors": "G. Simeon, G. De Fabritiis",
+  "paper": {"title": "TensorNet: Cartesian Tensor Representations for Efficient Learning of Molecular Potentials", "venue": "NeurIPS 2023", "url": "https://arxiv.org/abs/2306.06482"},
+  "repos": ["torchmd-net", "matgl"],
+  "family": "cartesian-equivariant",
+  "tags": ["O(3) 等变", "笛卡尔 rank-2 张量 I+A+S", "无球谐 / 无 CG", "3×3 矩阵乘消息传递", "保守力", "matgl TensorNet-MatPES 基础势"],
+  "framework": "PyTorch（torchmd-net，可选 NVIDIA Warp 内核）；PyTorch Geometric（matgl，可选 Warp / JAX 推理）",
+  "license": "MIT（torchmd-net）；BSD-3-Clause（matgl）",
+  "oneLiner": "把每个原子、每个通道的特征写成一个 3×3 笛卡尔矩阵 X，并拆成标量 I、反对称 A（等价于矢量）、对称无迹 S 三个不可约部分；消息传递只用普通矩阵乘法 Y·M + M·Y，不需要球谐函数和 Clebsch–Gordan 系数就做到 O(3) 等变，因此又轻又快。",
+  "analogy": "把每个原子周围的环境记在一张 3×3 的“形状卡片”上：对角线平均值说明“周围有多拥挤”（I），反对称部分像一根指向某个方向的箭头（A），对称无迹部分描述环境被“压扁还是拉长”、像个椭球（S）。原子之间交流时，只需把两张卡片做矩阵乘法得到新卡片；不管把分子怎么转，所有卡片都一起按 R·X·Rᵀ 转动，最后只读卡片的“大小”（范数）来算能量，所以结果与朝向无关。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（expnorm 径向基 × 余弦截断）+ 单位方向 r̂ 构造 1、[r̂]×、r̂r̂ᵀ−⅓1 三种 3×3 张量（无球谐）",
+    "equivariance": "O(3) 等变（默认，X→RXRᵀ，反对易子 YM+MY 保持宇称）；可选 SO(3)；能量严格不变",
+    "lmax": "固定 rank-2：I（l=0，1 个分量）+ A（l=1，3 个）+ S（l=2，5 个），不能再提高",
+    "bodyOrder": "嵌入为 2 体（邻居求和）；每层 Y·M 与 ΔX² 矩阵乘把邻居和相乘，体序随层数增长（无显式 ν 截断）",
+    "layers": "1 个嵌入层（自带一次邻居聚合）+ num_layers=2 个交互层（QM9 配置为 3）",
+    "cutoff": "类默认 4.5 Å（rMD17/ANI1X 配置）；ANI2X/QM9 5 Å，SPICE/MACE-OFF 10 Å；matgl 默认 5 Å",
+    "receptiveField": "(1 + num_layers) × r_c：默认 3 × 4.5 = 13.5 Å；matgl 默认 3 × 5 = 15 Å",
+    "message": "M_i = Σ_j f_c·[f^I I_j + f^A A_j + f^S S_j]（径向 MLP 权重 × 邻居张量分量），再 C_i = Y_i M_i + M_i Y_i（3×3 矩阵乘）",
+    "readout": "分解 X → ‖I‖²_F、‖A‖²_F、‖S‖²_F 拼接 → LayerNorm → Linear+SiLU → Scalar MLP（宽 F/2）→ 原子能求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂r：TorchMD_Net.forward 中 torch.autograd.grad（derivative=True）；matgl Potential 一次 grad 同时得到力与应变导数",
+    "stress": "torchmd-net 无应力输出；matgl Potential 用应变技巧：晶格 L(1+ε)，σ = (1/V)∂E/∂ε（GPa）",
+    "longRange": "网络本体局域；torchmd-net 可选 Coulomb 先验（数据集部分电荷）或 ScalarPlusWeightedCoulomb 输出头（预测电荷）；matgl 另有电荷平衡版 QET",
+    "dispersion": "可选 D2 先验（C6/r⁶ + Fermi 阻尼，s_6 缩放）；matgl 版无内建色散",
+    "chargeSpin": "torchmd-net：总电荷 q 广播到原子，以 (1+0.1q) 因子调制交互层矩阵乘积；自旋 s 参数未被 TensorNet 使用；matgl TensorNet 无电荷/自旋输入",
+    "otherOutputs": "torchmd-net：标量类输出头（DipoleMoment、ElectronicSpatialExtent、带预测电荷的库仑项）；matgl：应力、Hessian、ZBL 斥力、强度量性质回归",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·F·9) 边上消息（每通道 1+3+5 个分量）+ O(N·F·27) 节点 3×3 矩阵乘 + O(N·F²) 通道线性层；无随 L 增长的 CG 路径",
+    "accel": "NVIDIA Warp 融合内核（torchmd-net 内置 warp_ops；matgl[ops]）、static_shapes→CUDA Graph、TorchScript、OpenMM-Torch/ACEMD/TorchMD；matgl：JAX 推理、LAMMPS pair_style matgl（Kokkos 单 GPU）"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "每通道只做 3×3 矩阵运算、默认 2 层，无球谐/CG，是最快的等变模型之一；但仍是消息传递 + autograd 求力，慢于 NEP/ACE 等描述符模型。"},
+    "expressiveness": {"v": 4, "why": "等变且同时携带 l=0/1/2 信息，矩阵乘积带来多体耦合；但阶数固定为 rank-2，不能像 MACE/ACE 那样系统地提高 L 和体序。"},
+    "longRange": {"v": 3, "why": "本体只有 (1+层数)×r_c 的感受野；官方提供 D2 色散、Coulomb 先验、预测电荷库仑输出头与总电荷输入，但没有 Ewald 或电荷平衡（需改用 QET）。"},
+    "scalability": {"v": 2, "why": "消息传递需要 3 跳邻居信息；torchmd-net 面向单 GPU 的 OpenMM/ACEMD，matgl 的 LAMMPS 接口 GPU 仅支持单卡，CPU 多进程时每个 rank 各自加载模型。"},
+    "physics": {"v": 4, "why": "保守力、精确 O(3)、余弦截断使能量与力在 r_c 处连续、原子能求和保证广延性、可选 ZBL 近程斥力；但截断函数的二阶导在 r_c 处不连续。"},
+    "coverage": {"v": 3, "why": "torchmd-net 侧以能量/力为主（另有偶极等标量类输出头）；matgl 增加应力、Hessian 与强度量性质回归；没有极化率、磁矩等张量输出。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "输入与邻居图：坐标、元素、总电荷 → 截断内的边",
+      "plain": "输入是原子序数 z、坐标 pos、batch 索引，可选周期盒 box（三斜盒需满足 a_y=a_z=b_z=0、a_x/b_y/c_z ≥ 2r_c 等约束）和分子总电荷 q；要算力时先把坐标设为可求导。OptimizedDistance 找出所有距离小于 r_c 的原子对（含周期镜像，loop=True 时还包括自环），返回边索引、距离和边向量。static_shapes=True 时张量固定为 N×max_num_neighbors，空位指向一个“幽灵原子”，整个模型因此可以被 CUDA Graph 捕获；Warp 路径还会把边表转成 CSR 供融合内核使用。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ q_i\\equiv Q;\\qquad \\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf n_{ij}\\mathbf B\\rVert<r_c\\,\\},\\ \\ |\\mathcal N(i)|\\le K_{\\max}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 582, "end": 590, "must": "pos.requires_grad_(True)", "caption": "TorchMD_Net.forward：derivative=True 时坐标可求导，再调用 TensorNet"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 316, "end": 324, "must": "edge_index, edge_weight, edge_vec = self.distance(pos, batch, box)", "caption": "TensorNet.forward：邻居表 + Warp 所需的 CSR 图变换"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 280, "end": 297, "must": "get_neighbor_pairs_kernel(", "caption": "OptimizedDistance：按 max_num_neighbors 预分配并调用邻居搜索内核"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → expnorm 径向基 × 余弦截断；方向 → 单位向量",
+      "plain": "每条边的长度 r 被展开成 32 个“指数-高斯”径向基（expnorm，参数初始化沿用 PhysNet：先把 r 变成 e^{-αr} 再放高斯），并乘以余弦截断 f_c。f_c 在 r_c 处函数值和一阶导都为 0，所以原子进出截断球时能量和力都连续。边向量除以长度得到单位方向 r̂；自环的长度为 0，代码把分母换成 1 以免除零产生 NaN 破坏 autograd。",
+      "math": "e_k(r)=f_c(r)\\,\\exp\\!\\Big[-\\beta_k\\big(e^{-\\alpha(r-r_{\\text{lo}})}-\\mu_k\\big)^2\\Big],\\ \\alpha=\\tfrac{5}{r_c-r_{\\text{lo}}};\\qquad f_c(r)=\\tfrac12\\Big[\\cos\\Big(\\frac{\\pi r}{r_c}\\Big)+1\\Big];\\qquad \\hat{\\mathbf r}_{ij}=\\mathbf r_{ij}/r_{ij}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 383, "end": 408, "must": "torch.exp(self.alpha * (-dist + self.cutoff_lower))", "caption": "ExpNormalSmearing：PhysNet 式初始化 + 前向"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/utils.py", "start": 525, "end": 529, "must": "cutoffs = 0.5 * (torch.cos(distances * math.pi / self.cutoff_upper) + 1.0)", "caption": "CosineCutoff（cutoff_lower=0 分支）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 362, "end": 366, "must": "edge_vec = edge_vec / edge_weight.masked_fill(mask, 1).unsqueeze(1)", "caption": "径向基展开与单位方向（自环分母置 1）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "张量嵌入：从边向量直接“造”出 3×3 张量",
+      "plain": "每条边给出三种基本 3×3 矩阵：单位阵 1（标量部分 I）、由 r̂ 构成的反对称矩阵 [r̂]×（矢量部分 A）、外积 r̂r̂ᵀ 去掉迹后的对称无迹矩阵（S）。三者各乘一组由距离决定的权重 f^I/f^A/f^S（径向基 → Linear），再乘元素对嵌入 z_ij（Z_i、Z_j 的嵌入拼接后线性映射）和余弦截断，对邻居求和就得到每个原子、每个通道的张量 X_i。随后用旋转不变的 ‖X_i‖²_F 经 LayerNorm + 两层 MLP 生成三组通道系数，分别缩放经过通道线性混合的 I、A、S——这样嵌入层本身已经完成了一次消息传递。",
+      "math": "\\mathbf X_i^{(0)}=\\sum_{j\\in\\mathcal N(i)}f_c(r_{ij})\\,\\mathbf z_{ij}\\Big[f^{I}_{ij}\\,\\mathbf 1+f^{A}_{ij}\\,[\\hat{\\mathbf r}_{ij}]_{\\times}+f^{S}_{ij}\\big(\\hat{\\mathbf r}_{ij}\\hat{\\mathbf r}_{ij}^{\\top}-\\tfrac13\\mathbf 1\\big)\\Big],\\quad \\mathbf z_{ij}=W[\\mathbf e_{Z_i}\\oplus\\mathbf e_{Z_j}];\\qquad \\mathbf X_i=\\sum_{c\\in\\{I,A,S\\}}g_c\\big(\\lVert\\mathbf X_i^{(0)}\\rVert_F^2\\big)\\,W_c\\,\\mathbf X_i^{(0),c}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 552, "end": 567, "must": "edge_attr_processed = CZij.unsqueeze(1) * torch.stack(", "caption": "元素对嵌入 Z_ij × 余弦截断 × 三组径向投影"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 410, "end": 445, "must": "_outer = torch.matmul(", "caption": "边上构造 I / A(r̂) / S(r̂r̂ᵀ) 并 index_add 到中心原子"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 587, "end": 604, "must": "norm = self.init_norm(tensor_norm(X))", "caption": "用范数生成的标量系数调制 I、A、S"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "核心表示：3×3 张量的不可约分解 I + A + S",
+      "plain": "任何 3×3 矩阵都能唯一拆成三块：迹部分（1 个数，旋转不变，l=0）、反对称部分（3 个数，等价于一个矢量，l=1）、对称无迹部分（5 个数，l=2）。旋转分子时 X 变成 R X Rᵀ，三块各自变换、互不混合——这就是球谐 l=0/1/2 不可约表示的笛卡尔版本，所以 TensorNet 不需要球谐函数和 CG 系数。通道线性层（无偏置）只在同一块内部混合通道，等变性不受影响；每块的 Frobenius 范数平方都是旋转不变量，可直接当标量特征。",
+      "math": "\\mathbf X=\\underbrace{\\tfrac13\\mathrm{tr}(\\mathbf X)\\,\\mathbf 1}_{I:\\ l=0}+\\underbrace{\\tfrac12(\\mathbf X-\\mathbf X^{\\top})}_{A:\\ l=1}+\\underbrace{\\tfrac12(\\mathbf X+\\mathbf X^{\\top})-\\tfrac13\\mathrm{tr}(\\mathbf X)\\,\\mathbf 1}_{S:\\ l=2},\\qquad \\mathbf X\\xrightarrow{\\ \\mathbf R\\ }\\mathbf R\\,\\mathbf X\\,\\mathbf R^{\\top}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 18, "end": 40, "must": "A = 0.5 * (tensor - tensor.transpose(1, 2))", "caption": "_decompose_tensor / _compose_tensor（纯 PyTorch 回退版）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 125, "end": 146, "must": "return (tensor**2).sum((1, 2))", "caption": "I→1·I、构造对称无迹部分、tensor_norm（Frobenius 范数平方）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互层 ①：归一化、分解，并沿边收集邻居张量",
+      "plain": "每个交互层先把 X_i 除以 (‖X_i‖²_F + 1) 做归一化，防止多层矩阵乘积后数值爆炸；再分解成 I、A、S，各自做通道线性混合得到 Y_i。边上的径向基经三层 Linear+SiLU 得到三组权重 f^I、f^A、f^S（再乘余弦截断），分别乘到邻居 j 的 I_j、A_j、S_j 上并求和，得到消息 M_i。径向权重是标量，乘上去不会破坏等变性；A 在传递时以 3 维矢量形式存储，省内存。",
+      "math": "\\mathbf X_i\\leftarrow\\frac{\\mathbf X_i}{\\lVert\\mathbf X_i\\rVert_F^2+1},\\quad \\mathbf Y_i=W^{I}I_i+W^{A}A_i+W^{S}S_i;\\qquad \\mathbf M_i=\\sum_{j\\in\\mathcal N(i)}f_c(r_{ij})\\big[f^{I}_{ij}\\,W^{I}I_j+f^{A}_{ij}\\,W^{A}A_j+f^{S}_{ij}\\,W^{S}S_j\\big],\\quad (f^{I},f^{A},f^{S})_{ij}=\\mathrm{MLP}\\big(e(r_{ij})\\big)",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 738, "end": 762, "must": "X = X / (tensor_norm(X) + 1)[:, None, None, :]", "caption": "Interaction.forward：径向 MLP × 截断、归一化、分解、通道混合得 Y"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 628, "end": 655, "must": "factor_scalar = edge_attr_processed[..., 0, :]", "caption": "三种分量分别乘径向权重后 index_add 聚合"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互层 ②：矩阵乘法 Y·M + M·Y 与残差更新",
+      "plain": "TensorNet 的“张量积”就是普通矩阵乘：(RYRᵀ)(RMRᵀ) = R(YM)Rᵀ，所以乘积自动等变，每个乘积每通道只需 27 次乘加。默认 O(3) 模式取反对易子 YM + MY：{A,S} 只落在反对称部分，{A,A′}、{S,S′} 只落在对称部分，因此在反演下变号的 A 不会混进 I、S，对镜像也等变；SO(3) 模式只用 2YM，预测只保证对旋转不变。乘积再分解、按 ‖C‖²_F+1 归一化、通道混合得 ΔX，最后残差更新 X ← X + ΔX + ΔX²（ΔX² 又是一次矩阵乘，引入更高阶耦合）；给定总电荷时两个乘积项都乘 (1+0.1q)。",
+      "math": "\\mathbf C_i=(1+0.1\\,q_i)\\big(\\mathbf Y_i\\mathbf M_i+\\mathbf M_i\\mathbf Y_i\\big),\\qquad \\Delta\\mathbf X_i=\\sum_{c\\in\\{I,A,S\\}}W'_c\\,\\frac{\\mathbf C_i^{c}}{\\lVert\\mathbf C_i\\rVert_F^2+1},\\qquad \\mathbf X_i\\leftarrow\\mathbf X_i+\\Delta\\mathbf X_i+(1+0.1\\,q_i)\\,\\Delta\\mathbf X_i\\Delta\\mathbf X_i",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 786, "end": 814, "must": "tensor_matmul_o3(Y, msg)", "caption": "O(3)/SO(3) 矩阵乘、分解、归一化、残差 + ΔX²"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 42, "end": 51, "must": "return A + B", "caption": "_tensor_matmul_o3：逐通道 3×3 矩阵乘 M·Y + Y·M"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：三种分量的范数 → 原子标量特征 → 原子能",
+      "plain": "交互层结束后把 X_i 再分解成 I、A、S，取三者的 Frobenius 范数平方（对 I·1 就是 3I²）拼成 3F 维旋转不变向量，经 LayerNorm、Linear(3F→F)+SiLU 得到原子标量特征，再由 Scalar 输出头（隐藏宽度 F/2 的 MLP）给出原子能 ε_i。matgl 版本同样拼接三种范数 → LayerNorm → Linear，再用 MLP 读出。TensorNet 不输出等变矢量特征（v=None），只能接标量类输出头。",
+      "math": "\\mathbf x_i=\\mathrm{SiLU}\\Big(W\\,\\mathrm{LN}\\big[\\lVert I_i\\rVert_F^2\\oplus\\lVert A_i\\rVert_F^2\\oplus\\lVert S_i\\rVert_F^2\\big]\\Big),\\qquad \\varepsilon_i=\\mathrm{MLP}_{F\\to F/2\\to 1}(\\mathbf x_i)",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 381, "end": 402, "must": "x = torch.cat((3 * I**2, tensor_norm(A), tensor_norm(S)), dim=-1)", "caption": "TensorNet.forward 末尾：范数拼接（或 Warp 的 fn_tensor_norm3）"},
+        {"repo": "torchmd-net", "file": "torchmdnet/models/output_modules.py", "start": 95, "end": 117, "must": "hidden_channels=hidden_channels // 2", "caption": "Scalar 输出头"},
+        {"repo": "matgl", "file": "src/matgl/models/_tensornet.py", "start": 328, "end": 341, "must": "tensor_norm(traceless_tensors)", "caption": "matgl 移植版的相同读出"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能 × σ + 参考能，求和 + μ + 先验",
+      "plain": "原子能先乘数据集标准差 σ、加逐原子的参考能（Atomref 先验），再按体系求和（reduce_op=sum，保证广延性），加均值 μ，最后加上整体型先验（ZBL、D2、Coulomb 等）的能量。matgl 的 TensorNet 在 is_intensive=False 时同样对原子能求和，外层 Potential 再乘 data_std、加 data_mean 与元素参考能 element_refs（可选 ZBL 斥力）。",
+      "math": "E=\\mu+\\sum_{i}\\big[\\sigma\\,\\varepsilon_i+E^{\\text{ref}}_{Z_i}\\big]+E_{\\text{prior}}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 601, "end": 623, "must": "x = self.output_model.reduce(x, batch, num_systems=num_systems)", "caption": "std 缩放 → 原子先验 → 求和 → mean → 体系先验"},
+        {"repo": "matgl", "file": "src/matgl/models/_tensornet.py", "start": 381, "end": 391, "must": "atomic_energies = self.final_layer(x)", "caption": "matgl：广延读出，原子能 scatter 求和"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "物理先验：ZBL 近程斥力 + D2 色散 + Coulomb 静电",
+      "plain": "TensorNet 网络本身是截断内的局域模型，torchmd-net 用可叠加的“先验”补物理：ZBL 用 4 个指数的屏蔽库仑函数（乘余弦截断）防止原子在高温/高压下互相穿透；D2 按 Grimme 的 C6/r⁶ 加 Fermi 阻尼给出色散；Coulomb 先验用数据集提供的部分电荷计算 q_iq_j/r，用余弦开关在近程关掉，邻居搜索上限为无穷远。它们都在 post_reduce 阶段加到总能上，因此同样参与求力。",
+      "math": "E_{\\text{ZBL}}=\\tfrac12\\sum_{i\\ne j}\\frac{Z_iZ_je^2}{4\\pi\\varepsilon_0r_{ij}}\\,\\phi\\big(r_{ij}/a_{ij}\\big)f_c(r_{ij});\\qquad E_{\\text{D2}}=-\\tfrac{s_6}{2}\\sum_{i\\ne j}\\frac{C_6^{ij}}{r_{ij}^{6}}\\frac{1}{1+e^{-d(r_{ij}/R_r^{ij}-1)}};\\qquad E_{\\text{C}}=\\tfrac12\\sum_{i\\ne j}\\frac{q_iq_j}{4\\pi\\varepsilon_0r_{ij}}\\,s(r_{ij})",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/zbl.py", "start": 86, "end": 112, "must": "0.1818 * torch.exp(-3.2 * d)", "caption": "ZBL 先验"},
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/d2.py", "start": 186, "end": 199, "must": "E_ij = C_6 / R_ij**6 * f_damp", "caption": "D2 色散先验"},
+        {"repo": "torchmd-net", "file": "torchmdnet/priors/coulomb.py", "start": 107, "end": 125, "must": "torch.cos(torch.pi * phase)", "caption": "Coulomb 先验（余弦开关）"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：总能量对坐标的自动微分",
+      "plain": "力不是网络直接输出，而是对总能量（含先验）关于坐标做一次 autograd 反传得到的负梯度，所以力场严格保守，NVE 下能量守恒。训练时 create_graph=True，使力的损失也能反传到参数；推理时不建二阶图以节省内存。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "torchmd-net", "file": "torchmdnet/models/model.py", "start": 626, "end": 636, "must": "return y, -dy", "caption": "TorchMD_Net.forward：grad → 负导数即力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力（matgl）：对“虚拟应变”求导",
+      "plain": "torchmd-net 的 TensorNet 只输出能量和力，没有应力；材料场景的应力由 matgl 的 Potential 提供。它引入一个全零、可求导的应变张量 ε，晶格变为 L(1+ε)，原子坐标由分数坐标乘新晶格得到，于是同一次 autograd.grad 同时给出 ∂E/∂r（力）和 ∂E/∂ε；后者除以晶胞体积并换算成 GPa 即为应力。",
+      "math": "\\mathbf L\\to\\mathbf L(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf r_i=\\mathbf s_i\\mathbf L;\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"repo": "matgl", "file": "src/matgl/apps/pes.py", "start": 278, "end": 303, "must": "lattice = lat @ (self._eye3 + st)", "caption": "应变张量 st 作用于晶格，坐标由分数坐标重建"},
+        {"repo": "matgl", "file": "src/matgl/apps/pes.py", "start": 338, "end": 379, "must": "grad_vars = [g.pos, st] if self.calc_stresses else [g.pos]", "caption": "一次 grad 得到力与 ∂E/∂ε，再除以体积得应力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：Hessian 与强度量性质",
+      "plain": "matgl 的 Potential 打开 calc_hessian 后，对 ∂E/∂r 的每个分量再反传一次，逐行拼出 3N×3N 的 Hessian（声子、振动频率），代价约为 3N 次反传，只适合小体系。把 is_intensive 设为 True 时，TensorNet 不再求和原子能，而是先把原子特征汇总成整体向量再过 MLP，用来回归强度量性质。torchmd-net 侧则可换用 DipoleMoment、ElectronicSpatialExtent 等标量类输出头。",
+      "math": "H_{ij}^{\\alpha\\beta}=\\frac{\\partial^2E}{\\partial r_i^{\\alpha}\\partial r_j^{\\beta}};\\qquad y_{\\text{intensive}}=\\mathrm{MLP}\\big(\\mathrm{Readout}\\{\\mathbf x_i\\}\\big)",
+      "code": [
+        {"repo": "matgl", "file": "src/matgl/apps/pes.py", "start": 357, "end": 364, "must": "for iatom in range(s):", "caption": "逐行求 Hessian"},
+        {"repo": "matgl", "file": "src/matgl/models/_tensornet.py", "start": 375, "end": 380, "must": "node_vec = self.readout(x, batch, num_graphs=num_graphs)", "caption": "强度量读出分支"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "hidden_channels（embedding_dimension）", "value": "128", "note": "每个原子的 3×3 张量通道数 F", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "hidden_channels=128"}},
+    {"name": "num_layers", "value": "2", "note": "交互层数（另有 1 个嵌入层）", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "num_layers=2"}},
+    {"name": "num_rbf × rbf_type", "value": "32 × expnorm（trainable_rbf=False）", "note": "径向基", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "rbf_type=\"expnorm\""}},
+    {"name": "cutoff_upper", "value": "4.5 Å（类默认）", "note": "截断半径；cutoff_lower 默认 0", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "cutoff_upper=4.5"}},
+    {"name": "max_num_neighbors", "value": "64", "note": "static_shapes 下每原子预分配的邻居数，超出会报错", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "max_num_neighbors=64"}},
+    {"name": "equivariance_invariance_group", "value": "O(3)（可选 SO(3)）", "note": "O(3) 用 YM+MY，SO(3) 用 2YM", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "equivariance_invariance_group=\"O(3)\""}},
+    {"name": "activation", "value": "silu", "note": "径向 MLP 与读出的激活函数", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 205, "end": 221, "must": "activation=\"silu\""}},
+    {"name": "总电荷调制系数", "value": "1 + 0.1·q", "note": "乘在交互层两个矩阵乘积项上", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/tensornet.py", "start": 786, "end": 814, "must": "C = (1 + 0.1 * q[..., None, None, None])"}},
+    {"name": "SPICE 示例配置", "value": "r_c = 10 Å，num_rbf = 64，max_num_neighbors = 128，2 层 × 128 通道", "note": "examples/TensorNet-SPICE.yaml", "code": {"repo": "torchmd-net", "file": "examples/TensorNet-SPICE.yaml", "start": 1, "end": 45, "must": "cutoff_upper: 10.0"}},
+    {"name": "Scalar 读出 MLP", "value": "F → F/2 → 1", "note": "原子能输出头", "code": {"repo": "torchmd-net", "file": "torchmdnet/models/output_modules.py", "start": 95, "end": 102, "must": "hidden_channels=hidden_channels // 2"}},
+    {"name": "matgl TensorNet 默认", "value": "units = 64，nblocks = 2，num_rbf = 32（Gaussian），cutoff = 5.0 Å，swish", "note": "matgl 类默认值（预训练权重的具体配置随 Hugging Face 模型文件发布）", "code": {"repo": "matgl", "file": "src/matgl/models/_tensornet.py", "start": 78, "end": 103, "must": "cutoff: float = 5.0"}}
+  ],
+  "speedNotes": [
+    "每通道特征只有 9 个数（I:1 + A:3 + S:5），交互里的“张量积”就是 3×3 矩阵乘（每个乘积每通道 27 次乘加），没有球谐展开、也没有随 L 增长的 CG 路径求和——这是它比 NequIP/MACE 类便宜的根本原因。",
+    "主要开销在边上：径向 MLP 产生 3F 个权重，乘到邻居的 I/A/S 再 index_add 聚合；节点上是每层 6 个 F×F 通道线性层。推理时 setup_for_inference 预先算好元素对嵌入表 Zij_map，省掉逐边的嵌入计算。",
+    "torchmd-net 内置 NVIDIA Warp 融合内核（嵌入/交互消息传递、张量组合/分解、3×3 矩阵乘、范数），缺 warp-lang 时自动回退纯 PyTorch；static_shapes=True 让张量形状固定，可被 CUDA Graph 捕获，文档称可显著提升推理速度。",
+    "matgl README：Warp 后端训练与推理约 2–3× 提速并省显存，JAX 推理约 2–3.5×；单张 H200 上 TensorNet-PES-MatPES-PBE-2025.2 在 4096 原子时每步（能量+力+应力）eager 105.9 ms，Warp 43.4 ms。",
+    "力与应力需要额外一次反传；训练时还要 create_graph 做二阶反传（力损失），显存明显高于只拟合能量。"
+  ],
+  "weakNotes": [
+    "感受野 = (1 + 层数) × r_c：嵌入层已聚合一次邻居，默认 2 个交互层、r_c = 4.5 Å 时最远约 13.5 Å；截断之外的 r⁻⁶ 色散尾巴和 r⁻¹ 静电完全缺失。官方 SPICE / MACE-OFF 配置把 r_c 提到 10 Å 来弥补。",
+    "网络本体不含色散与静电；torchmd-net 提供 D2 色散先验、Coulomb 先验（需数据集提供 partial_charges，近程用余弦开关关闭）以及用预测电荷算库仑能的 ScalarPlusWeightedCoulomb 输出头（溶剂介电常数默认 78.3）。",
+    "总电荷 q 只以 (1+0.1q) 的标量因子调制交互层，不是电荷平衡，无法描述电荷在体系内的重新分布；带电缺陷、离子液体、电极界面等体系应考虑 matgl 的 QET（电荷平衡版 TensorNet）。",
+    "matgl 的 TensorNet-PES-MatPES 分别在 MatPES 的 PBE 与 r2SCAN 数据上训练；PBE 基本不描述 vdW，层状材料层间结合、分子晶体、物理吸附需额外色散修正。matgl 的 LAMMPS 接口只支持 atom_style atomic，README 明确不支持带电体系（无电荷头）。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 余弦截断（能量与力在 r_c 处连续）适合 NVE MD；matgl README：TensorNet-PES-MatPES-r2SCAN-2025.2 在 LiFePO4 上 1 ps NVE 的能量漂移为 0.0007 meV/atom/ps（JAX-Metal）与 0.0006 meV/atom/ps（PyTorch-CPU）。",
+    "matgl Potential 原生输出应力（GPa）与 Hessian，配合 Relaxer / MolecularDynamics / PESCalculator 可做结构弛豫、状态方程、弹性常数与声子；但余弦截断的二阶导在 r_c 处不连续，高精度声子/热导率计算需留意。",
+    "torchmd-net 面向分子模拟：集成 OpenMM（OpenMM-Torch）、ACEMD、TorchMD，并提供 ASE 计算器 TMDNETCalculator；Acellera 的 AceFF 分子势即通过它加载。",
+    "TensorNet 不输出等变矢量/张量特征（v=None），只能接标量类输出头；极化率等张量性质没有官方输出头，IR/Raman 光谱需另行建模。",
+    "可微调：matgl 的 MGLPotentialTrainer 可在 TensorNet-PES-MatPES 预训练权重上微调；torchmd-net 用 examples/TensorNet-*.yaml 配置从头训练。"
+  ],
+  "strengths": ["用 3×3 笛卡尔张量和矩阵乘实现 O(3) 等变，无需球谐/CG，实现简洁、计算便宜", "参数与数据效率高：默认仅 2 层、128 通道（matgl 默认 64）", "两套官方实现：torchmd-net 面向分子 MD（OpenMM/ACEMD、CUDA Graph），matgl 面向材料（MatPES 基础势、应力、LAMMPS）", "加速生态成熟：Warp 融合内核、JAX 推理、TorchScript", "可选 ZBL / D2 / Coulomb 物理先验与总电荷输入"],
+  "weaknesses": ["角分辨率固定在 rank-2（相当于 l≤2），不能像 MACE 那样系统地提高 L 与体序", "仍是消息传递：感受野 3×r_c，空间分解并行困难（matgl LAMMPS 仅单 GPU）", "网络本体无长程静电/色散，需外挂先验或改用 QET", "torchmd-net 版本不输出应力；static_shapes 需预设 max_num_neighbors"],
+  "pretrained": ["TensorNet-PES-MatPES-PBE-2025.2（matgl，Hugging Face materialyze）", "TensorNet-PES-MatPES-r2SCAN-2025.2（matgl）", "AceFF-1.0 / 1.1 / 2.0（Acellera 分子势，经 torchmd-net 加载；README 称其为 TensorNet/TensorNet2 旧格式 checkpoint）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

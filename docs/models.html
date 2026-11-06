@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型库 · MLFF 架构图解</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+  <h1>模型库</h1>
+  <p class="muted">所有收录的架构与模块。可按家族、力的类型、局域性、长程能力筛选；卡片上的 F1 / κ<sub>SRME</sub> 取自 Matbench Discovery 中该架构最好的一个模型（F1 越高越好，κ<sub>SRME</sub> 越低越好）。</p>
+  <div class="filters">
+    <input type="search" id="q" placeholder="搜索名称、作者、标签…">
+    <select id="forces"><option value="">力的类型：全部</option><option value="conservative">保守力</option><option value="direct">直接力</option><option value="both">两者均支持</option><option value="n/a">不适用</option></select>
+    <select id="local"><option value="">局域性：全部</option><option value="1">严格局域</option><option value="0">消息传递（半局域）</option></select>
+    <select id="lr"><option value="">长程静电：全部</option><option value="builtin">内置 / 核心</option><option value="optional">可选扩展</option><option value="none">无</option></select>
+    <select id="sort"><option value="family">排序：家族</option><option value="year">年份（新→旧）</option><option value="name">名称</option><option value="f1">MBD F1（高→低）</option><option value="kappa">κ_SRME（低→高）</option></select>
+    <span class="muted small" id="count"></span>
+  </div>
+  <div class="pill-select" id="fam-chips"></div>
+  <div class="grid g3" id="cards" style="margin-top:14px"></div>
+</main>
+<script>
+mountChrome("models.html");
+const D = window.MLFF;
+const best = {};
+for (const r of (window.MLFF_BENCH?.mbd || [])) {
+  if (!r.modelId) continue;
+  const b = best[r.modelId] || (best[r.modelId] = { f1: null, kappa: null, f1Key: "", kKey: "" });
+  const f1 = r.discovery?.F1, k = r.phonons?.["κ_SRME"];
+  if (f1 != null && (b.f1 == null || f1 > b.f1)) { b.f1 = f1; b.f1Key = r.key; }
+  if (k != null && (b.kappa == null || k < b.kappa)) { b.kappa = k; b.kKey = r.key; }
+}
+const famOn = new Set();
+document.getElementById("fam-chips").innerHTML = D.families.map((f) =>
+  `<button class="chip" data-f="${f}" style="border-color:${famColor(f)}">${esc(FAMILY[f].name)}</button>`).join("");
+document.querySelectorAll("#fam-chips .chip").forEach((b) => b.addEventListener("click", () => {
+  const f = b.dataset.f;
+  famOn.has(f) ? famOn.delete(f) : famOn.add(f);
+  b.classList.toggle("on");
+  b.style.background = famOn.has(f) ? famColor(f) : "";
+  render();
+}));
+["q", "forces", "local", "lr", "sort"].forEach((id) => document.getElementById(id).addEventListener("input", render));
+const init = param("family");
+if (init && FAMILY[init]) document.querySelector(`#fam-chips .chip[data-f="${init}"]`)?.click();
+
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const fo = document.getElementById("forces").value, lo = document.getElementById("local").value, lr = document.getElementById("lr").value;
+  const sort = document.getElementById("sort").value;
+  let ms = D.models.filter((m) => {
+    if (famOn.size && !famOn.has(m.family)) return false;
+    if (fo && m.arch.forces !== fo) return false;
+    if (lo && String(+m.arch.strictlyLocal) !== lo) return false;
+    const c = D.curated[m.id];
+    if (lr) {
+      const v = c ? c.lr : "none";
+      if (lr === "builtin" && !["builtin", "core"].includes(v)) return false;
+      if (lr !== "builtin" && v !== lr) return false;
+    }
+    if (q) {
+      const hay = [m.name, m.fullName, m.authors, m.oneLiner, ...(m.tags || []), m.framework].join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const cmp = {
+    family: (a, b) => D.families.indexOf(a.family) - D.families.indexOf(b.family) || String(a.year).localeCompare(String(b.year)),
+    year: (a, b) => String(b.year).localeCompare(String(a.year)) || a.name.localeCompare(b.name),
+    name: (a, b) => a.name.localeCompare(b.name),
+    f1: (a, b) => (best[b.id]?.f1 ?? -1) - (best[a.id]?.f1 ?? -1),
+    kappa: (a, b) => (best[a.id]?.kappa ?? 99) - (best[b.id]?.kappa ?? 99),
+  }[sort];
+  ms = ms.slice().sort(cmp);
+  document.getElementById("count").textContent = `共 ${ms.length} 个`;
+  document.getElementById("cards").innerHTML = ms.map((m) => {
+    const c = D.curated[m.id];
+    const b = best[m.id];
+    const lrTag = c && ["builtin", "core"].includes(c.lr) ? '<span class="badge lr">内置长程静电</span>' : "";
+    const dispTag = c && ["builtin", "core"].includes(c.disp) ? '<span class="badge lr">内置色散</span>' : "";
+    const bench = b ? `<div class="meta">MBD 最佳：F1 <b>${fmt(b.f1)}</b>${b.kappa != null ? ` · κ<sub>SRME</sub> <b>${fmt(b.kappa)}</b>` : ""}</div>` : "";
+    return `<a class="card model-card" href="${modelLink(m)}" style="color:inherit;text-decoration:none;border-top:4px solid ${famColor(m.family)}">
+      <div class="flex"><h3>${esc(m.name)}</h3><span class="spacer"></span><span class="muted small">${esc(m.year)}</span></div>
+      <div class="tags">${famBadge(m.family)}${m.arch.forces !== "n/a" ? forcesBadge(m.arch.forces) : ""}${m.arch.strictlyLocal ? '<span class="badge local">严格局域</span>' : ""}${lrTag}${dispTag}</div>
+      <div class="one">${esc(m.oneLiner)}</div>
+      <div class="meta">${esc(m.framework)}</div>${bench}</a>`;
+  }).join("") || '<p class="muted">没有匹配的模型。</p>';
+}
+render();
+</script>
+</body>
+</html>

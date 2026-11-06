@@ -1,0 +1,206 @@
+{
+  "id": "hipnn",
+  "name": "HIP-NN",
+  "fullName": "HIP-NN: Hierarchical Interacting Particle Neural Network（hippynn 库实现，含 HIP-NN-TS）",
+  "year": 2018,
+  "authors": "N. Lubbers, J. S. Smith, K. Barros（LANL）",
+  "paper": {"title": "Hierarchical modeling of molecular energies using a deep neural network", "venue": "J. Chem. Phys. 148, 241715 (2018)", "url": "https://doi.org/10.1063/1.5011181"},
+  "repos": ["hippynn"],
+  "family": "invariant-mpnn",
+  "tags": ["分子体系为主的不变 MPNN", "逆距离高斯敏感函数", "分层能量 hierarchicality", "HIP-NN-TS 张量敏感", "可选电荷与屏蔽静电"],
+  "framework": "PyTorch（envsum 自定义内核：Triton / Numba / CuPy）",
+  "license": "BSD-3-Clause",
+  "oneLiner": "每个原子先用一组“逆距离上的高斯敏感函数 × cos² 截断”把邻居特征加权求和（连续卷积），再经几层逐原子的全连接层；每一层的特征都线性读出一份原子能，总能是逐层贡献之和——低层给出主体，高层只做越来越小的修正（分层性）。",
+  "analogy": "像估算一座城市的总开销：先按人口构成（各元素数量）给出基础预算（E0），再根据每个人的邻里关系逐轮修正——第一轮看谁住在附近，第二轮看“邻居的邻居”；每一轮修正都应比上一轮小，这就是 HIP-NN 的“分层”思想。",
+  "arch": {
+    "geometry": "原版只用原子对距离 r_ij（逆距离高斯敏感函数 × cos² 截断）；HIP-NN-TS 额外用单位向量 r̂_ij（l=1）与无迹 r̂r̂（l=2）",
+    "equivariance": "E(3) 不变：隐藏特征全是标量；TS 变体在层内取张量范数，不跨层传递等变特征",
+    "lmax": "HIP-NN：0（纯径向）；HIP-NN-TS：1（HipnnVec）或 2（HipnnQuad）；HIP-HOP-NN（beta）默认 l_max=3",
+    "bodyOrder": "每层消息是 2 体加权和，多层非线性隐式产生多体；TS 的 ‖Σ_j s r̂_ij z_j‖² 显式含 3 体键角项",
+    "layers": "n_interaction_layers 个交互块（示例默认 2），每块 = 1 个交互层 + n_atom_layers 个 on-site 层（ANI-1x 示例 3，MatPES 示例 5）",
+    "cutoff": "dist_hard_max 由用户设定：ANI-1x 示例 6.5 Å，MatPES 示例 6.0 Å，QM7 示例 12.5 Bohr",
+    "receptiveField": "n_int × r_c（ANI-1x 示例 2 × 6.5 = 13 Å）",
+    "message": "环境张量 E_iνf = Σ_j s_ν(r_ij) z_jf（envsum）→ Σ_ν V_ν E_iν + W z_i + b；残差包装 + Softplus",
+    "readout": "第 0 层（one-hot）到最后一层的特征各自线性读出原子能并相加（HEnergy）；第 0 层无偏置 = 元素参考能 E0",
+    "forces": "conservative",
+    "forcesDetail": "GradientNode(sign=-1)：F = −∂E/∂R（autograd，create_graph=True 以便力训练）；LAMMPS 中对 r_ij 求导得对力 f_ij",
+    "stress": "StrainInducer 让坐标与晶胞同乘可求导的单位“应变”矩阵，StressForce 一次反传得力与 (∂E/∂ε)/det(C)",
+    "longRange": "默认无；可拼装 CoulombEnergy（全原子对、非周期）/ ScreenedCoulombEnergy（Wolf、erfc、Q 屏蔽）/ ChEQ 电荷平衡；Ewald 仅实空间",
+    "dispersion": "代码中无色散 / D3 模块，只能在截断内由训练数据隐式学习",
+    "chargeSpin": "无总电荷 / 自旋输入；ChEQ 层把体系净电荷硬编码为 0（q_mol = 0.0）",
+    "otherOutputs": "分层电荷 HCharge → 偶极 / 四极、Hessian 与 HVP、键级、激发态能量与非绝热耦合 NACR、分层性指标",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·n_ν·F) 的 envsum + O(N·n_ν·F·F') 的稠密矩阵乘；TS(l=1/2) 使 envsum 宽度 ×4 / ×9，权重 V 共用",
+    "accel": "envsum/sensesum/featsum 自定义内核（auto：triton→numba→cupy）、ASE 计算器、LAMMPS ML-IAP unified（Kokkos、跨进程特征通信）、PYSEQM 接口"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "全标量、无球谐与 CG 张量积，单层就是“敏感函数加权求和 + 一次矩阵乘”，属于轻量不变 MPNN，并有 Triton/Numba 专用内核。"},
+    "expressiveness": {"v": 3, "why": "原版只有距离（2 体消息 + 多层非线性），TS 版以范数形式加入 l≤2 的角度信息，整体低于高体序等变模型。"},
+    "longRange": {"v": 3, "why": "本体严格截断，但官方提供分层电荷、屏蔽 Coulomb 与 ChEQ 电荷平衡层；周期 Ewald 不完整且无色散。"},
+    "scalability": {"v": 3, "why": "线性标度，LAMMPS ML-IAP 接口支持多进程并逐层交换 ghost 原子特征；但消息传递不如严格局域模型好切分。"},
+    "physics": {"v": 4, "why": "保守力、cos² 截断（值与一阶导在 r_c 归零）、原子能求和保证广延性；但没有 ZBL 式近程排斥，只在距离过近时报警。"},
+    "coverage": {"v": 5, "why": "能量/力/应力之外，官方层覆盖电荷、偶极、四极、Hessian、键级、激发态与非绝热耦合等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：元素序号 Z 与坐标 R（周期体系再加晶胞）",
+      "plain": "hippynn 用“图 API”搭模型：SpeciesNode 读取原子序号（0 表示补齐用的空原子），PositionsNode 读取坐标；网络类可在 Hipnn、HipnnVec / HipnnQuad（HIP-NN-TS）与 HipHopnn 之间切换。数据按“分子 × 最大原子数”的补齐数组组织，体现了它以分子数据集（QM7、ANI-1x）为主的出身。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf r_i)\\}_{i=1}^{N},\\quad Z_i=0\\ \\text{表示补齐空位}\\ \\ (\\text{周期体系另加晶胞}\\ \\mathbf C)",
+      "code": [{"repo": "hippynn", "file": "examples/ani1x_training.py", "start": 27, "end": 42, "must": "inputs.SpeciesNode(db_name=\"atomic_numbers\")", "caption": "ANI-1x 示例：按 tensor_order 选择 Hipnn / HIP-NN-TS / HIP-HOP-NN，并接入 Species/Positions 输入"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居对：距离小于 dist_hard_max 的所有原子对",
+      "plain": "开放边界（分子）时，OpenPairIndexer 在每个分子内计算全部原子对距离，保留小于硬截断 dist_hard_max 的对；周期体系则把晶胞平移镜像也纳入（neighbor_list_torch 等多种实现）。得到的 pair_first / pair_second 列表就是后续消息传递的全部索引。",
+      "math": "\\mathcal N(i)=\\{\\,j\\neq i:\\ \\lVert\\mathbf r_j+\\mathbf n\\,\\mathbf C-\\mathbf r_i\\rVert<r_c\\,\\}",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/pairs/open.py", "start": 33, "end": 47, "must": "close_atoms = pair_dists < self.dist_hard_max", "caption": "OpenPairIndexer：分子内全对距离 + 截断筛选"},
+        {"repo": "hippynn", "file": "hippynn/layers/pairs/dispatch.py", "start": 98, "end": 137, "must": "nonz = torch.nonzero(dist < cutoff)", "caption": "neighbor_list_torch：周期镜像平移下的邻居搜索"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "敏感函数：逆距离上的高斯 × cos² 截断",
+      "plain": "每条边的距离 r 被 n_ν 个“敏感函数”同时测量：默认 inverse 型把高斯放在 1/r 空间，中心 μ_ν 在 1/d_soft_max 与 1/d_soft_min 之间均匀初始化，μ 与宽度 σ 都可学习——所以近距离分辨率高、远处更粗。再乘 cos²(πr/2r_c) 截断，使函数值与一阶导在 r_c 处都归零，力连续。也可选 linear 型（高斯放在 r 上）。",
+      "math": "s_\\nu(r)=\\exp\\!\\Big[-\\tfrac{\\sigma_\\nu^{2}}{2}\\big(r^{-1}-\\mu_\\nu^{-1}\\big)^{2}\\Big]\\,\\varphi_{\\text{cut}}(r),\\qquad \\varphi_{\\text{cut}}(r)=\\cos^{2}\\!\\Big(\\frac{\\pi r}{2r_c}\\Big)\\,\\Theta(r_c-r)",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/hiplayers/sensitivity.py", "start": 33, "end": 36, "must": "torch.cos(np.pi / 2 * dist_tensor / self.hard_max_dist) ** 2", "caption": "CosCutoff：cos² 截断"},
+        {"repo": "hippynn", "file": "hippynn/layers/hiplayers/sensitivity.py", "start": 78, "end": 106, "must": "nondim = (distflat_ds**-1 - self.mu**-1) ** 2 / (self.sigma**-2)", "caption": "InverseSensitivityModule：逆距离高斯敏感函数（μ、σ 可学习）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始特征：元素 one-hot（没有可学习嵌入）",
+      "plain": "第 0 层特征就是元素的 one-hot 向量（去掉“空原子”那一列），维度等于元素种类数。它不经过任何网络，直接作为第一个交互层的输入，同时也被能量读出使用——第 0 层读出的系数就是每种元素的参考能 E0。",
+      "math": "z_i^{(0)}=\\mathrm{onehot}(Z_i)\\in\\{0,1\\}^{n_{\\text{species}}}",
+      "code": [{"repo": "hippynn", "file": "hippynn/layers/indexers.py", "start": 37, "end": 42, "must": "initial_features = onehot_species[:, :, 1:]", "caption": "OneHotSpecies：元素 one-hot 与非空原子掩码"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互层：连续卷积 E = S·Z，再用权重 V 压缩",
+      "plain": "对每个原子 i，把邻居特征 z_j 按每个敏感函数 s_ν(r_ij) 加权求和，得到 N×n_ν×F 的“环境张量”（envsum）；再用权重张量 V 把 (ν, f) 两个维度一起压缩到输出通道，并加上自身项 W z_i + b。只用距离，因此天然旋转/平移不变；结构上与 SchNet 的连续滤波卷积同类，但滤波器是“敏感函数 × 线性权重”的可分离形式，便于写成专用内核。",
+      "math": "\\mathcal E_{i,\\nu f}=\\sum_{j\\in\\mathcal N(i)}s_\\nu(r_{ij})\\,z^{(n-1)}_{j,f},\\qquad a_i=\\sum_{\\nu,f}V_{\\nu,\\cdot f}\\,\\mathcal E_{i,\\nu f}+W z^{(n-1)}_i+b",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/hiplayers/interactions.py", "start": 55, "end": 83, "must": "custom_kernels.envsum(sense_vals, in_features, pair_first, pair_second)", "caption": "InteractLayer.forward：Z' = VSZ + WZ + b"},
+        {"repo": "hippynn", "file": "hippynn/custom_kernels/env_pytorch.py", "start": 26, "end": 33, "must": "env_features.index_add_(0, pair_first, pair_env_features)", "caption": "envsum 的纯 PyTorch 参考实现：逐边外积后 index_add 到中心原子"},
+        {"repo": "hippynn", "file": "hippynn/custom_kernels/env_triton.py", "start": 173, "end": 179, "must": "envsum_triton(sense, features, pfirst, psecond, atom1_ids, atom1_starts, out_env=None)", "caption": "Triton 内核：按 pair_first 排序成 CSR 后累加"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "残差包装 + on-site 原子层",
+      "plain": "默认 resnet=True：交互层输出先过 Softplus，再经一个线性层后加回（必要时经线性投影的）输入。每个交互块后还接 n_atom_layers 个只作用于单个原子的全连接层（同样带残差），它们不交换邻居信息，只做逐原子的非线性变换，把 2 体加权和“揉”成多体特征。每个块的输出都被保存下来，供分层读出使用。",
+      "math": "z^{(n)}_i=W_{\\text{res}}\\,\\mathrm{softplus}(a_i)+W_{\\text{adj}}\\,z^{(n-1)}_i,\\qquad z_i\\leftarrow z_i+W'_{\\text{res}}\\,\\mathrm{softplus}(W'z_i+b')\\ \\ (\\times n_{\\text{atom}})",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/transform.py", "start": 52, "end": 59, "must": "difference_activation = self.res_layer(middle_activation)", "caption": "ResNetWrapper.forward"},
+        {"repo": "hippynn", "file": "hippynn/networks/hipnn.py", "start": 202, "end": 209, "must": "lay = torch.nn.Linear(out_size, middle_size)", "caption": "每个交互块后追加 n_atom_layers 个 on-site 层"},
+        {"repo": "hippynn", "file": "hippynn/networks/hipnn.py", "start": 239, "end": 254, "must": "features = int_layer(features, pair_first, pair_second, pair_dist)", "caption": "Hipnn.forward：逐块计算并收集各层特征"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "HIP-NN-TS：张量敏感函数引入角度",
+      "plain": "HipnnVec / HipnnQuad 把敏感函数再乘上单位向量 r̂_ij（l=1）或无迹二阶张量 r̂r̂−I/3（l=2，存 5 个分量），与标量部分堆叠后一次 envsum 完成；随后用与标量部分相同的权重 V 收缩，取范数（加 cusp_reg 防止零向量处梯度发散）并乘可学习尺度。范数平方展开后含 r̂_ij·r̂_ik，即显式的键角（3 体）信息，而输出仍是不变量，代价只是 envsum 变宽。",
+      "math": "\\boldsymbol{\\mathcal E}^{(1)}_{i,\\nu f}=\\sum_j s_\\nu(r_{ij})\\,\\hat{\\mathbf r}_{ij}\\,z_{j,f},\\qquad a_i\\leftarrow a_i+\\boldsymbol\\lambda_1\\odot\\sqrt{\\Big\\lVert\\sum_{\\nu,f}V_{\\nu,\\cdot f}\\,\\boldsymbol{\\mathcal E}^{(1)}_{i,\\nu f}\\Big\\rVert^{2}+\\epsilon}\\ \\ (+\\ l=2\\ \\text{项})",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/hiplayers/interactions.py", "start": 146, "end": 178, "must": "features_out_vec = torch.sqrt(features_out_vec)", "caption": "InteractLayerVec.forward：向量敏感 → 共享权重 → 范数"},
+        {"repo": "hippynn", "file": "hippynn/layers/hiplayers/interactions.py", "start": 203, "end": 214, "must": "rhatsquad = rhatsquad - tr", "caption": "InteractLayerQuad：构造无迹二阶张量敏感函数"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "分层能量：每层贡献一项，越往后越小",
+      "plain": "HEnergy 对第 0 层（one-hot）到最后一层的特征各用一个线性层读出原子能并相加；第 0 层没有偏置，等价于“按元素计数的参考能 E0”。训练前 hierarchical_energy_initialization 用训练集的组成矩阵做最小二乘（伪逆）求 E0，并把更高层读出权重依次缩小（1e-2、1e-4…）。HEnergy 还输出“分层性”指标 H（高层能量平方的占比），可作为正则项鼓励能量逐层收敛。原子能求和保证了广延性。",
+      "math": "E=\\sum_{n=0}^{N_{\\text{int}}}\\sum_i\\big(\\mathbf w_n\\!\\cdot z^{(n)}_i+b_n\\big),\\ b_0=0;\\qquad \\mathbf e_0=(Z^{\\top}Z)^{+}Z^{\\top}\\mathbf E;\\qquad H_i=\\sum_{n\\ge1}\\frac{(E^{(n)}_i)^2}{(E^{(n)}_i)^2+(E^{(n-1)}_i)^2}",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/targets.py", "start": 50, "end": 59, "must": "partial_energies = [lay(x) for x, lay in zip(all_features, self.layers)]", "caption": "HEnergy.forward：逐层原子能 → 求和"},
+        {"repo": "hippynn", "file": "hippynn/layers/targets.py", "start": 61, "end": 68, "must": "partial_atom_hier = [x / (x + y) for x, y in zip(partial_esq[1:], partial_esq[:-1])]", "caption": "分层性指标 hierarchicality"},
+        {"repo": "hippynn", "file": "hippynn/pretraining.py", "start": 69, "end": 86, "must": "eovals = compute_hipnn_e0(encoder, z_vals, t_vals, peratom=peratom)", "caption": "E0 最小二乘初始化 + 高层权重衰减"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标自动微分（LAMMPS 中对 r_ij 求导）",
+      "plain": "GradientNode(sign=-1) 调用 torch.autograd.grad 得到 F = −∂E/∂R，并保留计算图（create_graph=True），这样力误差也能参与训练。力是同一个标量能量的梯度，因此力场严格保守。在 LAMMPS 接口中，则对每个原子对的位移 r_ij 求导得到“对力” f_ij，再交给 LAMMPS 组装原子力与维里。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i},\\qquad \\mathbf f_{ij}=-\\frac{\\partial E_{\\text{local}}}{\\partial\\mathbf r_{ij}}",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/physics/derivatives.py", "start": 16, "end": 17, "must": "torch.autograd.grad(molecular_energies.sum(), positions, create_graph=True)", "caption": "Gradient 层"},
+        {"repo": "hippynn", "file": "examples/ani1x_training.py", "start": 49, "end": 49, "must": "physics.GradientNode(\"forces\", (henergy, positions), sign=-1)", "caption": "示例：力 = 能量负梯度"},
+        {"repo": "hippynn", "file": "hippynn/interfaces/lammps_interface/graph_setup.py", "start": 93, "end": 102, "must": "GradientNode(\"grad_rij\"", "caption": "LAMMPS 图：本地原子能对 r_ij 求导得到对力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：可求导的“应变”矩阵",
+      "plain": "StrainInducer 构造一个需要梯度的单位矩阵 ε，让坐标与晶胞都右乘 ε；StressForce 一次反传同时得到 ∂E/∂R 与 ∂E/∂ε，后者除以晶胞体积 det(C) 即应力。ASE 计算器自动用这一套给出能量、力、应力；MatPES 示例还把应力换算到 VASP 符号约定参与训练。",
+      "math": "\\mathbf R\\to\\mathbf R\\,\\boldsymbol\\varepsilon,\\ \\ \\mathbf C\\to\\mathbf C\\,\\boldsymbol\\varepsilon\\ \\ (\\boldsymbol\\varepsilon=\\mathbf 1),\\qquad \\boldsymbol\\sigma=\\frac{1}{\\det\\mathbf C}\\,\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/physics/derivatives.py", "start": 166, "end": 175, "must": "straingrad, grad = torch.autograd.grad(total_energy, [strain, coordinates], create_graph=True)", "caption": "StressForce：一次反传得力与应力"},
+        {"repo": "hippynn", "file": "hippynn/layers/physics/derivatives.py", "start": 183, "end": 189, "must": "strained_cell = torch.bmm(cell, strain)", "caption": "CellScaleInducer：坐标与晶胞同乘应变矩阵"},
+        {"repo": "hippynn", "file": "hippynn/interfaces/ase_interface/calculator.py", "start": 120, "end": 128, "must": "StressForceNode(\"StressForceCalculator\", (energy, strain, positions, in_cell))", "caption": "ASE 计算器：能量 / 力 / 应力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程（可选）：分层电荷 + 屏蔽 Coulomb / 电荷平衡",
+      "plain": "HIP-NN 本体严格截断；hippynn 另提供可拼装的静电层：先用 HChargeNode 预测原子电荷，再接 CoulombEnergy（对全部原子对求和，仅限非周期体系）或 ScreenedCoulombEnergy（截断半径内乘屏蔽函数，如 Wolf、erfc、多项式 Q 屏蔽）。ChEQ 层让网络预测电负性 χ 与硬度 U，解带电中性约束的线性方程得到平衡电荷。Ewald 只有实空间部分（代码注释注明缺 k 空间），代码中也没有色散项。",
+      "math": "E_{\\text{coul}}=\\tfrac12\\sum_i q_i\\sum_{j}\\frac{k\\,q_j}{r_{ij}}\\,g(r_{ij}),\\ \\ g_{\\text{Wolf}}=\\mathrm{erfc}(\\alpha r)-\\tfrac{r}{R}\\,\\mathrm{erfc}(\\alpha R);\\qquad (U+J)\\,\\mathbf q=-\\boldsymbol\\chi,\\ \\ \\textstyle\\sum_i q_i=0",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/physics/coulomb.py", "start": 56, "end": 69, "must": "voltage_pairs = voltage_pairs * screening", "caption": "ScreenedCoulombEnergy：屏蔽后的成对静电势 → 原子能"},
+        {"repo": "hippynn", "file": "hippynn/layers/physics/coulomb.py", "start": 116, "end": 124, "must": "torch.erfc(eta * q) - q * torch.erfc(eta)", "caption": "Wolf 屏蔽函数"},
+        {"repo": "hippynn", "file": "hippynn/layers/physics/coulomb.py", "start": 294, "end": 303, "must": "torch.linalg.solve(A0, b0.unsqueeze(2))", "caption": "ChEQ：解电荷平衡方程"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：电荷、偶极、Hessian、激发态……",
+      "plain": "HCharge 与 HEnergy 结构相同：每层线性读出一份原子电荷并相加（也有分层性指标）；DipoleNode / QuadrupoleNode 由电荷与坐标得到偶极、四极。Hessian 层对力再求一次导得到二阶导矩阵，可用于振动分析或 Hessian 训练。此外还有键级回归、激发态能量与非绝热耦合（NACR）等目标层。",
+      "math": "q_i=\\sum_{n}\\big(\\mathbf u_n\\!\\cdot z^{(n)}_i+c_n\\big),\\qquad \\boldsymbol\\mu=\\sum_i q_i\\,\\mathbf r_i,\\qquad H_{ab}=\\frac{\\partial^2E}{\\partial x_a\\,\\partial x_b}",
+      "code": [
+        {"repo": "hippynn", "file": "hippynn/layers/targets.py", "start": 102, "end": 109, "must": "total_charges = sum(partial_charges)", "caption": "HCharge：分层原子电荷"},
+        {"repo": "hippynn", "file": "hippynn/layers/physics/charges.py", "start": 12, "end": 22, "must": "dipole_elements = charges * positions", "caption": "Dipole：μ = Σ q_i r_i"},
+        {"repo": "hippynn", "file": "hippynn/layers/physics/derivatives.py", "start": 66, "end": 72, "must": "force_components = force_flat.unbind(dim=1)", "caption": "Hessian：对力逐分量再求导"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "sensitivity_type / resnet / activation", "value": "\"inverse\" / True / Softplus", "note": "Hipnn 构造函数默认：逆距离高斯敏感函数、残差包装、Softplus 激活", "code": {"repo": "hippynn", "file": "hippynn/networks/hipnn.py", "start": 69, "end": 84, "must": "sensitivity_type=\"inverse\""}},
+    {"name": "n_interactions", "value": "2", "note": "交互块数（ANI-1x / MatPES 示例默认）", "code": {"repo": "hippynn", "file": "examples/ani1x_training.py", "start": 327, "end": 332, "must": "parser.add_argument(\"--n_interactions\", type=int, default=2)"}},
+    {"name": "n_atom_layers", "value": "3（ANI-1x 示例）/ 5（MatPES 示例）", "note": "每个交互块后的 on-site 层数", "code": {"repo": "hippynn", "file": "examples/matPES_training.py", "start": 276, "end": 281, "must": "parser.add_argument(\"--n_atom_layers\", type=int, default=5)"}},
+    {"name": "n_features", "value": "128", "note": "每层特征宽度（两个示例默认；QM7 barebones 示例为 20）"},
+    {"name": "n_sensitivities", "value": "20", "note": "敏感函数个数 n_ν"},
+    {"name": "dist_hard_max (r_c)", "value": "6.5 Å（ANI-1x 示例）/ 6.0 Å（MatPES 示例）", "note": "cos² 截断半径"},
+    {"name": "dist_soft_min / dist_soft_max", "value": "0.75 Å（ANI-1x）/ 0.8 Å（MatPES）；r_c − 1", "note": "敏感函数中心的初始化范围", "code": {"repo": "hippynn", "file": "examples/ani1x_training.py", "start": 233, "end": 237, "must": "\"dist_soft_max\": args.cutoff_distance - 1"}},
+    {"name": "tensor_order", "value": "0（ANI-1x 示例，原版 HIP-NN）/ 2（MatPES 示例，HIP-NN-TS）", "note": "张量敏感阶数 l", "code": {"repo": "hippynn", "file": "examples/matPES_training.py", "start": 290, "end": 290, "must": "\"--tensor_order\", type=int, default=2"}},
+    {"name": "cusp_reg", "value": "1e-6", "note": "HIP-NN-TS 范数 √(‖·‖²+ε) 中的 ε，避免零向量处梯度发散"},
+    {"name": "HIP-HOP-NN l_max / n_max", "value": "3 / 4（beta）", "note": "高阶多体交互层的默认张量阶与因子数", "code": {"repo": "hippynn", "file": "hippynn/networks/hiphop.py", "start": 7, "end": 16, "must": "l_max=3, n_max=4"}},
+    {"name": "E0 decay_factor", "value": "1e-2", "note": "分层能量初始化时高层读出权重的缩放因子（逐层平方）", "code": {"repo": "hippynn", "file": "hippynn/pretraining.py", "start": 22, "end": 31, "must": "decay_factor=1e-2"}},
+    {"name": "USE_CUSTOM_KERNELS", "value": "\"auto\"", "note": "依次尝试 triton → numba → cupy，均不可用时退回 PyTorch", "code": {"repo": "hippynn", "file": "hippynn/_settings_setup.py", "start": 141, "end": 141, "must": "\"USE_CUSTOM_KERNELS\": (\"auto\", kernel_handler)"}}
+  ],
+  "speedNotes": [
+    "交互层的核心是 envsum：对每条边做 n_ν×F 的外积并累加到中心原子，再接一次 (n_ν·F)×F' 的稠密矩阵乘；没有球谐与 CG 张量积，单层成本接近 SchNet 类连续卷积。",
+    "官方文档给出：纯 PyTorch 实现的中间内存约 O(N_pairs·n_ν·F)，自定义内核降到 O(N_pairs·n_ν + N_atoms·n_ν·F)；GPU 上首选 Triton（含 autotune 启动开销），CPU 上用 Numba，小批量小体系时 PyTorch 实现反而启动更快。",
+    "HIP-NN-TS 只把敏感函数堆叠成 4 组（l=1）或 9 组（l=2）并复用同一个 V，额外开销主要在更宽的 envsum 与几次范数运算。",
+    "开放边界的 OpenPairIndexer 在每个分子内计算全部原子对距离（随分子原子数平方增长），适合小分子批量训练；大周期体系应改用周期邻居表或外部邻居（ASE / LAMMPS）。",
+    "力（及应力）由 autograd 反传得到，训练时 create_graph=True 以便对力误差再求导，显存与时间都高于纯能量训练。"
+  ],
+  "weakNotes": [
+    "截断 r_c 由用户设定（示例 6–6.5 Å），能量只依赖 n_int × r_c（默认 2 层约 12–13 Å）内的原子；之外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失。",
+    "仓库没有发布预训练基础模型，弱相互作用的好坏取决于用户训练数据：ANI-1x 示例用 ωB97x（dz/tz 基组）分子数据，MatPES 示例默认用 r2SCAN 版 MatPES 周期数据，都没有显式的色散修正项。",
+    "代码中没有 D3 等色散模块，层状 vdW 材料层间结合、分子晶体、物理吸附等需要靠数据或外部叠加修正。",
+    "静电需手动拼装 HCharge + Coulomb / 屏蔽 Coulomb / ChEQ：裸 Coulomb 要求对全部原子对求和、不支持周期边界，Ewald 只有实空间部分，因此周期离子体系与界面电荷转移描述不完整。",
+    "没有总电荷 / 自旋输入，ChEQ 的净电荷硬编码为 0：离子、带电缺陷、自由基与不同自旋态无法区分。"
+  ],
+  "downstreamNotes": [
+    "保守力 + cos² 截断（值与一阶导在 r_c 处归零）→ 能量守恒的 MD 与几何优化（hippynn.optimizer 提供批量优化）；Hessian 层可直接给出二阶导用于振动分析，仓库有 Hessian 训练示例。",
+    "StressForce 支持周期体系应力，可做状态方程、弹性常数与 NPT 模拟；MatPES 示例同时训练能量、力、应力。",
+    "分层电荷 → 偶极 / 四极，可用于需要偶极的光谱类任务；ChEQ 与 PYSEQM 接口可构建电荷平衡或半经验哈密顿量模型。",
+    "激发态方向官方支持多态能量、跃迁偶极与非绝热耦合（NACR）目标，可用于非绝热动力学研究；文献中还用于过渡态与反应路径研究。"
+  ],
+  "strengths": ["全标量、结构简单，单层成本低，专用 envsum 内核省内存", "分层能量 + E0 线性回归初始化，训练稳定、能量分解可解释", "同一框架可回归电荷、偶极、键级、激发态、NACR 等多种目标", "HIP-NN-TS 以很小代价引入角度信息", "ASE / LAMMPS（多进程）/ PYSEQM 接口齐全"],
+  "weaknesses": ["原版只用距离，角度分辨率有限，表达力低于等变模型", "仓库中未见发布的预训练通用模型", "无色散，静电需手动搭建且周期 Ewald 不完整", "无总电荷 / 自旋输入", "截断与敏感函数范围需按数据集手动设定"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

@@ -1,0 +1,190 @@
+{
+  "id": "les",
+  "name": "LES",
+  "fullName": "LES: Latent Ewald Summation（潜电荷 Ewald 求和长程插件）",
+  "year": 2025,
+  "authors": "B. Cheng（方法）；D. S. King, D. Kim, P. Zhong 等（扩展与集成）",
+  "paper": {"title": "Latent Ewald summation for machine learning of long-range interactions", "venue": "npj Computational Materials 11, 80 (2025)", "url": "https://www.nature.com/articles/s41524-025-01577-7"},
+  "repos": ["les"],
+  "family": "long-range-module",
+  "tags": ["长程静电插件", "潜电荷（无电荷标签）", "倒空间 Ewald", "Born 有效电荷", "MACE/CACE/NequIP 集成"],
+  "framework": "PyTorch（≥2.5，即插即用库）",
+  "license": "CC-BY-NC-4.0（非商用）",
+  "oneLiner": "给任何短程 MLIP 加一个“长程静电插件”：用原子特征预测一个不需要标签的“潜电荷” q_i，把电荷做高斯展宽后用 Ewald 求和算出 1/r 静电能，加到短程能量上；电荷只靠能量和力间接学出，却能顺带给出偶极、Born 有效电荷和 IR 光谱。",
+  "analogy": "像只看超市小票的总价去倒推每件商品的单价：我们从不告诉模型每个原子该带多少电（DFT 电荷本就没有唯一定义），只让它调整每个原子上“看不见的小电荷”，使总能量和力对得上；短程网络管邻里细节，LES 管远处电荷的互相拉扯。结果倒推出的“单价”相当合理，还能预测从没训练过的电学性质。",
+  "arch": {
+    "geometry": "只用坐标 r_i 与晶胞 C：周期体系用相位 k·r_i（结构因子），孤立体系用两两距离 r_ij；局域几何/角度信息全靠宿主模型特征 h_i",
+    "equivariance": "E_lr 对平移、旋转、置换不变（|S(k)|² 与 erf 核均不变）；潜电荷为标量，扩展的潜偶极/四极须由等变 1o/2e 特征给出",
+    "lmax": "n/a（单极电荷；扩展版含笛卡尔偶极 l=1、无迹四极 l=2）",
+    "bodyOrder": "库仑形式是 2 体 q_i q_j/r，但 q_i 依赖局域环境 → 有效为环境相关的多体长程项",
+    "layers": "无消息传递层；自带电荷头为 3 层 SiLU MLP [32,16] + 线性旁路；MACELES 复用 MACE 各层读出",
+    "cutoff": "无实空间截断；倒空间 0<|k|≤k_c=2π/dl=π Å⁻¹（dl=2 Å），高斯宽 σ=1 Å",
+    "receptiveField": "全局：整个晶胞及全部周期镜像（Ewald）；孤立体系为全部原子对",
+    "message": "无消息；全局耦合靠结构因子 S(k)=Σ q_i e^{ik·r_i}（周期）或 erf(r/√2σ)/r 两两核（孤立）",
+    "readout": "原子特征 → 标量潜电荷 q_i（MLP+线性，×0.1）；可选潜偶极、四极、硬度 κ、极化率 α",
+    "forces": "conservative",
+    "forcesDetail": "E_lr 加到短程能后由宿主模型 torch.autograd 统一求 −∂E/∂r，含 ∂q_j/∂r_i 项",
+    "stress": "MACELES 把同一对称应变施加到交给 LES 的晶胞与坐标，∂E_lr/∂ε 进入维里",
+    "longRange": "核心功能：高斯展宽潜电荷的 Ewald 静电（周期：倒空间；孤立：实空间 erf 核），1/r 渐近正确",
+    "dispersion": "无（只做静电）；色散需靠宿主训练数据或外挂 D3",
+    "chargeSpin": "不输入总电荷/自旋；不强制电中性，残余电荷视为均匀背景（tinfoil 边界）",
+    "otherOutputs": "潜电荷、BEC（√ε∞·∂P/∂r）；扩展版：潜偶极/四极、诱导电荷/偶极、外场 e_ext 响应",
+    "strictlyLocal": false,
+    "complexity": "周期：O(N·K)，K ∝ 体积·k_c³（超大晶胞≈O(N²)）；向量化版固定 (2N_max+1)³ 网格；孤立：O(N²) 两两核",
+    "accel": "纯 PyTorch；Ewald_vectorized 支持 torch.compile/TorchScript 与批处理；LAMMPS（NequIP-LES）仅单 MPI rank"
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、晶胞 + 宿主模型给的电荷或特征",
+      "plain": "LES 不是独立力场，而是挂在短程 MLIP 后面的模块。它需要原子坐标 r_i（与短程部分共用同一个可求导张量，力才能一起反传）、晶胞 C，以及每个原子的潜电荷 q_i 或用来预测 q_i 的局域特征 desc。孤立分子传全零晶胞：默认实现用 det(C)<10⁻⁶ 判为非周期，MACELES 会先把非周期构型的晶胞置零。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,\\ \\mathbf h_i\\ \\text{or}\\ q_i)\\}_{i=1}^{N},\\qquad \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\ \\det\\mathbf C<10^{-6}\\Rightarrow\\text{non-periodic}",
+      "code": [
+        {"file": "src/les/les.py", "start": 110, "end": 126, "must": "latent_charges: Optional[torch.Tensor] = None", "caption": "Les.forward 的输入：坐标、晶胞、特征或潜电荷/偶极/四极、外场 e_ext"},
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 334, "end": 341, "must": "cell_les = cell.clone()", "caption": "MACELES：非周期构型的晶胞置零后交给 LES"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "潜电荷 ①：LES 自带的小 MLP（不需要电荷标签）",
+      "plain": "若宿主模型只提供特征向量 h_i（use_atomwise=True），LES 用一个 3 层 SiLU MLP（隐藏 32→16）加一条线性旁路把 h_i 映射成标量 q_i，再乘 0.1 让初始电荷很小、训练更稳。关键：q_i 从不拿 DFT 电荷监督（电荷划分本无唯一定义），只通过总能量和力的损失间接学出，所以叫“潜”电荷。CACE 的 LesWrapper 就走这条路。",
+      "math": "q_i^{\\text{les}}=0.1\\,\\Big[\\mathrm{MLP}_{[32,16]}^{\\text{SiLU}}(\\mathbf h_i)+\\mathbf w^{\\top}\\mathbf h_i+b\\Big]",
+      "code": [
+        {"file": "src/les/les.py", "start": 131, "end": 144, "must": "latent_charges = self.atomwise(desc, batch)", "caption": "直接用给定的潜电荷，或由 desc 经 Atomwise 预测"},
+        {"file": "src/les/module/atomwise.py", "start": 82, "end": 87, "must": "y = self.outnet(desc)", "caption": "Atomwise：MLP + 线性旁路，再乘 output_scaling_factor"},
+        {"repo": "cace", "file": "cace/modules/les_wrapper.py", "start": 35, "end": 44, "must": "from les import Les", "caption": "CACE LesWrapper：use_atomwise=True，由 LES 从节点特征预测电荷"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "潜电荷 ②：直接复用宿主模型的读出头（MACELES）",
+      "plain": "MACELES 继承 ScaleShiftMACE：为每个交互层的能量读出块复制一个同结构的“电荷读出块”，同一套等变特征既出原子能 E_i 也出 q_i，各层电荷相加再乘 output_scale=0.1。因为 q_i 是局域特征的函数，它会随配位、键长、化学态自动变化——这正是固定电荷经典力场做不到的。扩展版还可从 1o/2e 特征读出潜偶极、四极。",
+      "math": "q_i^{\\text{les}}=0.1\\sum_{t=1}^{T}\\mathcal R_q^{(t)}\\big(\\mathbf h_i^{(t)}\\big),\\qquad E_i=\\sum_{t=1}^{T}\\mathcal R_E^{(t)}\\big(\\mathbf h_i^{(t)}\\big)",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 181, "end": 202, "must": "self.les = Les(les_arguments=les_arguments)", "caption": "MACELES.__init__：实例化 Les，并为每层复制电荷读出块"},
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 432, "end": 442, "must": "node_qs = les_readout(node_feats_list[feat_idx], node_heads)[", "caption": "每层同时读出原子能与潜电荷"},
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 530, "end": 532, "must": "torch.sum(torch.stack(node_qs_list, dim=1), dim=1) * self.les_output_scale", "caption": "各层电荷求和 × output_scale"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "倒空间：k 网格与结构因子 S(k)",
+      "plain": "周期体系里库仑求和在实空间收敛极慢，LES 改在倒空间做：由晶胞求倒格矢 G，枚举整数向量 n 得 k=nG，只保留 0<|k|≤k_c=2π/dl（默认 dl=2 Å，k_c=π Å⁻¹），并只取半个 k 空间（k 与 −k 贡献相同，权重乘 2）。然后对每个 k 计算结构因子 S(k)=Σq_i e^{ik·r_i}，它是电荷分布的“傅里叶指纹”；代码用 cos/sin 实数运算以兼容 TorchScript。",
+      "math": "\\mathbf k=\\mathbf n\\,\\mathbf G,\\ \\ \\mathbf G=2\\pi(\\mathbf C^{-1})^{\\top},\\ \\ 0<|\\mathbf k|\\le k_c=\\frac{2\\pi}{\\mathrm{dl}};\\qquad S(\\mathbf k)=\\sum_i q_i\\cos(\\mathbf k\\cdot\\mathbf r_i)+i\\sum_i q_i\\sin(\\mathbf k\\cdot\\mathbf r_i)",
+      "code": [
+        {"file": "src/les/module/ewald.py", "start": 296, "end": 322, "must": "mask = (k_sq > 0) & (k_sq <= self.k_sq_max)", "caption": "默认（旧版）Ewald：按晶胞长度生成 k 网格、截断、半球去重"},
+        {"file": "src/les/module/ewald.py", "start": 324, "end": 347, "must": "S_k_real = (q.unsqueeze(2) * cos_kr.unsqueeze(1)).sum(dim=0)", "caption": "结构因子 S(k)（含可选偶极/四极项）"},
+        {"file": "src/les/module/ewald_vectorized.py", "start": 292, "end": 310, "must": "valid_kcut = (k_sq > 0) & (k_sq <= self.k_sq_max)", "caption": "向量化版：固定 (2N_max+1)³ 网格 + 掩码，可批处理/编译"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "高斯展宽的 Ewald 能量（只算倒空间）",
+      "plain": "每个电荷被抹成高斯云，倒空间权重多出 e^{−σ²k²/2}：大 k 自动衰减，有限个 k 就收敛；r→0 时也不再发散，长程项在短程区“又软又弱”，不会和短程网络抢着拟合同一段物理。与标准 Ewald 不同，代码不计算 erfc 实空间部分——那部分本身是短程的，留给短程 MLIP 吸收。remove_self_interaction=True 时再减去每个电荷与自身高斯云的自能。",
+      "math": "E^{\\text{lr}}=\\frac{1}{2\\varepsilon_0V}\\sum_{0<|\\mathbf k|\\le k_c}\\frac{e^{-\\sigma^2k^2/2}}{k^2}\\,\\big|S(\\mathbf k)\\big|^2\\;-\\;\\frac{1}{4\\pi\\varepsilon_0}\\sum_i\\frac{q_i^2}{\\sqrt{2\\pi}\\,\\sigma}",
+      "code": [
+        {"file": "src/les/module/ewald.py", "start": 347, "end": 361, "must": "kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq", "caption": "|S(k)|² × 高斯因子 / k² 求和，减自能"},
+        {"file": "src/les/module/ewald.py", "start": 11, "end": 29, "must": "self.k_sq_max = (self.twopi / self.dl) ** 2", "caption": "σ、dl 与 norm_factor=1/(2ε₀)（eV·Å/e²）"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "孤立体系：实空间 erf 核两两求和",
+      "plain": "分子、团簇没有晶胞，倒空间无从谈起，LES 改为直接对所有原子对求和，核函数是两个高斯电荷之间的 erf(r/√2σ)/r：远处退化为 1/r 库仑，近处趋于常数而不发散。这是 O(N²) 的稠密矩阵运算，对几百原子的分子毫无压力；同一模型因此可以在分子上训练、在周期体系上使用（README 建议此时保留 remove_self_interaction=True，最稳健）。",
+      "math": "E^{\\text{lr}}=\\frac12\\,\\frac{1}{4\\pi\\varepsilon_0}\\sum_{i\\ne j}q_iq_j\\,\\frac{\\mathrm{erf}\\big(r_{ij}/(\\sqrt2\\,\\sigma)\\big)}{r_{ij}}",
+      "code": [
+        {"file": "src/les/module/ewald.py", "start": 56, "end": 84, "must": "torch.linalg.det(box_now) < 1e-6", "caption": "逐结构判断：det(C)≈0 走实空间，否则走倒空间"},
+        {"file": "src/les/module/make_kernels.py", "start": 18, "end": 34, "must": "torch.special.erf(r_ij_norm[mask_off] * a)", "caption": "电荷-电荷核 erf(a r)/r，a=1/(√2σ)，对角线屏蔽"},
+        {"file": "src/les/module/ewald.py", "start": 130, "end": 140, "must": "pot = 0.5 * torch.einsum('iq,iq->q', e_phi, q)", "caption": "电势 φ_j=Σ_i q_i f_ij，能量 ½Σ q_j φ_j"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：短程能 + 长程静电能",
+      "plain": "E_lr 只是一个额外标量，直接加到短程模型的总能上：MACELES 里 total_energy += les_energy，NewtonNet 里 energy_sr + energy_lr。两部分在同一个能量/力损失里联合训练，网络自己决定哪些物理放在短程、哪些交给静电。",
+      "math": "E=E^{\\text{sr}}+E^{\\text{lr}}=\\sum_i E_i\\big(\\{\\mathbf r_j\\}_{r_{ij}<r_c}\\big)+E^{\\text{lr}}\\big(\\{q_i,\\mathbf r_i\\},\\mathbf C\\big)",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 594, "end": 615, "must": "total_energy += les_energy", "caption": "MACELES：调用 Les 并把 E_lr 加到总能"},
+        {"repo": "NewtonNet", "file": "newtonnet/models/output.py", "start": 226, "end": 244, "must": "return energy_sr + energy_lr", "caption": "NewtonNet：短程能 + LES 长程能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对总能统一自动微分",
+      "plain": "LES 不单独算力：E_sr+E_lr 一起交给宿主模型的 torch.autograd 反传。梯度里既有“电荷固定时的库仑力”，也有“电荷随环境变化”带来的 ∂q/∂r 项，因此力严格保守、NVE 能量守恒。代价是 E_lr 依赖体系中所有原子，力无法按空间区域切分计算。",
+      "math": "\\mathbf F_i=-\\frac{\\partial\\big(E^{\\text{sr}}+E^{\\text{lr}}\\big)}{\\partial\\mathbf r_i},\\qquad \\frac{\\partial E^{\\text{lr}}}{\\partial\\mathbf r_i}=\\frac{\\partial E^{\\text{lr}}}{\\partial\\mathbf r_i}\\Big|_{q}+\\sum_j\\frac{\\partial E^{\\text{lr}}}{\\partial q_j}\\frac{\\partial q_j}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 617, "end": 630, "must": "energy=inter_e + les_energy", "caption": "MACELES：对 E_sr+E_lr 一起求力/维里/Hessian"},
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 33, "end": 50, "must": "torch.autograd.grad(", "caption": "compute_forces：F = −∂E/∂r"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：晶胞随应变一起变形",
+      "plain": "需要应力时，MACELES 把与短程部分相同的对称应变 ε 施加到交给 LES 的晶胞上，坐标也用应变后的 data[\"positions\"]。于是体积 V 与倒格矢 k 都随 ε 变化，∂E_lr/∂ε 自然出现在维里里，一次反传同时得到力和应力，可用于 NPT 与晶格优化。",
+      "math": "\\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\ \\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon);\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial\\big(E^{\\text{sr}}+E^{\\text{lr}}\\big)}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/extensions.py", "start": 342, "end": 350, "must": "cell_les_view + torch.matmul(", "caption": "交给 LES 的晶胞乘 (1+ε_sym)"},
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 89, "end": 115, "must": "inputs=[positions, displacement]", "caption": "compute_forces_virials：一次反传得到力和维里"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "Born 有效电荷：极化对坐标求导",
+      "plain": "有了潜电荷就有极化 P：孤立体系 P=Σ(q_i−q̄)r_i；周期体系位置不唯一，代码改用最小倒格矢下的 P(k)=Σq e^{ik·r}/(ik)（即分数坐标相位 e^{2πi s}），求导后再乘回 e^{−2πi s} 取实部、用 C^T 投影回笛卡尔方向。BEC 由 autograd 直接得到，不需要任何 BEC 训练标签；乘 √ε∞（epsilon_factor）是因为学到的电荷已被电子屏蔽缩放。",
+      "math": "Z^*_{i,\\alpha\\beta}=\\sqrt{\\varepsilon_\\infty}\\,\\frac{\\partial P_\\alpha}{\\partial r_{i\\beta}},\\qquad \\mathbf P=\\sum_i(q_i-\\bar q)\\,\\mathbf r_i\\ \\ (\\text{isolated}),\\qquad P_a=\\frac{1}{2\\pi i}\\sum_i(q_i-\\bar q)\\,e^{2\\pi i s_{ia}},\\ \\mathbf s_i=\\mathbf r_i\\mathbf C^{-1}\\ \\ (\\text{PBC})",
+      "code": [
+        {"file": "src/les/module/bec.py", "start": 53, "end": 74, "must": "polarization = torch.sum(q_now * r_now, dim=0)", "caption": "逐结构：去平均电荷，孤立用 Σq r，周期用相位极化"},
+        {"file": "src/les/module/bec.py", "start": 81, "end": 94, "must": "bec_basis_complex = grad(y=P, x=r)", "caption": "autograd 求 ∂P/∂r，去相位、投影回笛卡尔"},
+        {"file": "src/les/module/bec.py", "start": 107, "end": 113, "must": "phase = torch.exp(1j * 2.* torch.pi * r_frac)", "caption": "compute_pol_pbc：周期极化 S/(2πi)"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "扩展：潜多极 + 一次性诱导响应",
+      "plain": "单个标量电荷只是多极展开的首项。扩展版 LES 把潜偶极 u_i（1o）和无迹四极 Q_i（2e）加进同一个结构因子，并加入非自洽的线性响应：诱导电荷 Δq=−κΦ、诱导偶极 Δu=α·E（可叠加外场 e_ext），只对固定多极产生的场响应一次、不迭代求解。这些量同样只从能量和力学出，docs 称收益主要来自单极本身，之后边际递减。",
+      "math": "S(\\mathbf k)=\\sum_i\\Big(q_i+i\\,\\mathbf k\\cdot\\mathbf u_i-\\tfrac12\\,\\mathbf k\\cdot\\mathbf Q_i\\cdot\\mathbf k\\Big)e^{i\\mathbf k\\cdot\\mathbf r_i};\\qquad \\Delta q_i=-\\kappa_i\\Phi_i,\\ \\ \\Delta\\mathbf u_i=\\boldsymbol\\alpha_i\\cdot(\\mathbf E_i+\\mathbf E_{\\text{ext}}),\\ \\ U^{\\text{ind}}=-\\tfrac12\\sum_i\\kappa_i\\Phi_i^2-\\tfrac12\\sum_i\\mathbf E_i\\cdot\\Delta\\mathbf u_i",
+      "code": [
+        {"file": "src/les/les.py", "start": 155, "end": 181, "must": "E_lr, q_induced, u_induced = self.ewald(q=latent_charges,", "caption": "Les.forward：调用 Ewald 并把诱导电荷/偶极加回潜变量"},
+        {"file": "src/les/module/ewald.py", "start": 372, "end": 404, "must": "u_induced = self._get_induced_u(e_field, alpha, e_ext)", "caption": "倒空间电势/电场 → 诱导电荷与诱导偶极及其能量"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "sigma (σ)", "value": "1.0 Å", "note": "高斯展宽宽度 = Ewald 分裂参数；docs 称默认值几乎总能收敛，不建议改", "code": {"file": "src/les/les.py", "start": 81, "end": 81, "must": "les_arguments.get('sigma', 1.0)"}},
+    {"name": "dl", "value": "2.0 Å → k_c = 2π/dl = π Å⁻¹", "note": "倒空间截断分辨率", "code": {"file": "src/les/les.py", "start": 82, "end": 82, "must": "les_arguments.get('dl', 2.0)"}},
+    {"name": "remove_self_interaction", "value": "True", "note": "减去电荷与自身高斯云的自能；README 称最稳健（尤其分子→周期外推）", "code": {"file": "src/les/les.py", "start": 83, "end": 83, "must": "les_arguments.get('remove_self_interaction', True)"}},
+    {"name": "is_periodic / N_max", "value": "None（旧版逐结构 Ewald）/ 10", "note": "设 True/False 启用可编译的 Ewald_vectorized，整数网格 (2N_max+1)³；需 N_max·dl ≥ 最长晶胞边，否则静默截断", "code": {"file": "src/les/les.py", "start": 86, "end": 87, "must": "les_arguments.get('N_max', 10)"}},
+    {"name": "norm_factor", "value": "90.4756", "note": "= 1/(2ε₀)，单位 eV·Å/e²（ε₀ = 5.52635×10⁻³ e²·eV⁻¹·Å⁻¹）", "code": {"file": "src/les/module/ewald.py", "start": 11, "end": 17, "must": "norm_factor=90.4756"}},
+    {"name": "Atomwise 电荷头", "value": "n_layers=3, n_hidden=[32, 16], add_linear_nn=True, output_scaling_factor=0.1", "note": "LES 自带的特征→电荷 MLP（仅 use_atomwise=True 时使用）", "code": {"file": "src/les/les.py", "start": 76, "end": 79, "must": "les_arguments.get('n_hidden', [32, 16])"}},
+    {"name": "use_atomwise", "value": "False", "note": "默认由宿主模型直接传 latent_charges（如 MACELES）；CACE LesWrapper 设为 True", "code": {"file": "src/les/les.py", "start": 91, "end": 91, "must": "les_arguments.get('use_atomwise', False)"}},
+    {"name": "remove_mean / epsilon_factor", "value": "True / 1.0", "note": "BEC 前减平均电荷；epsilon_factor = ε∞，BEC 乘 √ε∞", "code": {"file": "src/les/les.py", "start": 89, "end": 90, "must": "les_arguments.get('epsilon_factor', 1.)"}},
+    {"name": "MACELES output_scale / kappa_scale / alpha_scale", "value": "0.1 / 0.01 / 0.01", "note": "MACE 读出的潜电荷（及偶极/四极）、硬度 κ、极化率 α 的缩放", "code": {"repo": "mace", "file": "mace/modules/extensions.py", "start": 191, "end": 193, "must": "self.les_output_scale = les_arguments.get("}}
+  ],
+  "speedNotes": [
+    "周期体系的主要开销是结构因子：N 个原子 × K 个 k 矢量的 cos/sin，O(N·K)；k_c 固定时 K 随晶胞体积增长，超大晶胞约 O(N²)。docs 称常见尺寸下长程项只占短程网络开销的一小部分，有/无 LES 的 MD 耗时几乎重合。",
+    "默认 is_periodic=None 走旧版 Ewald：对 batch 中每个结构循环、按 det(C) 判断周期/孤立，灵活但不能 torch.compile；设 True/False 使用 Ewald_vectorized，固定 (2N_max+1)³ 整数网格（N_max=10 时 9261 个）一次性批处理，可编译导出。",
+    "孤立体系走实空间 N×N erf 核，时间与内存 O(N²)；开启偶极/四极后还要构造 [n,n,3,3] 乃至 [n,n,3,3,3,3] 的核张量，代价迅速上升。",
+    "BEC 需对复数极化 P 的 3 个分量分别做实部、虚部 autograd（共 6 次反传）；bec_output_index 可只输出一个方向（docs 称便宜约 3 倍，但当前 bec.py 是先算全部分量再切片）。",
+    "力来自全局能量的梯度，难以做空间分解：docs 指出 LAMMPS 中 LES 只能单 MPI rank 运行。"
+  ],
+  "weakNotes": [
+    "LES 只补“静电”这一项长程物理：E_lr 具有正确的 1/r 渐近，可描述离子晶体、极性液体、电解质与界面中远超截断的库仑作用。",
+    "不含色散（r⁻⁶）：层状材料层间结合、分子晶体、物理吸附的 vdW 仍需依赖宿主模型的训练数据或外挂 D3。",
+    "电荷由局域特征预测，没有全局电荷平衡：真正长程的电荷转移（如宏观金属电极上的感应电荷）无法自然描述；扩展版的诱导电荷/偶极只对固定多极产生的场（及外场）做一次性、非自洽的线性响应。",
+    "不输入总电荷/自旋，也不强制电中性（残余电荷作均匀背景处理），因此同一几何下的不同电荷态（带电缺陷、氧化还原态）无法区分。",
+    "学到的是被电子屏蔽缩放过的电荷 q/√ε_e；恢复物理 BEC 需给定 ε∞，docs 指出 ε∞ 不同的异质界面如何选取仍是开放问题。"
+  ],
+  "downstreamNotes": [
+    "BEC = √ε∞ ∂P/∂r 由 autograd 直接得到、无需训练标签；docs 称仅用能量和力训练的模型即可预测分子偶极、BEC、IR 光谱和离子电导率。",
+    "能量与力严格保守，高斯展宽去掉了 1/r 奇点，长程项平滑，适合长时间 MD；官方提供 MACELES-OFF 有机分子模型，docs 给出体相水的 MACE-LES 训练示例。",
+    "Les.forward 接受外电场 e_ext（作用于诱导偶极），配合 BEC 可研究电场下的电学响应（Zhong 等，README 引用）。",
+    "MACELES 中 E_lr 随应变一起求导，应力/维里完整，可做 NPT 与晶格优化。",
+    "从孤立分子训练、外推到周期体系时，README 建议保留 remove_self_interaction=True。"
+  ],
+  "strengths": ["即插即用：宿主模型只需给出每原子标量（或特征），不改短程架构", "无需 DFT 电荷标签，只用能量和力训练", "1/r 渐近正确，高斯展宽平滑，力保守", "顺带输出 BEC、偶极、IR 光谱等电学响应", "开销小；向量化版可 torch.compile"],
+  "weaknesses": ["只有静电，没有色散", "全局能量梯度难以空间分解，LAMMPS 仅单 MPI rank", "无全局电荷平衡与总电荷/自旋输入", "大晶胞 k 求和随体积增长；N_max 过小会静默截断", "CC BY-NC 4.0 许可，仅限非商用"],
+  "pretrained": ["MACELES-OFF (S)：MACE-LES 有机分子力场（MACE-OFF/SPICE 数据，H C N O F P S Cl Br I）", "les_fit / extended_les_fit 中 MACE、NequIP、Allegro、CACE 等 + LES 的训练脚本与模型"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

@@ -1,0 +1,201 @@
+{
+  "id": "pet",
+  "name": "PET",
+  "fullName": "PET: Point Edge Transformer（UPET 通用势：PET-MAD / PET-OAM 等）",
+  "year": 2023,
+  "authors": "S. Pozdnyakov, M. Ceriotti；UPET/PET-MAD：A. Mazitov, F. Bigi, P. Pegolo 等（COSMO, EPFL）",
+  "paper": {"title": "Smooth, Exact Rotational Symmetrization for Deep Learning on Point Clouds", "venue": "NeurIPS 2023", "url": "https://arxiv.org/abs/2305.19302"},
+  "repos": ["pet", "metatrain", "upet"],
+  "family": "unconstrained",
+  "tags": ["无约束（非等变）", "边 token Transformer", "旋转增强 + 旋转平均", "自适应截断", "基础模型 PET-MAD/PET-OAM", "保守/非保守力"],
+  "framework": "PyTorch（metatrain 训练 + metatomic/TorchScript 导出；UPET 提供 ASE 等接口）",
+  "license": "BSD-3-Clause（metatrain / upet，PET-OAM-XL 权重亦为 BSD-3-Clause）；原始 pet 仓库 MIT",
+  "oneLiner": "PET 不在网络结构里硬编码旋转对称：把每个原子的每条邻居边（原始 r_ij 向量 + 邻居元素 + 上一层消息）当作一个 token，用 Transformer 在“中心原子 + 全部邻居边”这组 token 上做自注意力，边 token 再沿反向边在原子之间传递消息；旋转对称靠随机 O(3) 增强学出来，需要时在推理阶段再做旋转平均。",
+  "analogy": "等变模型像给每个原子发一把“只能按规定读数的量角器”；PET 则像请一位见过无数张“各种角度拍的邻居照片”的观察员，直接看原始坐标自由讨论“谁在谁的哪边”。没有规则束缚，所以表达力强、计算全是普通矩阵乘法；代价是同一张照片转个角度，答案可能有极小差别——必要时把多个角度的结论取平均即可。",
+  "arch": {
+    "geometry": "原始笛卡尔边向量 r_ij（3 分量）+ 距离 |r_ij| 直接线性嵌入；不用球谐、不显式算角度",
+    "equivariance": "非等变：平移/置换不变；旋转与反演对称靠训练时随机 O(3) 增强近似学到，可选推理时 Lebedev 旋转平均",
+    "lmax": "无（不使用球谐；角度信息由注意力从原始 xyz 隐式学习）",
+    "bodyOrder": "不受限：邻域内自注意力可同时耦合任意多个邻居；多层叠加后更高",
+    "layers": "num_gnn_layers 默认 2（每层 2 个注意力层）；PET-OAM-XL 为 5 层 × 3 个注意力层",
+    "cutoff": "默认 4.5 Å（Bump 平滑带宽 0.5 Å）；UPET XS→XL 名义 7.5–10 Å + 自适应截断（每原子约 16–40 个邻居）",
+    "receptiveField": "约 num_gnn_layers × r_c（默认 2×4.5 Å；XL 名义 5×10 Å，自适应截断下实际更小）",
+    "message": "边 token = MLP[Linear(r_ij,|r_ij|) ⊕ Emb(Z_j) ⊕ 上层消息]；层间把 i→j 与反向 j→i 的输出 token 拼接后经 MLP 残差更新",
+    "readout": "节点头 + 边头（两层 SiLU MLP，宽 d_head）→ 线性；边贡献乘 f_c(r_ij) 后对邻居求和，与节点贡献相加得原子能",
+    "forces": "both",
+    "forcesDetail": "默认保守 F = −∂E/∂R（autograd）；另可训练 non_conservative_forces 直接输出头（文档称快 2–3 倍），PET-OAM-XL 先用非保守头预训练再保守微调",
+    "stress": "保守：坐标与晶胞同乘 strain 张量后对其求导；非保守：每原子 3×3 头 ÷ 体积并对称化",
+    "longRange": "基础模型默认无；metatrain 提供可选 LongRangeFeaturizer（torch-pme 的 Ewald/P3M 静电特征）",
+    "dispersion": "无内置；UPET 文档示例用 torch-dftd 的 D3(BJ)（xc=r2scan）经 SumCalculator 叠加",
+    "chargeSpin": "可选 system_conditioning：总电荷与自旋多重度嵌入加到每层节点特征（默认关闭）",
+    "otherOutputs": "LLPR 不确定度 + 浅层集成（能量/力/应力）、内部特征、PET-MAD-DOS（DOS/费米能级/带隙）、任意 Cartesian/标量目标",
+    "strictlyLocal": false,
+    "complexity": "O(N·M²·d_pet)（每原子 M+1 个 token 的注意力）+ O(N·M·d_pet²)（线性/FFN）；自适应截断把 M 控制在约 16–40",
+    "accel": "PyTorch scaled_dot_product_attention、torch.compile（solver 自适应截断）、LAMMPS（KOKKOS GPU、多 MPI 域分解）、i-PI/ASE/TorchSim/GROMACS、NVIDIA ALCHEMI 批量推理"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "没有球谐/CG 张量积，全是稠密 GEMM + 注意力，GPU 友好；XS/S 很快，但 L/XL 参数达数亿、注意力随邻居数平方增长。"},
+    "expressiveness": {"v": 5, "why": "不受等变约束，注意力可对整个邻域做任意多体、任意角分辨率的函数逼近，并能扩展到 7 亿参数级。"},
+    "longRange": {"v": 3, "why": "基础模型只有多层消息传递的半局域感受野；官方提供 D3 叠加示例与可选 Ewald/P3M 长程特征、电荷/自旋条件化。"},
+    "scalability": {"v": 3, "why": "多层消息传递需要层间通信；LAMMPS 接口支持 KOKKOS 与多 MPI 域分解，但大尺寸模型显存占用高。"},
+    "physics": {"v": 3, "why": "默认保守力、C^∞ Bump 截断、原子能加和（广延）、可选 ZBL；但旋转对称只是近似成立。"},
+    "coverage": {"v": 4, "why": "除 E/F/S 外有非保守力/应力头、LLPR 不确定度与集成、DOS/费米能级/带隙（PET-MAD-DOS）及任意张量目标。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞 → 拼成一个批次",
+      "plain": "metatomic 的 System 对象提供坐标、原子种类、晶胞和邻居表（全邻居表，含周期平移）。PET 先把一批结构拼接成平坦张量，之后的计算都在纯 PyTorch 后端里完成。需要力或应力时，坐标/应变张量在进入模型前就被设为可求导。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{0,1\\}^3",
+      "code": [{"repo": "metatrain", "file": "src/metatrain/pet/model.py", "start": 349, "end": 374, "must": "concatenate_structures(systems, nl_options)", "caption": "PET.forward：拼接结构并调用 backend.preprocess"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：自适应截断 + C^∞ Bump 平滑截断函数",
+      "plain": "边向量 r_ij = r_j − r_i + 周期平移。若开启自适应截断，每个原子各自求一个截断半径，使“平滑邻居数”约等于目标值（如 XL 的 40），致密体系截断收缩、稀疏体系截断放大；再取两端平均作为该对的截断，保证 i→j 与 j→i 对称。随后用 Bump 函数给每条边一个 0~1 的权重 f_c，在截断处无穷阶光滑地降到 0。",
+      "math": "\\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C,\\quad n_i(r^c_i)=\\sum_j s(r_{ij};r^c_i)=N_{\\text{adapt}},\\quad r^c_{ij}=\\tfrac12(r^c_i+r^c_j)\\qquad f_c(r)=\\tfrac12\\big[1+\\tanh\\big(\\cot(\\pi x)\\big)\\big],\\ x=\\frac{r-(r^c_{ij}-w)}{w}\\in[0,1]",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/structures.py", "start": 218, "end": 261, "must": "pair_cutoffs = (atomic_cutoffs[centers] + atomic_cutoffs[neighbors]) / 2.0", "caption": "compute_batch_tensors：边向量、自适应截断（solver）与对称化的成对截断"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/utilities.py", "start": 4, "end": 22, "must": "torch.tanh(1 / torch.tan(torch.pi * clamped))", "caption": "cutoff_func_bump：C^∞ 平滑截断"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "边 token：原始向量 + 邻居元素 + 上层消息",
+      "plain": "PET 的“词”是边：把 (x, y, z, |r|) 四个数直接线性映射到 d_pet 维，再与邻居元素嵌入（以及第 2 层起的上一层消息）拼接，经两层 MLP 压缩成一个 token。中心原子另有一个元素嵌入的“中心 token”（宽 d_node）。因为直接喂入笛卡尔分量，模型输出天然不具备旋转等变性——这正是“无约束”的含义。",
+      "math": "\\mathbf t^{(1)}_{ij}=\\mathrm{MLP}\\big([\\,W_e(\\mathbf r_{ij},r_{ij})\\,\\Vert\\,E(Z_j)\\,]\\big),\\quad \\mathbf t^{(l)}_{ij}=\\mathrm{MLP}\\big([\\,W^{(l)}_e(\\mathbf r_{ij},r_{ij})\\,\\Vert\\,E^{(l)}(Z_j)\\,\\Vert\\,\\mathbf m^{(l)}_{ij}\\,]\\big),\\qquad \\mathbf h^{(0)}_i=E_{\\text{node}}(Z_i)",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/transformer.py", "start": 509, "end": 531, "must": "edge_embeddings = self.edge_embedder(edge_embeddings)", "caption": "CartesianTransformer.forward：Linear(4→d_pet) 嵌入 [r_ij, |r_ij|] 并与元素/消息拼接压缩"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 513, "end": 514, "must": "input_edge_embeddings = self.edge_embedder(", "caption": "初始中心 token 与第一层消息 = 元素嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：邻域 Transformer，截断权重调制注意力",
+      "plain": "对每个原子，把中心 token 和全部邻居边 token 组成一个序列，做多头自注意力（PreLN + RMSNorm + SwiGLU 前馈）。关键技巧：把 log f_c(r) 加到注意力 logits 上，等价于 softmax 权重乘以 f_c——邻居靠近截断时其影响连续地衰减为 0，邻居进出截断球不会造成能量跳变。注意力让每条边“看到”其他所有边，因此一层就包含任意多体、任意角度的信息。",
+      "math": "\\alpha_{ab}=\\frac{f_c(r_b)\\,\\exp\\!\\big(\\mathbf q_a\\cdot\\mathbf k_b/\\sqrt{d_h}\\big)}{\\sum_{b'}f_c(r_{b'})\\,\\exp\\!\\big(\\mathbf q_a\\cdot\\mathbf k_{b'}/\\sqrt{d_h}\\big)},\\ \\ a,b\\in\\{\\text{center}\\}\\cup\\mathcal N(i)\\qquad \\mathbf T\\leftarrow\\mathbf T+\\mathrm{Attn}(\\mathrm{Norm}(\\mathbf T)),\\ \\mathbf t\\leftarrow\\mathbf t+\\mathrm{FFN}(\\mathrm{Norm}(\\mathbf t))",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/transformer.py", "start": 101, "end": 121, "must": "attn_weights = torch.log(torch.clamp(factors, self.epsilon))", "caption": "AttentionBlock：log(f_c) 作为注意力偏置，被截断的键得到 −inf"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/transformer.py", "start": 218, "end": 244, "must": "tokens = torch.cat([input_node_embeddings, edge_embeddings], dim=1)", "caption": "TransformerLayer（PreLN）：中心 token + 边 token 一起做注意力"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：沿反向边在原子间传递消息",
+      "plain": "一个 GNN 层结束后，原子 i 上的边 token x_ij 是“i 眼中的 j”。默认的 feedforward 特征器把它与反向边 x_ji（“j 眼中的 i”，通过反向邻居索引取出）拼接，经 LayerNorm + MLP 后残差加到消息上，作为下一层的输入消息。这样信息每层跨越一个截断半径，多层后感受野扩大到 层数 × r_c。",
+      "math": "\\mathbf m^{(l+1)}_{ij}=\\mathbf m^{(l)}_{ij}+\\mathbf x^{(l)}_{ij}+\\mathrm{MLP}\\big(\\mathrm{LN}[\\,\\mathbf x^{(l)}_{ij}\\,\\Vert\\,\\mathbf x^{(l)}_{ji}\\,]\\big),\\qquad \\mathbf h^{(l+1)}_i=\\mathrm{Transformer}^{(l)}_{\\text{center}}",
+      "code": [{"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 538, "end": 573, "must": "combination_mlp(combination_norm(concatenated))", "caption": "_feedforward_featurization_impl：反向边重排 + 组合 MLP"}]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：节点头 + 截断加权的边头",
+      "plain": "每个目标（能量、非保守力……）都有一对读出头：节点头作用在中心特征（d_node），边头作用在每条边的消息（d_pet），各是两层 SiLU MLP 再接线性层。边头的输出乘以 f_c(r_ij) 再对邻居求和——同样保证邻居离开截断时贡献平滑消失。",
+      "math": "E_i=w_n^{\\top}\\phi_n(\\mathbf h_i)+\\sum_{j\\in\\mathcal N(i)}f_c(r_{ij})\\,w_e^{\\top}\\phi_e(\\mathbf m_{ij}),\\qquad \\phi(\\mathbf x)=\\mathrm{SiLU}\\big(W_2\\,\\mathrm{SiLU}(W_1\\mathbf x)\\big)",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 171, "end": 194, "must": "torch.nn.Linear(self.d_node, self.d_head)", "caption": "add_output：节点头与边头 MLP"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 746, "end": 773, "must": "(edge_atomic_predictions * cutoff_factors[:, :, None]).sum(", "caption": "边贡献乘截断因子后对邻居求和"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和 × 尺度 + 元素基线（+ 可选 ZBL）",
+      "plain": "节点与边贡献相加得到原子能，再对原子求和。评估时 MetatrainModel 包装器先乘以训练集统计得到的尺度（scaler），再加上按元素线性拟合的组成基线（composition model）以及可选的 ZBL 近程排斥。原子能加和保证能量广延。",
+      "math": "E=\\sum_i\\Big[s\\,E_i+E_{\\text{comp}}(Z_i)\\Big]\\ \\big(+E_{\\text{ZBL}}\\big)",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 466, "end": 490, "must": "block_sum = node_by_layer[0][b] + edge_by_layer[0][b]", "caption": "predict：节点 + 边贡献相加"},
+        {"repo": "metatrain", "file": "src/metatrain/utils/wrapper.py", "start": 134, "end": 165, "must": "additive_contributions = additive_model(", "caption": "MetatrainModel.forward：scaler 与加性模型（组成基线/ZBL）"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：保守（autograd）或直接预测（非保守头）",
+      "plain": "默认力是能量对坐标的负梯度，力场严格保守。用保守力训练需要二阶反传，PyTorch 自带的 SDPA 不支持，所以训练时切换到手写注意力。另一条路是把 non_conservative_forces 当作独立目标，直接由读出头输出 3 维向量，省掉反传（文档称快 2–3 倍），但能量不守恒，MD 需要额外处理。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}\\qquad \\mathbf F^{\\text{NC}}_i=W_n\\phi_n(\\mathbf h_i)+\\sum_{j}f_c(r_{ij})\\,W_e\\phi_e(\\mathbf m_{ij})\\in\\mathbb R^3",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/utils/output_gradient.py", "start": 32, "end": 41, "must": "torch.autograd.grad(", "caption": "compute_gradient：能量对坐标/应变求导"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/transformer.py", "start": 594, "end": 599, "must": "attention_weights.softmax(dim=-1)", "caption": "manual_attention：支持二阶导的手写注意力"},
+        {"repo": "upet", "file": "src/upet/ase/calculator.py", "start": 209, "end": 228, "must": "if non_conservative:", "caption": "UPETCalculator(non_conservative=...)：切换直接力/应力输出"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：应变求导或直接预测",
+      "plain": "保守路线：引入单位应变张量 ε（可求导），让坐标和晶胞同乘 ε，能量对 ε 的梯度即维里，除以体积得应力，与力在同一次反传中得到。非保守路线：每个原子输出一个 3×3 张量，除以晶胞体积并对称化，再对原子求和。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i\\boldsymbol\\varepsilon,\\ \\mathbf C\\to\\mathbf C\\boldsymbol\\varepsilon\\ (\\boldsymbol\\varepsilon=\\mathbf 1),\\quad \\boldsymbol\\sigma=\\frac1V\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\qquad \\boldsymbol\\sigma^{\\text{NC}}=\\sum_i\\frac{\\mathbf T_i+\\mathbf T_i^{\\top}}{2V}",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/utils/evaluate_model.py", "start": 313, "end": 324, "must": "cell=system.cell @ strain,", "caption": "_prepare_system：坐标与晶胞乘可求导的 strain"},
+        {"repo": "metatrain", "file": "src/metatrain/pet/modules/backend.py", "start": 795, "end": 811, "must": "tensor_as_three_by_three.transpose(1, 2)", "caption": "process_non_conservative_stress：÷体积 + 对称化"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/弱相互作用：可选 Ewald/P3M 特征 + D3 叠加",
+      "plain": "metatrain 的 PET 可开启 long_range：由节点特征线性映射出多通道“电荷”，用 torch-pme 计算 Coulomb 势（训练用 Ewald、推理用 P3M，非周期体系直接求和），经 MLP 后与短程特征相加再乘 1/√2。官方预训练模型文档未提及启用此模块；色散则按 UPET 文档用 torch-dftd 的 D3(BJ) 计算器叠加。",
+      "math": "\\mathbf q_i=W_q\\mathbf h_i,\\quad \\boldsymbol\\phi_i=\\sum_j\\mathbf q_j\\,v^{\\text{Ewald/P3M}}_{\\text{Coul}}(r_{ij}),\\quad \\mathbf h_i\\leftarrow\\tfrac{1}{\\sqrt2}\\big(\\mathbf h_i+\\mathrm{MLP}(\\boldsymbol\\phi_i)\\big)\\qquad E_{\\text{tot}}=E_{\\text{PET}}+E_{\\text{D3(BJ)}}",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/model.py", "start": 456, "end": 466, "must": "node_features_list[i] + long_range_features", "caption": "长程特征加到节点特征上"},
+        {"repo": "metatrain", "file": "src/metatrain/utils/long_range.py", "start": 153, "end": 171, "must": "potential = self.p3m_calculator.forward(", "caption": "LongRangeFeaturizer：Ewald（训练）/ P3M（推理）"},
+        {"repo": "upet", "file": "docs/src/usage/ase.rst", "start": 272, "end": 276, "must": "SumCalculator([calc_upet, dft_d3])", "caption": "文档：UPET + TorchDFTD3（r2scan, BJ）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "旋转对称：训练增强 + 推理旋转平均（ECSE 的思想）",
+      "plain": "训练时每个批次随机施加 O(3) 变换（含反演），目标力/应力随之旋转，让网络“学会”对称性；验证集不做增强。推理时可选在 Lebedev 求积格点上对多个旋转取平均，并给出旋转标准差作为等变误差指标，适合高对称结构的几何优化与声子。原始 PET 论文的 ECSE 用局部坐标系集合加权平均实现平滑且精确的对称化（见原 pet 仓库）。",
+      "math": "\\min_\\theta\\ \\mathbb E_{Q\\sim O(3)}\\,\\mathcal L\\big(f_\\theta(Q\\mathcal S),\\,Q\\cdot y\\big)\\qquad \\bar E(\\mathcal S)=\\frac{\\sum_k w_k\\,E(Q_k\\mathcal S)}{\\sum_k w_k}",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/pet/trainer.py", "start": 428, "end": 435, "must": "rotational_augmenter.apply_random_augmentations,", "caption": "训练 collate：随机 O(3) 增强（仅训练集）"},
+        {"repo": "upet", "file": "src/upet/ase/calculator.py", "start": 248, "end": 254, "must": "SymmetrizedCalculator(", "caption": "rotational_average_order：Lebedev 旋转平均"},
+        {"repo": "pet", "file": "src/pet_sp.py", "start": 88, "end": 116, "must": "batch_now.x = torch.bmm(x_initial, frame)", "caption": "原始 PET-SP（ECSE）：在局部坐标系集合上加权平均"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：LLPR 不确定度与 DOS",
+      "plain": "LLPR（末层预测刚度）把训练集末层特征的协方差存下来，新结构的不确定度就是其特征在“协方差逆”度量下的长度，再乘一个校准系数；按 Cholesky 因子采样还能得到浅层集成，用于把误差传播到力、应力乃至导出量。UPET 另有 PET-MAD-DOS，可预测电子态密度、费米能级与带隙。",
+      "math": "\\sigma_\\star=\\alpha\\sqrt{\\mathbf f_\\star^{\\top}\\big(\\mathbf F^{\\top}\\mathbf F+\\varsigma^2\\mathbf I\\big)^{-1}\\mathbf f_\\star}",
+      "code": [
+        {"repo": "metatrain", "file": "src/metatrain/llpr/model.py", "start": 1026, "end": 1037, "must": "torch.linalg.solve_triangular(", "caption": "_Covariance.one_over_pr：fᵀC⁻¹f（Cholesky 三角求解）"},
+        {"repo": "metatrain", "file": "src/metatrain/llpr/model.py", "start": 870, "end": 885, "must": "values=torch.sqrt(values),", "caption": "uncertainty：开方得未校准不确定度"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff", "value": "4.5 Å（metatrain 默认）；PET-OAM-XL 10.0 Å", "note": "名义截断半径", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 159, "end": 159, "must": "cutoff: float = 4.5"}},
+    {"name": "num_neighbors_adaptive", "value": "None（默认关闭）；PET-OAM-XL 40", "note": "自适应截断的目标邻居数", "code": {"repo": "matbench-discovery", "file": "models/pet/pet-oam-xl-1.0.0/options-omat-nc-pretrain.yaml", "start": 10, "end": 20, "must": "num_neighbors_adaptive: 40"}},
+    {"name": "cutoff_function / cutoff_width", "value": "Bump / 0.5 Å", "note": "C^∞ 平滑截断及其过渡带宽", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 185, "end": 185, "must": "cutoff_function: Literal["}},
+    {"name": "d_pet", "value": "128（默认）；XL 640", "note": "边 token 宽度", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 196, "end": 196, "must": "d_pet: int = 128"}},
+    {"name": "d_node", "value": "256（默认）；XL 2560", "note": "中心 token（节点）宽度", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 205, "end": 205, "must": "d_node: int = 256"}},
+    {"name": "d_head / d_feedforward", "value": "128 / 256（默认）；XL 640 / 1280", "note": "读出头宽度 / 注意力层 FFN 宽度", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 203, "end": 203, "must": "d_head: int = 128"}},
+    {"name": "num_heads", "value": "8", "note": "每个注意力层的头数", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 213, "end": 213, "must": "num_heads: int = 8"}},
+    {"name": "num_gnn_layers × num_attention_layers", "value": "2 × 2（默认）；XL 5 × 3", "note": "消息传递层数 × 每层 Transformer 层数", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 215, "end": 220, "must": "num_gnn_layers: int = 2"}},
+    {"name": "activation", "value": "SwiGLU（RMSNorm，PreLN）", "note": "前馈激活 / 归一化 / 归一化位置", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 229, "end": 229, "must": "activation: Literal["}},
+    {"name": "featurizer_type", "value": "feedforward", "note": "正反向边消息混合，只用最后一层特征读出（residual 为原论文版本）", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 237, "end": 237, "must": "featurizer_type: Literal["}},
+    {"name": "model_params", "value": "PET-OAM-XL 约 7.3 亿（730000000）；XS/S/M/L 分别 4.5M/25.9M/109M/255M", "note": "参数量（Matbench Discovery YAML 与 UPET 文档）", "code": {"repo": "matbench-discovery", "file": "models/pet/pet-oam-xl-1.0.0.yml", "start": 40, "end": 41, "must": "model_params: 730000000"}},
+    {"name": "zbl", "value": "false", "note": "可选 ZBL 近程排斥（加性模型）", "code": {"repo": "metatrain", "file": "src/metatrain/pet/documentation.py", "start": 245, "end": 245, "must": "zbl: bool = False"}}
+  ],
+  "speedNotes": [
+    "FLOPs 主要在每个原子的邻域 Transformer：注意力 ∝ M²·d_pet，QKV/FFN ∝ M·d_pet²；中心 token 的宽通道 d_node 只作用在一个 token 上，文档称增大它“推理时间增加较小”。",
+    "没有球谐、CG 张量积，全部是稠密矩阵乘和 scaled_dot_product_attention，GPU 利用率高；UPET 文档称虽然参数多，但“参数使用非常稀疏”，并给出 H100 上与 UMA-M、NequIP 的速度对比图。",
+    "自适应截断把每原子邻居数稳定在约 16–40，避免致密体系 M 爆炸，也让 NEF 填充格式（原子数 × 最大邻居数）更紧凑；solver 版本兼容 torch.compile。",
+    "非保守力/应力头省掉反传，文档称快 2–3 倍；保守力训练需要二阶导，只能用手写注意力，训练比推理更贵。",
+    "旋转平均会把一次计算变成 Lebedev 格点数次，成本成倍增加，可用 rotational_average_batch_size 控制显存。"
+  ],
+  "weakNotes": [
+    "感受野约为 层数 × r_c；自适应截断在致密体系会把有效截断收缩到只覆盖近邻壳层，截断外的色散 r⁻⁶ 尾巴和静电 r⁻¹ 都没有。",
+    "训练泛函因模型而异：PET-MAD-1.5/1.6、PET-OMATPES 为 r2SCAN，PET-OAM/PET-OMat 为 PBE（Materials Project 兼容），PET-SPICE 为 ωB97M-D3，PET-OMol 为 ωB97M-V，PET-MOLS 为 PBE0+MBD。",
+    "层状 vdW 材料、分子晶体、物理吸附等需要长程色散时，官方做法是用 torch-dftd 的 D3(BJ) 以 SumCalculator 叠加（示例 xc=r2scan）。",
+    "带电缺陷、电解质、界面电荷转移需要长程静电：metatrain 可开启 Ewald/P3M 长程特征与电荷/自旋条件化，但需要自行训练/微调。"
+  ],
+  "downstreamNotes": [
+    "声子/热导：默认保守力 + C^∞ 截断，Hessian 光滑；Matbench Discovery 上 PET-OAM-XL 的 κ_SRME 为 0.1192。高对称结构可开旋转平均减小等变误差。",
+    "材料发现与几何优化：Matbench Discovery 上 PET-OAM-XL F1 = 0.924（unique prototypes）、结构 RMSD = 0.0595；FAQ 建议几何优化使用对称化计算器。",
+    "分子动力学：PET-MAD-1.6 被推荐用于材料、表面、溶液等 MD；非保守力 MD 更快但需额外处理（官方 Atomistic Cookbook）。",
+    "不确定度：LLPR + 浅层集成可给出能量/力/应力误差，并传播到相变温度、扩散系数等导出量；PET-MAD-DOS 可算 DOS、费米能级与带隙。"
+  ],
+  "strengths": ["无等变约束：纯稠密运算，GPU 友好，可扩展到数亿参数", "Matbench Discovery（PET-OAM-XL）：F1 0.924、κ_SRME 0.119", "保守/非保守双模式、LLPR 不确定度、DOS 等丰富输出", "自适应截断 + C^∞ 平滑截断，跨致密/稀疏体系邻居数稳定", "metatrain 训练与微调（含 LoRA）、LAMMPS/i-PI/ASE/TorchSim/GROMACS 接口"],
+  "weaknesses": ["旋转对称只近似成立，高对称结构的优化/声子可能出现微小对称破缺", "需要随机旋转增强来学对称性；精确对称化（旋转平均/ECSE）要付出多倍计算", "L/XL 模型显存占用大，最大可模拟体系受限", "基础模型默认无长程静电与色散", "非保守力模式不守恒能量，MD 需额外处理"],
+  "pretrained": ["PET-MAD-1.6 (XS/S/M, r2SCAN, 102 元素)", "PET-MAD-1.5 (XS/S)", "PET-OAM (L/XL, OMat → sAlex+MPtrj, PBE)", "PET-OMat (XS/S/M/L/XL)", "PET-OMATPES (L, r2SCAN)", "PET-SPICE (S/L, ωB97M-D3)", "PET-OMol (S/M/L, ωB97M-V)", "PET-MOLS (S, PBE0+MBD)", "PET-MAD-DOS"],
+  "mbdKeys": ["pet-oam-xl-1.0.0"],
+  "arenaKeys": ["PET-OAM", "PET-MAD"]
+}

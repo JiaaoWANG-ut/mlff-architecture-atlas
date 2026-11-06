@@ -1,0 +1,209 @@
+{
+  "id": "nep",
+  "name": "NEP",
+  "fullName": "NEP: Neuroevolution Potential（神经演化势，GPUMD 内置）",
+  "year": 2021,
+  "authors": "Z. Fan, Z. Zeng, C. Zhang, Y. Wang, K. Song, H. Dong, Y. Chen, T. Ala-Nissila",
+  "paper": {"title": "Neuroevolution machine learning potentials: Combining high accuracy and low cost in atomistic simulations and application to heat transport", "venue": "Phys. Rev. B 104, 104309 (2021)", "url": "https://doi.org/10.1103/PhysRevB.104.104309"},
+  "repos": ["GPUMD"],
+  "family": "descriptor-nn",
+  "tags": ["描述符 + 单隐藏层 NN", "Chebyshev 径向基", "3/4/5 体球谐不变量", "SNES 进化训练", "GPU 原生 (GPUMD)", "NEP89 通用模型"],
+  "framework": "C++/CUDA（GPUMD，亦支持 HIP/ROCm）",
+  "license": "LGPL-3.0-or-later",
+  "oneLiner": "NEP 用“Chebyshev 径向基 × 余弦截断”加上元素对相关的可训练系数，构造严格旋转不变的 2/3/4/5 体描述符，再交给每种元素一个只有一层隐藏层的 tanh 小网络输出原子能；所有导数都手写成 CUDA 核，训练则用进化策略（SNES）而不是反向传播，因此在 GPU 上极快。",
+  "analogy": "像给每个原子发一张固定长度的“邻居体检表”：先数各个距离壳层上有多少邻居（径向），再统计邻居们围成的角度分布（角向），表格长度与元素种类多少无关；然后一个只有一层的小网络把这张表换算成能量。训练时不求梯度，而像“育种”：每一代随机生成几十套参数，按误差排名，把参数分布往好的方向挪。",
+  "arch": {
+    "geometry": "距离 r_ij（Chebyshev×余弦截断）+ 方向 r̂_ij 的实球谐多项式 Y_lm（l≤L_max）→ 求和成 Legendre 型角度不变量",
+    "equivariance": "不变量（描述符严格旋转/平移/置换不变）；TNEP 借 r_ij⊗∂U/∂r_ij 得到等变的偶极/极化率",
+    "lmax": "3 体 l≤L_max（默认 4，代码上限 8）；4 体 q_222 用 l=2，5 体 q_1111 用 l=1；NEP89 为 l_max 4 2 1",
+    "bodyOrder": "径向 2 体 + 角向 3 体；可选 4 体（q_222，默认开）与 5 体（q_1111，默认关），另有 q_112/123/233/134 扩展项",
+    "layers": "无消息传递层；描述符 → 1 个 tanh 隐藏层（每元素独立权重，输出偏置 b1 共享）",
+    "cutoff": "训练默认径向 8 Å / 角向 4 Å；NEP89 为 6 / 5 Å；可按元素设置，成对取平均",
+    "receptiveField": "= r_c^R（严格局域，无层间传播）",
+    "message": "无消息；q_n=Σ_j g_n(r_ij)，s_nlm=Σ_j g_n(r_ij)Y_lm(r̂_ij)，g_n=Σ_k c_nk^{t_i t_j} f_k(r)",
+    "readout": "q⊙q_scaler → U_i=Σ_μ w1_μ tanh(w0_μ·q−b0_μ)−b1（+ 可选元素参考能）",
+    "forces": "conservative",
+    "forcesDetail": "手写解析导数：前向同时存 ∂U_i/∂q；径向核直接组装 F_i=Σ_j(∂U_i/∂r_ij−∂U_j/∂r_ji)，角向核先算偏力 f_ij 再由多体核汇总；无自动微分",
+    "stress": "逐原子 9 分量维里 W_i=Σ_j r_ij⊗∂U_j/∂r_ji，求和除以体积；维里也是训练目标（默认权重 0.1）",
+    "longRange": "基础 NEP 无；qNEP：网络额外输出原子电荷，Ewald 或 PPPM 长程库仑（α=π/r_c^R），总电荷强制为零",
+    "dispersion": "run.in 写 dftd3 <泛函> <rc_pot> <rc_cn> 外挂 GPU DFT-D3(BJ)；nep_vdw / qnep3_vdw 由网络输出原子 C6",
+    "chargeSpin": "无总电荷/自旋输入；qNEP 预测原子电荷（电中性）；NEP-Spin 以每个原子的自旋矢量为额外输入",
+    "otherOutputs": "偶极/极化率（TNEP）、原子电荷与 Born 有效电荷（qNEP）、逐原子能量与维里（热流）、磁力（NEP-Spin）、温度依赖模型",
+    "strictlyLocal": true,
+    "complexity": "O(N·M_R·(n_max^R+1)(N_bas^R+1)) + O(N·M_A·(n_max^A+1)(L_max+1)²) + O(N·dim·N_neu)；与元素数无关",
+    "accel": "全部手写 CUDA 核（float 计算、double 累加）；NEP_MULTIGPU 多 GPU 空间分区；small-box 路径；NEP_CPU（独立仓库）提供 CPU 与 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "描述符 + 单隐藏层（默认 30、NEP89 80 个神经元）+ 手写 CUDA 解析导数，没有张量积、消息传递和自动微分，是最快的一档 MLIP。"},
+    "expressiveness": {"v": 3, "why": "3 体角向到 L_max 完整，但 4/5 体只取 q_222、q_1111 等少数低 l 组合，网络只有一层，容量弱于 MACE/ACE 类高体序模型。"},
+    "longRange": {"v": 4, "why": "基础模型严格局域；但官方有 GPU DFT-D3、qNEP 动态电荷 + Ewald/PPPM 静电、输出 C6 的 nep_vdw 变体，只是没有总电荷/自旋输入。"},
+    "scalability": {"v": 5, "why": "严格局域、只需一层邻居，NEP_MULTIGPU 按 x/y/z 空间分区；NEP_CPU 可接入 LAMMPS。"},
+    "physics": {"v": 4, "why": "解析保守力、原子能求和广延、严格不变、可选 ZBL 近程排斥；但余弦截断只保证一阶连续（二阶导在 r_c 处不为零）。"},
+    "coverage": {"v": 4, "why": "能量/力/逐原子维里之外，官方有偶极/极化率（TNEP）、原子电荷与 BEC（qNEP）、自旋（NEP-Spin），但需各自单独训练，且无原生 Hessian 输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：构型 + nep.txt 模型文件",
+      "plain": "GPUMD 读入原子坐标、元素类型和盒子（周期边界），以及一个纯文本模型文件 nep.txt。第一行决定模型种类（nep4 / nep4_zbl / nep4_temperature…）和元素列表，元素顺序同时给出原子序数 Z，供可选的 ZBL 使用；随后是截断半径、n_max、basis_size、l_max、神经元数和全部参数。截断既可全局统一，也可以按元素分别给出。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,t_i)\\}_{i=1}^{N},\\ \\mathbf H\\ (\\text{box});\\qquad \\text{nep.txt}:\\ r_c^{R}(t),\\,r_c^{A}(t),\\,n^{R,A}_{\\max},\\,N^{R,A}_{\\text{bas}},\\,L_{\\max},\\,N_{\\text{neu}},\\,\\{c^{t_it_j}_{nk},\\mathbf w\\}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 81, "end": 95, "must": "nep4_zbl_temperature", "caption": "NEP 构造函数：按 nep.txt 第一行识别模型种类（是否带 ZBL / 温度）"},
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 151, "end": 172, "must": "tokens[2 + n * 2]", "caption": "读取径向/角向截断（全局或按元素）"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：径向与角向两套截断",
+      "plain": "在全局候选邻居表的基础上，每个原子筛出两张表：距离小于径向截断 r_c^R 的进径向表，其中更近、小于角向截断 r_c^A 的再进角向表。按元素设置的截断在成对使用时取两者平均，周期边界用最小镜像约定 apply_mic。没有消息传递，所以每个原子只需要这一层邻居。",
+      "math": "\\mathcal N_R(i)=\\{j:\\ r_{ij}<\\tfrac12[r_c^R(t_i)+r_c^R(t_j)]\\},\\qquad \\mathcal N_A(i)=\\{j\\in\\mathcal N_R(i):\\ r_{ij}<\\tfrac12[r_c^A(t_i)+r_c^A(t_j)]\\}",
+      "code": [{"repo": "GPUMD", "file": "src/force/nep.cu", "start": 411, "end": 431, "must": "g_NL_angular[count_angular++ * N + n1] = n2;", "caption": "find_neighbor_list_large_box：从候选邻居中分出径向表与角向表"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "径向基：Chebyshev 多项式 × 余弦截断",
+      "plain": "距离先映射到 x=2(r/r_c−1)²−1∈[−1,1]，再用 Chebyshev 递推 T_k(x) 生成 N_bas+1 个基函数，并乘以余弦截断 f_c。这样基函数在 r_c 处连同一阶导一起归零（能量和力都连续），但二阶导一般不为零。Chebyshev 递推只需几次乘加，非常适合 GPU。",
+      "math": "f_c(r)=\\tfrac12\\cos\\!\\big(\\pi r/r_c\\big)+\\tfrac12\\ \\ (r<r_c),\\qquad f_k(r)=\\tfrac12\\big[T_k(x)+1\\big]f_c(r),\\ \\ x=2\\Big(\\frac{r}{r_c}-1\\Big)^2-1,\\ k=0,\\dots,N_{\\text{bas}}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 356, "end": 364, "must": "fc = 0.5f * cos(3.1415927f * x) + 0.5f;", "caption": "find_fc：余弦截断函数"},
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 519, "end": 535, "must": "fn[m] = (tmp + 1.0f) * half_fc12;", "caption": "find_fn：Chebyshev 递推生成径向基"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "径向描述符：元素对相关的可训练径向函数（2 体）",
+      "plain": "NEP 的“化学嵌入”藏在径向函数里：每个元素对 (t_i, t_j) 都有一组可训练系数 c_nk，把 N_bas+1 个基函数线性组合成 n_max+1 个径向函数 g_n。把所有径向邻居的 g_n 加起来就是 2 体描述符 q_n。元素越多只是系数表越大，描述符维度不变——这是 NEP 处理多元素（直到 89 种元素）的关键。",
+      "math": "g_n^{t_it_j}(r)=\\sum_{k=0}^{N^R_{\\text{bas}}}c^{t_it_j}_{nk}\\,f_k(r),\\qquad q^i_n=\\sum_{j\\in\\mathcal N_R(i)}g_n^{t_it_j}(r_{ij}),\\quad n=0,\\dots,n^R_{\\max}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 18, "end": 28, "must": "type_index * ((n_max + 1) * (basis_size + 1))", "caption": "get_c_index：按 (元素对, n, k) 查可训练系数 c_nk"},
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 462, "end": 487, "must": "q[n] += gn12;", "caption": "find_descriptor：径向描述符累加"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "角向描述符：球谐求和 → 3 体 / 4 体 / 5 体不变量",
+      "plain": "角向部分用另一组系数构成的 g_n 乘上方向的实球谐函数 Y_lm（代码里写成 z 的多项式 × (x+iy)^m 的实部/虚部），对邻居求和得到 s_nlm。对 m 做加权平方和得到 3 体不变量 q_nl，由球谐加法定理它等价于对所有邻居对 (j,k) 求 g_n g_n P_l(cosθ_ijk)，却只需 O(M) 而不是 O(M²) 的代价。再把 l=2 的三个 s 用 3j 系数缩并得到 4 体项 q_222，把 l=1 的 s 组合成 5 体项 q_1111；它们都严格旋转不变。",
+      "math": "s^i_{nlm}=\\sum_{j\\in\\mathcal N_A(i)}g_n(r_{ij})\\,Y_{lm}(\\hat{\\mathbf r}_{ij}),\\qquad q^i_{nl}=\\sum_m c_{lm}\\lvert s^i_{nlm}\\rvert^2\\propto\\sum_{j,k}g_n(r_{ij})g_n(r_{ik})P_l(\\cos\\theta_{ijk}),\\qquad q^i_{n,222}=\\sum_{m_1m_2m_3}\\begin{pmatrix}2&2&2\\\\m_1&m_2&m_3\\end{pmatrix}s^i_{n2m_1}s^i_{n2m_2}s^i_{n2m_3},\\quad q^i_{n,1111}\\propto\\Big(\\sum_m\\lvert s^i_{n1m}\\rvert^2\\Big)^2",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 489, "end": 525, "must": "accumulate_s(paramb.L_max, d12, x12, y12, z12, gn12, s);", "caption": "find_descriptor：对角向邻居累加 s_nlm，再调用 find_q，并缓存 s（sum_fxyz）供求力"},
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 1706, "end": 1718, "must": "q *= 2.0f;", "caption": "find_q_one：3 体不变量 q_nl（C3B 归一化系数）"},
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 1805, "end": 1820, "must": "C5B[0] * s0_sq * s0_sq", "caption": "find_q：4 体 q_222（C4B）与 5 体 q_1111（C5B）"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：每种元素一个单隐藏层 tanh 网络",
+      "plain": "描述符先逐分量乘以模型文件里存的缩放因子 q_scaler，再送入该原子元素专属的网络：一层隐藏层（训练默认 30 个神经元，NEP89 为 80），激活函数 tanh，输出一个标量原子能 U_i；输出偏置 b1 为所有元素共享。同一遍循环里顺手算出 ∂U_i/∂q（tanh 的导数 1−x²）并存起来——后面的力就靠它，所以 NEP 不需要自动微分。",
+      "math": "U_i=\\sum_{\\mu=1}^{N_{\\text{neu}}}w^{(1)}_{t_i,\\mu}\\tanh\\Big(\\sum_{\\nu}w^{(0)}_{t_i,\\mu\\nu}\\,\\tilde q^i_{\\nu}-b^{(0)}_{t_i,\\mu}\\Big)-b^{(1)},\\qquad \\tilde q^i_\\nu=s_\\nu\\,q^i_\\nu,\\qquad \\frac{\\partial U_i}{\\partial\\tilde q^i_\\nu}=\\sum_\\mu w^{(1)}_{\\mu}\\big(1-x_\\mu^2\\big)w^{(0)}_{\\mu\\nu}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 181, "end": 206, "must": "float x1 = tanh(w0_times_q - b0[n]);", "caption": "apply_ann_one_layer：前向与对描述符的导数一次完成"},
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 527, "end": 549, "must": "annmb.w0[t1],", "caption": "描述符归一化 → 调用元素 t1 的网络 → 保存 Fp=∂U/∂q"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能求和（+ 可选 ZBL 近程排斥）",
+      "plain": "总能就是所有原子能之和（可再加每种元素的参考能），因此天然广延。若模型是 nep4_zbl，还会叠加 ZBL 屏蔽库仑排斥：通用函数 φ(x) 由四个指数项组成，并用余弦开关在 r_inner→r_outer 之间平滑关闭；也支持按共价半径确定的 typewise 截断，或每个元素对 10 个参数的 flexible ZBL。这样原子被硬挤到一起时（辐照损伤、高压）能量会正确地急剧升高。",
+      "math": "E=\\sum_i\\big[U_i+E_{\\text{ref}}(t_i)\\big]+\\frac12\\sum_{i\\neq j}\\frac{Z_iZ_je^2}{4\\pi\\varepsilon_0r_{ij}}\\,\\phi\\!\\Big(\\frac{r_{ij}}{a_{ij}}\\Big)f^{\\text{ZBL}}_c(r_{ij}),\\qquad a_{ij}=\\frac{0.46848}{Z_i^{0.23}+Z_j^{0.23}},\\ \\ \\phi(x)=\\sum_{k=1}^{4}A_k e^{-B_kx}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 533, "end": 549, "must": "g_pe[n1] += double(F)", "caption": "原子能 U_i（+ 元素参考能）写入 potential_per_atom"},
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 800, "end": 832, "must": "float a_inv = (pow_zi + pow(float(zj), 0.23f)) * 2.134563f;", "caption": "find_force_ZBL：通用 / typewise / flexible 三种 ZBL"},
+        {"repo": "GPUMD", "file": "src/utilities/nep_utilities.cuh", "start": 404, "end": 430, "must": "0.18175f, 3.1998f, 0.50986f, 0.94229f", "caption": "find_f_and_fp_zbl：通用 ZBL 屏蔽函数 × 余弦开关"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：手写解析链式法则（不走自动微分）",
+      "plain": "力 = −∂E/∂r。因为 U_i 只依赖相对位移 r_ij，先求“偏力” ∂U_i/∂r_ij = Σ_ν (∂U_i/∂q_ν)(∂q_ν/∂r_ij)：径向部分用 Chebyshev 基的解析导数，角向部分复用前向时缓存的 s_nlm。再按牛顿第三定律组合：原子 i 受力 = 它自己的偏力之和 − 各邻居 j 对 r_ji 的偏力之和。全过程是确定的解析公式，力严格保守，也比自动微分省内存。",
+      "math": "\\mathbf F_i=\\sum_{j\\neq i}\\Big(\\frac{\\partial U_i}{\\partial\\mathbf r_{ij}}-\\frac{\\partial U_j}{\\partial\\mathbf r_{ji}}\\Big),\\qquad \\frac{\\partial U_i}{\\partial\\mathbf r_{ij}}=\\sum_\\nu\\frac{\\partial U_i}{\\partial q^i_\\nu}\\frac{\\partial q^i_\\nu}{\\partial\\mathbf r_{ij}},\\quad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 605, "end": 629, "must": "float tmp21 = g_Fp[static_cast<size_t>(N) * n + n2] * gnp21 * d12inv;", "caption": "find_force_radial：同时算 f_12 与 f_21，直接得到径向力"},
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 716, "end": 746, "must": "accumulate_f12(", "caption": "find_partial_force_angular：角向偏力 f_ij（用缓存的 sum_fxyz）"},
+        {"repo": "GPUMD", "file": "src/force/potential.cu", "start": 83, "end": 112, "must": "s_fx += f12x - f21x;", "caption": "gpu_find_force_many_body：F_i = Σ_j (f_ij − f_ji)"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "维里/应力：逐原子 3×3 维里",
+      "plain": "GPUMD 在算力的同一个核里顺便累加每个原子的 9 分量维里 W_i（不只是体系总量）。所有原子求和再除以体积，就是压强/应力张量的势能部分；逐原子维里还是 GPUMD 用多体势计算热流、做热导率模拟的基础。训练时维里也是拟合目标之一。",
+      "math": "\\mathbf W_i=\\sum_{j}\\mathbf r_{ij}\\otimes\\frac{\\partial U_j}{\\partial\\mathbf r_{ji}},\\qquad \\mathbf P_{\\text{pot}}=\\frac1V\\sum_i\\mathbf W_i",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/nep.cu", "start": 627, "end": 655, "must": "s_sxx += r12[0] * f21[0];", "caption": "径向部分的逐原子维里（9 个分量）"},
+        {"repo": "GPUMD", "file": "src/force/potential.cu", "start": 103, "end": 112, "must": "s_sxx += x12 * f21x;", "caption": "角向（多体）部分的逐原子维里"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/弱相互作用：DFT-D3 外挂与 qNEP 动态电荷",
+      "plain": "基础 NEP 在截断外完全没有相互作用，官方提供两条路。① 在 run.in 写 dftd3 <泛函> <势截断> <配位数截断>，GPUMD 用 GPU 版 DFT-D3(BJ) 把色散加到 NEP 上，C6 随配位数变化。② qNEP（nep4_charge1/2/3）让同一个隐藏层多输出一个原子电荷，减去平均值保证电中性，再用 Ewald 或 PPPM 求倒空间库仑（α=π/r_c^R），charge1 还加实空间 erfc 项与自能；电荷对坐标的导数也进入力，因此仍然保守。另有 nep_vdw / qnep3_vdw 变体让网络额外输出原子 C6。",
+      "math": "E_{\\text{D3}}=-\\frac12\\sum_{i\\neq j}\\sum_{n=6,8}\\frac{s_nC^{ij}_n(\\mathrm{CN})}{r_{ij}^n+(a_1R^{ij}_0+a_2)^n},\\ R^{ij}_0=\\sqrt{C^{ij}_8/C^{ij}_6};\\qquad q_i=\\tilde q_i-\\frac1N\\sum_k\\tilde q_k,\\ \\ E_{\\text{es}}=\\frac{1}{4\\pi\\varepsilon_0}\\Big[\\frac12\\sum_{i\\neq j}\\frac{q_iq_j\\,\\mathrm{erfc}(\\alpha r_{ij})}{r_{ij}}-\\frac{\\alpha}{\\sqrt\\pi}\\sum_iq_i^2\\Big]+E_{\\mathbf k},\\ \\ \\alpha=\\frac{\\pi}{r_c^R}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/force/dftd3.cu", "start": 673, "end": 682, "must": "float damp = dftd3_para.a1 * sqrt(c8_over_c6) + dftd3_para.a2;", "caption": "DFT-D3：Becke–Johnson 阻尼的 C6/C8 项"},
+        {"repo": "GPUMD", "file": "src/force/nep_charge.cu", "start": 624, "end": 642, "must": "g_charge[n1] = charge;", "caption": "qNEP：同一网络同时输出原子能与原子电荷"},
+        {"repo": "GPUMD", "file": "src/force/nep_charge.cu", "start": 1493, "end": 1520, "must": "ewald.find_force(", "caption": "PPPM 或 Ewald 求长程静电；charge_mode 1 再加实空间 erfc 项"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多性质：偶极、极化率（TNEP）与 Born 有效电荷",
+      "plain": "同一套描述符还能训练张量性质：nep_dipole / nep_polarizability 模型的网络仍输出标量，但把它对 r_ij 的导数与 r_ij 组合成向量或张量，于是结果随结构一起旋转（等变），可用于红外和拉曼光谱。qNEP 还能由电荷及其对位移的导数给出 Born 有效电荷（可选 bec 输出）。此外还有 NEP-Spin（磁性）与 nep_temperature（温度作为额外描述符）等变体。",
+      "math": "\\boldsymbol\\mu=-\\sum_i\\sum_{j}r_{ij}^2\\,\\frac{\\partial U^{\\mu}_i}{\\partial\\mathbf r_{ij}},\\qquad \\boldsymbol\\alpha=\\sum_i\\Big(U^{0}_i\\,\\mathbf 1-\\sum_j\\mathbf r_{ij}\\otimes\\frac{\\partial U^{\\alpha}_i}{\\partial\\mathbf r_{ij}}\\Big)",
+      "code": [
+        {"repo": "GPUMD", "file": "src/main_nep/tnep/tnep.cu", "start": 562, "end": 581, "must": "s_virial_xx -= r12_square * f12[0];", "caption": "TNEP：偶极 = −Σ r_ij² ∂U/∂r_ij；极化率用类维里项 r⊗∂U/∂r"},
+        {"repo": "GPUMD", "file": "src/main_nep/tnep/tnep.cu", "start": 445, "end": 461, "must": "g_virial[n1 + N * 2] = F;", "caption": "极化率的标量（迹）部分由另一个网络给出"},
+        {"repo": "GPUMD", "file": "src/force/nep_charge.cu", "start": 1440, "end": 1463, "must": "find_bec_diagonal<<<grid_size, BLOCK_SIZE>>>(", "caption": "qNEP：Born 有效电荷（对角 + 径向/角向导数部分）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "训练：可分离自然进化策略 SNES（“神经演化”）",
+      "plain": "“神经演化”指训练方式：不做反向传播，而是为每个参数维护均值 μ 和标准差 σ，每代采样一群候选（默认 50 个）θ_p = μ + σ⊙z_p，在 GPU 上并行算出各自的损失（能量/力/维里 RMSE 加权 + L1/L2 正则）后排名，再用排名效用 u_p 更新 μ 和 σ。每个参数按其所属元素对应的那一行损失排名，各元素可以各自进化。代价是需要很多代（默认上限 10⁵ 代）；仓库另有用 Adam 优化器的 main_gnep 程序（对应 README 中的解析梯度训练文献）。",
+      "math": "\\boldsymbol\\theta_p=\\boldsymbol\\mu+\\boldsymbol\\sigma\\odot\\mathbf z_p,\\ \\mathbf z_p\\sim\\mathcal N(0,\\mathbf I);\\qquad \\boldsymbol\\mu\\leftarrow\\boldsymbol\\mu+\\boldsymbol\\sigma\\odot\\sum_pu_p\\mathbf z_p,\\quad \\boldsymbol\\sigma\\leftarrow\\min\\!\\Big(\\boldsymbol\\sigma\\odot e^{\\eta_\\sigma\\sum_pu_p(\\mathbf z_p^2-1)},\\,1\\Big);\\qquad L=\\lambda_e\\mathrm{RMSE}_E+\\lambda_f\\mathrm{RMSE}_F+\\lambda_v\\mathrm{RMSE}_W+\\lambda_1\\frac{\\lVert\\boldsymbol\\theta\\rVert_1}{N_\\theta}+\\lambda_2\\sqrt{\\frac{\\lVert\\boldsymbol\\theta\\rVert_2^2}{N_\\theta}}",
+      "code": [
+        {"repo": "GPUMD", "file": "src/main_nep/snes.cu", "start": 165, "end": 172, "must": "g_population[n] = g_sigma[v] * s + g_mu[v];", "caption": "gpu_create_population：按 μ+σ·z 采样种群"},
+        {"repo": "GPUMD", "file": "src/main_nep/snes.cu", "start": 232, "end": 246, "must": "g_mu[v] += sigma * gradient_mu;", "caption": "gpu_update_mu_and_sigma：按元素排名的效用加权更新 μ、σ"},
+        {"repo": "GPUMD", "file": "src/main_nep/fitness.cu", "start": 131, "end": 136, "must": "float cost_L2 = para.lambda_2 * sqrt(cost_L2reg[p] / num_variables);", "caption": "L1/L2 正则项"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "version", "value": "4（NEP4）", "note": "GPUMD 力场端只接受 NEP4 系列模型", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 46, "end": 46, "must": "version = 4;"}},
+    {"name": "cutoff r_c^R / r_c^A", "value": "8 Å / 4 Å（训练默认）；NEP89：6 Å / 5 Å", "note": "径向/角向截断，可按元素设置", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 74, "end": 80, "must": "rc_angular[n] = 4.0f;"}},
+    {"name": "n_max（径向/角向）", "value": "6 / 6（NEP89：4 / 4）", "note": "径向函数 g_n 的个数减 1", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 47, "end": 50, "must": "n_max_radial = 6;"}},
+    {"name": "basis_size（径向/角向）", "value": "6 / 6（NEP89：8 / 8）", "note": "Chebyshev 基函数个数减 1", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 47, "end": 50, "must": "basis_size_radial = 6;"}},
+    {"name": "l_max", "value": "3 体 L_max=4；q_222 开、q_1111 关（NEP89：4 2 1，4/5 体都开）", "note": "角向阶数与 4/5 体开关", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 51, "end": 57, "must": "has_q_1111 = 0;"}},
+    {"name": "neuron", "value": "30（单隐藏层；NEP89：80）", "note": "tanh 隐藏层宽度", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 58, "end": 60, "must": "num_neurons1 = 30;"}},
+    {"name": "lambda_e / lambda_f / lambda_v", "value": "1 / 1 / 0.1", "note": "能量/力/维里损失权重", "code": {"repo": "GPUMD", "file": "src/main_nep/common/nep_parameters.cu", "start": 61, "end": 62, "must": "lambda_v = 0.1f;"}},
+    {"name": "lambda_1 / lambda_2", "value": "自动：√(N_θ·10⁻⁶ / N_types)", "note": "L1/L2 正则强度（未手动设置时）", "code": {"repo": "GPUMD", "file": "src/main_nep/parameters.cu", "start": 83, "end": 91, "must": "lambda_1 = sqrt(number_of_variables * 1.0e-6f / num_types);"}},
+    {"name": "population / generation / batch", "value": "50 / 100000 / 1000；σ0 = 0.1", "note": "SNES 种群大小、最大代数、每批结构数、初始标准差", "code": {"repo": "GPUMD", "file": "src/main_nep/parameters.cu", "start": 35, "end": 44, "must": "population_size = 50;"}},
+    {"name": "η_σ（SNES）", "value": "(3+ln n)/(5√n)/2，n = 参数总数 / 元素数", "note": "σ 的学习率；μ 的学习率为 1", "code": {"repo": "GPUMD", "file": "src/main_nep/snes.cu", "start": 49, "end": 50, "must": "eta_sigma = (3.0f + std::log(num * 1.0f))"}},
+    {"name": "NEP89 配置", "value": "zbl 2, cutoff 6 5, n_max 4 4, basis_size 8 8, l_max 4 2 1, neuron 80", "note": "89 元素通用模型；微调时这些不可改", "code": {"repo": "GPUMD", "file": "potentials/nep/nep89_20250409/nep.in", "start": 10, "end": 16, "must": "basis_size 8 8"}},
+    {"name": "qNEP Ewald α", "value": "π / r_c^R", "note": "实空间/倒空间分割参数", "code": {"repo": "GPUMD", "file": "src/force/nep_charge.cu", "start": 413, "end": 413, "must": "charge_para.alpha = float(PI) / paramb.rc_radial;"}}
+  ],
+  "speedNotes": [
+    "前向只有三步：描述符（每个原子一个 CUDA 线程，遍历邻居做 Chebyshev 递推与球谐多项式）→ 小 MLP（dim×N_neu 次乘加）→ 保存 ∂U/∂q；没有张量积、消息传递，也没有自动微分计算图。",
+    "角向描述符先对邻居求和得到 s_nlm 再平方，代价 O(M·(L_max+1)²) 而不是枚举三元组的 O(M²)；求力时复用缓存的 s（sum_fxyz），只需再遍历一次邻居。",
+    "元素数只影响系数表 c_nk^{t_i t_j} 的大小（查表），不改变描述符维度和网络大小：按代码 dim=(n_max^R+1)+(n_max^A+1)·num_L 推算，89 元素的 NEP89 只有 35 维输入、80 个神经元。",
+    "描述符、网络与偏力用单精度 float，坐标及能量/力/维里累加用 double；最大邻居数写在 nep.txt 中，代码放大 1.25 倍分配，径向不得超过 819。",
+    "检测到多块 GPU 时自动使用 NEP_MULTIGPU 沿 x/y/z 空间分区；小晶胞走 small-box 路径（主动学习）；CPU / LAMMPS 用户需另装 NEP_CPU。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖径向截断内的邻居（训练默认 8 Å，NEP89 为 6 Å），角向信息只来自更短的 r_c^A（默认 4 Å，NEP89 为 5 Å），截断外的色散尾巴与静电全部缺失。",
+    "训练数据的泛函由用户数据集决定，仓库代码不固定；若数据来自不含色散的泛函，层状材料层间结合、分子晶体、物理吸附应在 run.in 加 dftd3（GPU 版 D3(BJ)，C6 随配位数变化）。",
+    "带电/离子体系、界面电荷转移可用 qNEP（nep4_charge1/2/3）：预测原子电荷 + Ewald/PPPM 长程库仑；但代码把总电荷强制归零，且没有总电荷/自旋输入，净带电体系无法直接描述。",
+    "范德华异质结的层间作用可用官方 NEP + ILP 混合势（nep_ilp）：层内 NEP、层间各向异性 ILP。",
+    "近程强排斥（辐照、高压）依赖可选 ZBL；不开 ZBL 时，网络在训练集外的极短距离上没有物理约束。"
+  ],
+  "downstreamNotes": [
+    "热输运是 NEP 的招牌应用：解析力 + 逐原子维里让 GPUMD 能用多体势热流做 EMD / HNEMD / NEMD 热导率及谱分解。",
+    "大体系长时间 MD：PIMD/TRPMD（核量子效应）、MCMD（偏析）、MSST/NPHug（冲击）、热力学积分（ensemble_ti_nep）等都可直接调用 NEP。",
+    "光谱：TNEP 偶极/极化率模型用于红外/拉曼；qNEP 可输出 Born 有效电荷（bec）。",
+    "声子与弹性：力保守、可做晶格动力学；但余弦截断只保证一阶连续，二阶导在 r_c 处有小跳变，高精度力常数需留意截断设置。",
+    "扩展：ZBL 用于辐照损伤，NEP-Spin 处理磁性，README 还列出粗粒化 NEP-CG 等工作。"
+  ],
+  "strengths": ["推理极快：描述符 + 单隐藏层 + 手写 CUDA，无自动微分开销", "描述符维度与元素数无关，已有 89 元素通用模型 NEP89", "严格局域、多 GPU 空间分区，适合超大体系长时间 MD", "与 GPUMD 深度集成：热输运、PIMD、冲击、MCMD 开箱即用", "变体丰富：ZBL、D3、动态电荷 qNEP、偶极/极化率、自旋"],
+  "weaknesses": ["不变描述符 + 单隐藏层，表达力弱于高体序等变 MPNN", "SNES 无梯度训练需要大量代数，参数规模受限", "基础模型严格局域；qNEP 强制电中性，不能处理净电荷", "依赖 GPU（CUDA/HIP），CPU 推理需单独的 NEP_CPU", "余弦截断仅一阶连续"],
+  "pretrained": ["NEP89（nep89_20250409，89 种元素，无机 + 有机）", "UNEP-v1（16 种金属及其合金，Song 2024）", "C_2024_NEP4 / C_2022_NEP4（碳）", "Si_2022_NEP4_3body / 4body / 5body（硅）", "nep-data 仓库中的其他已发表 NEP 模型"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

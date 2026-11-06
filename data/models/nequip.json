@@ -1,0 +1,204 @@
+{
+  "id": "nequip",
+  "name": "NequIP",
+  "fullName": "NequIP: Neural Equivariant Interatomic Potential",
+  "year": 2022,
+  "authors": "S. Batzner, A. Musaelian, L. Sun, M. Geiger, J. P. Mailoa, M. Kornbluth, N. Molinari, T. E. Smidt, B. Kozinsky",
+  "paper": {"title": "E(3)-equivariant graph neural networks for data-efficient and accurate interatomic potentials", "venue": "Nature Communications 13, 2453 (2022)", "url": "https://www.nature.com/articles/s41467-022-29939-5"},
+  "repos": ["nequip"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "球谐张量积卷积", "Gate 门控非线性", "基础模型 NequIP-OAM", "保守力 + ZBL"],
+  "framework": "PyTorch + e3nn（可选 OpenEquivariance / cuEquivariance 内核）",
+  "license": "MIT（基础模型权重 CC-BY-4.0）",
+  "oneLiner": "最早把 e3nn 的 E(3) 等变张量积用于原子间势的消息传递网络之一：每层在每条边上把“邻居特征 ⊗ 方向球谐”做 Clebsch–Gordan 张量积，权重只由距离决定，再经门控非线性；堆叠多层（基础模型 6 层）逐步扩大感受野与体序，能量对坐标求导得到严格保守的力。",
+  "analogy": "像一群带指南针的传话员：每个原子不仅记下邻居“离我多远”，还把邻居传来的“带方向的信息”（标量、矢量、张量）按严格的旋转规则（CG 系数）与“邻居所在方向”合成。整块结构转一下，这些信息也跟着正确地转，网络不必再从数据里学“旋转不变”，所以用很少的数据就能学准。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（8 个 Bessel × 多项式包络）+ 方向（实球谐 Y_l^m，l ≤ l_max）",
+    "equivariance": "E(3) 等变（e3nn irreps + CG 张量积；预设 parity=False 只保留 0e/1o/2e/3o… 与球谐同宇称的通道）",
+    "lmax": "代码默认 l_max=1；基础模型 L 为 3、XL 为 4（边球谐与隐藏特征共用）",
+    "bodyOrder": "每层消息对邻居特征线性（2 体 + 角度），体序靠多层堆叠 + 门控非线性逐层提升",
+    "layers": "代码默认 4；基础模型 L/XL 为 6（最后一层只输出标量）",
+    "cutoff": "基础模型 6 Å（S 为 4.5 Å）；r_max 须显式设置",
+    "receptiveField": "T × r_max：6 层 × 6 Å ≈ 36 Å",
+    "message": "Σ_j MLP(B(r_ij)) ⊙ [W₁h_j ⊗_CG Y(r̂_ij)] / √n̄（uvu 逐通道路径）→ 线性 W₂ + 自连接 → Gate",
+    "readout": "最后一层 0e 标量 → 无偏置线性层 → 原子能 → 逐元素 scale/shift（+ZBL）→ 求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R；ForceStressOutput 中一次 torch.autograd.grad 同时对坐标与应变求导",
+    "stress": "对称化虚拟应变同时作用于坐标与晶胞，σ = (1/V)∂E/∂ε，维里 W = −σV",
+    "longRange": "无；只有消息传递感受野（T × r_max）",
+    "dispersion": "无内置色散，仓库内也没有 D3 接口；基础模型训练数据为 PBE 级",
+    "chargeSpin": "基础模型无；可用 categorical_graph_field_embed 嵌入整数图级字段（框架预注册 charge/spin 键）",
+    "otherOutputs": "原子能、维里、偏力 PartialForceOutput（∂E_a/∂r_b）、逐边力（LAMMPS ML-IAP）",
+    "strictlyLocal": false,
+    "complexity": "O(T·N·M·C·P_TP)：每层每条边一次 CG 张量积，路径数 P_TP 随 l_max 快速增长",
+    "accel": "OpenEquivariance / cuEquivariance TP-scatter 内核、nequip-compile（AOTInductor）、torch.compile 训练、DDP、LAMMPS pair_nequip_allegro / ML-IAP、ASE、TorchSim"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "基础模型 6 层、l_max=3/4，每层每条边都要做球谐张量积，比 2 层的 MACE 和严格局域的 Allegro 更慢。"},
+    "expressiveness": {"v": 4, "why": "严格等变 + 高 l_max 角分辨率 + 深层网络，精度很高；但每层只做 2 体张量积，不像 MACE/ACE 在单层显式构造高体序。"},
+    "longRange": {"v": 2, "why": "没有色散、静电或电荷模块，只靠 6 层 × 6 Å 的消息传递感受野获得半局域信息。"},
+    "scalability": {"v": 3, "why": "LAMMPS ML-IAP 集成提供逐层 ghost exchange，可多 GPU 空间分解；但每层都需通信，不如严格局域的 Allegro 好切分。"},
+    "physics": {"v": 5, "why": "保守力、多项式包络在 r_max 处平滑归零、原子能求和保证广延性、基础模型叠加 ZBL 近核排斥、张量积严格等变，第 1 层不加自连接以保证孤立原子极限。"},
+    "coverage": {"v": 2, "why": "官方输出能量/原子能/力/应力/维里，外加偏力与边力；没有偶极、电荷、磁矩等额外性质头。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、原子类型、晶胞",
+      "plain": "输入是 N 个原子的笛卡尔坐标 R、原子类型编号（由元素映射而来）、晶胞矩阵 C 与周期性标志。外层的 ForceStressOutput 在调用能量网络之前先把坐标设为可求导，并把一个全零的 3×3 “虚拟应变”叠加到坐标和晶胞上——后面的力和应力都由这一次准备好的自动微分得到。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{0,1\\}^3",
+      "code": [{"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 175, "end": 191, "must": "pos.requires_grad_(True)", "caption": "ForceStressOutput：坐标打开 requires_grad，并叠加对称化的虚拟应变"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：r_max 内的所有原子对（含周期镜像）",
+      "plain": "用 vesin / matscipy / ASE 任一后端找出距离小于 r_max 的有向原子对，记录 edge_index 与跨越周期边界的整数平移 S。边向量在模型内部由坐标重新计算（r_j − r_i + S·C），因此对坐标和晶胞都可微，这是后面能对它们求导的前提；总代价随原子数线性增长。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_{\\max}\\,\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C",
+      "code": [
+        {"repo": "nequip", "file": "nequip/data/_nl.py", "start": 130, "end": 154, "must": "matscipy_nl(", "caption": "三种近邻表后端：vesin / matscipy / ASE，返回 (i, j, S)"},
+        {"repo": "nequip", "file": "nequip/nn/utils.py", "start": 86, "end": 118, "must": "edge_vec = torch.index_select(pos, 0, edge_index[1])", "caption": "with_edge_vectors_：可微地计算边向量与长度"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：8 个 Bessel 基 × 多项式截断包络",
+      "plain": "距离先除以 r_max 归一化为 x，再展开成 8 个正弦型 Bessel 函数（代码用 torch.sinc 实现，再乘常数因子 2π/r_max² 与旧版 NequIP 保持一致），并乘上 DimeNet 式多项式包络 f_cut(x)。包络在 x=1 处函数值和低阶导数都为零，原子进出截断球时能量和力都连续，MD 不会因此“跳变”。",
+      "math": "B_n(r)=\\frac{2}{r_{\\max}}\\,\\frac{\\sin(n\\pi r/r_{\\max})}{r}\\,f_{\\text{cut}}(x),\\quad f_{\\text{cut}}(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_{\\max}}<1",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/embedding/_edge.py", "start": 136, "end": 150, "must": "torch.sinc(x * self.bessel_weights)", "caption": "BesselEdgeLengthEncoding：sinc 形式的 Bessel 基 × 截断包络"},
+        {"repo": "nequip", "file": "nequip/nn/embedding/cutoffs.py", "start": 17, "end": 27, "must": "return out * (x < 1.0)", "caption": "PolynomialCutoff：p 阶多项式包络"},
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 310, "end": 322, "must": "factor=(2 * math.pi) / (r_max * r_max)", "caption": "模型装配：Bessel 编码 + 常数因子 2π/r_max²"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向编码：实球谐函数 Y_l^m(r̂_ij)",
+      "plain": "边的方向用 l = 0…l_max 的实球谐函数编码（e3nn，component 归一化）。球谐在旋转下按 Wigner-D 矩阵精确变换，后续所有由它和 CG 系数组合出的特征都会“跟着结构一起转”，网络天然满足旋转等变，而不必靠数据增强去学。基础模型 L 用 l_max=3，XL 用 l_max=4。",
+      "math": "Y_{l}^{m}(\\hat{\\mathbf r}_{ij}),\\ l\\le l_{\\max};\\qquad Y_l(\\mathbf R\\hat{\\mathbf r})=\\mathbf D^{l}(\\mathbf R)\\,Y_l(\\hat{\\mathbf r})",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/embedding/_edge.py", "start": 187, "end": 198, "must": "edge_sh = self.sh(edge_vec)", "caption": "SphericalHarmonicEdgeAttrs：边向量 → 球谐"},
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 161, "end": 162, "must": "o3.Irreps.spherical_harmonics(lmax=l_max)", "caption": "球谐 irreps 由 l_max 决定"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：原子类型 → 可学习的标量向量",
+      "plain": "每种原子类型查表得到一个可学习的嵌入向量（torch.nn.Embedding，预设 32 维，只含 0e 标量）。它同时作为初始节点特征 h⁽⁰⁾ 和“节点属性” a_i——后者在每层的自连接里与特征做张量积，使更新规则随中心元素而变。可选的 categorical_graph_field_embed 还能把整数型图级字段（如电荷、自旋）嵌入后拼接进来。",
+      "math": "h_i^{(0)}=a_i=\\mathbf E[\\,t(Z_i)\\,]\\in\\mathbb R^{d_{\\text{emb}}}\\quad(0e\\ \\text{only})",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/embedding/node.py", "start": 146, "end": 175, "must": "embedding = self.embed_module(atom_types)", "caption": "NodeTypeEmbed.forward：类型嵌入（可拼接图级字段嵌入）"},
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 292, "end": 296, "must": "type_embed = NodeTypeEmbed(", "caption": "模型装配中的类型嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①：球谐张量积卷积（等变消息）",
+      "plain": "这是 NequIP 的核心。每条边上把邻居特征 h_j（含标量、矢量、张量通道）与方向球谐 Y(r̂_ij) 做 Clebsch–Gordan 张量积，只保留输出落在隐藏 irreps 里的路径；每条路径、每个通道的权重由“Bessel 距离编码 → 单隐层 MLP（宽 128，SiLU）”逐边生成（uvu 模式，通道之间不混合）。所有邻居结果相加，并乘以 1/√(平均邻居数) 稳定数值。距离只进入权重、方向只通过球谐和 CG 系数进入，所以消息严格等变。",
+      "math": "m_{i,c\\,l_3m_3}=\\frac{1}{\\sqrt{\\bar n}}\\sum_{j\\in\\mathcal N(i)}\\sum_{l_1l_2}w^{(l_1l_2\\to l_3)}_{c}(r_{ij})\\sum_{m_1m_2}C^{l_3m_3}_{l_1m_1,l_2m_2}\\,(W_1h_j)_{c\\,l_1m_1}\\,Y_{l_2}^{m_2}(\\hat{\\mathbf r}_{ij}),\\qquad w(r_{ij})=\\mathrm{MLP}\\big(B(r_{ij})\\big)",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/interaction_block.py", "start": 89, "end": 127, "must": "instructions.append((i, j, k, \"uvu\", True))", "caption": "枚举 l_in ⊗ l_edge → l_out 路径（uvu），径向 MLP 输出全部路径权重"},
+        {"repo": "nequip", "file": "nequip/nn/_tp_scatter_base.py", "start": 35, "end": 38, "must": "edge_features = self.tp(x[edge_src], edge_attr, edge_weight)", "caption": "TensorProductScatter：逐边张量积 → scatter 求和到中心原子"},
+        {"repo": "nequip", "file": "nequip/nn/interaction_block.py", "start": 170, "end": 207, "must": "x = self.tp_scatter(", "caption": "InteractionBlock.forward：自连接、linear_1、1/√n̄ 归一化、TP-scatter、linear_2"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②：线性混合 + 自连接 + Gate 门控非线性",
+      "plain": "聚合后的消息经线性层 W₂ 混合通道，再加上自连接 SC（当前特征与元素嵌入 a_i 的全连接张量积，相当于“随元素变化的线性层”）。随后用 e3nn 的 Gate 非线性：标量通道直接过 SiLU（偶）/ tanh（奇），l>0 的矢量/张量通道则乘以由额外标量算出的“门”——只缩放大小、不改方向，因此仍然等变。第 1 层不加自连接（保证孤立原子极限），最后一层只输出标量。",
+      "math": "h_i'=W_2\\,m_i+\\mathrm{SC}(h_i,a_i),\\qquad h_i^{(t+1)}=\\sigma_s\\big(h'_{i,0}\\big)\\ \\oplus\\ \\sigma_g\\big(g_{i,c}\\big)\\,h'_{i,c,\\,l>0},\\quad \\sigma=\\mathrm{SiLU}\\ (\\text{even}),\\ \\tanh\\ (\\text{odd})",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/convnetlayer.py", "start": 94, "end": 112, "must": "equivariant_nonlin = Gate(", "caption": "构造 Gate：标量激活 + 门控 l>0 通道"},
+        {"repo": "nequip", "file": "nequip/nn/convnetlayer.py", "start": 156, "end": 170, "must": "self.equivariant_nonlin(", "caption": "ConvNetLayer.forward：卷积 → 门控非线性（→ 可选残差）"},
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 333, "end": 358, "must": "# to ensure isolated atom limit", "caption": "逐层堆叠 ConvNetLayer；第 1 层关闭自连接"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：只用最后一层的标量通道",
+      "plain": "前 T−1 层的隐藏特征含 l=0…l_max 的各种 irreps，但最后一层被强制只输出 0e 标量（通道数为 num_features[0]）。读出 MLP 默认 0 个隐藏层，即一个无偏置线性层把这些旋转不变量映射成每个原子的能量 E_i。与 MACE 的逐层读出不同，NequIP 只读最后一层。",
+      "math": "E_i^{\\text{NN}}=\\mathbf w^{\\top}h_i^{(T)},\\qquad h_i^{(T)}\\in\\mathbb R^{C_0}\\ (0e\\ \\text{only})",
+      "code": [
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 191, "end": 196, "must": "feature_irreps_hidden_list += [repr(o3.Irreps([(num_features[0], (0, 1))]))]", "caption": "最后一层的输出 irreps 只有标量 0e"},
+        {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 360, "end": 373, "must": "per_atom_energy_readout = ScalarMLP(", "caption": "原子能读出（默认无隐藏层、无偏置）"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：逐元素缩放/平移 + ZBL 排斥 + 求和",
+      "plain": "原子能先按元素做 E_i ← s_Z·E_i + μ_Z（用 addcmul 在 float64 中完成；μ 通常取孤立原子参考能或数据的平均原子能）。基础模型再叠加 ZBL 屏蔽库仑排斥（同样乘多项式包络），防止原子靠得过近时 MD 崩溃。最后对所有原子求和得到总能，“原子能之和”保证了广延性。",
+      "math": "E=\\sum_i\\Big[\\mu_{Z_i}+s_{Z_i}E_i^{\\text{NN}}+\\tfrac12\\sum_{j}\\frac{e^2}{4\\pi\\varepsilon_0}\\frac{Z_iZ_j}{r_{ij}}\\phi(x_{ij})f_{\\text{cut}}\\Big],\\quad \\phi=\\sum_{k=1}^{4}c_ke^{d_kx},\\ x=\\frac{(Z_i^{0.23}+Z_j^{0.23})\\,r}{0.4685}",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/atomwise.py", "start": 243, "end": 274, "must": "torch.addcmul(shifts, scales, in_field)", "caption": "PerTypeScaleShift：逐元素 scale/shift"},
+        {"repo": "nequip", "file": "nequip/nn/pair_potential.py", "start": 262, "end": 270, "must": "eng = qqr2exesquare * ((Zi * Zj) / r) * psi", "caption": "ZBL 屏蔽库仑势（LAMMPS pair_zbl 常数）"},
+        {"repo": "nequip", "file": "nequip/model/energy_modules.py", "start": 15, "end": 35, "must": "total_energy_sum = AtomwiseReduce(", "caption": "先加 pair potential，再对原子能求和"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分",
+      "plain": "能量网络跑完后，用一次 torch.autograd.grad 同时对坐标和虚拟应变求导，取负号得到力。力严格是能量的负梯度（保守），NVE 下能量守恒、声子与弹性常数自洽；训练时 create_graph=True，使力误差能反传到参数。代价是一次反向传播，开销与前向同量级。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [{"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 214, "end": 229, "must": "forces = torch.neg(forces)", "caption": "ForceStressOutput：autograd 求力"}]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对对称化虚拟应变求导",
+      "plain": "构造全零 3×3 位移张量并对称化（去掉对应无穷小转动的反对称部分），同时作用于坐标与晶胞；能量对它的梯度就是维里，除以晶胞体积 |det C| 得应力，并按惯例存出 virial = −σV。零体积（非周期）帧的应力置为 NaN，便于混合批处理。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0},\\quad \\mathbf W=-V\\boldsymbol\\sigma",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 150, "end": 177, "must": "symmetric_displacement = 0.5 * (", "caption": "构造并对称化虚拟应变"},
+        {"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 236, "end": 268, "must": "volume = torch.linalg.det(cell).abs()", "caption": "维里 / 体积 → 应力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：偏力与逐边力",
+      "plain": "PartialForceOutput 用 jacobian 求每个原子能 E_a 对每个坐标 r_b 的导数，得到“偏力”矩阵，可用来分析力由哪些原子贡献，其对 a 求和即总力。LAMMPS ML-IAP 推理分支则直接对边向量求导得到逐边力，交给 LAMMPS 组装原子力与维里。NequIP 本身没有偶极、电荷、磁矩等额外读出头。",
+      "math": "F^{\\text{partial}}_{ab}=-\\frac{\\partial E_a}{\\partial\\mathbf r_b},\\quad \\mathbf F_b=\\sum_a F^{\\text{partial}}_{ab};\\qquad \\mathbf f_{ij}=\\frac{\\partial E}{\\partial\\mathbf r_{ij}}",
+      "code": [
+        {"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 47, "end": 72, "must": "torch.autograd.functional.jacobian(", "caption": "PartialForceOutput：原子能对坐标的 Jacobian"},
+        {"repo": "nequip", "file": "nequip/nn/grad_output.py", "start": 289, "end": 304, "must": "edge_forces = torch.autograd.grad(", "caption": "对边向量求导得到逐边力（LAMMPS ML-IAP）"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "r_max", "value": "6.0 Å（L/XL 基础模型）；S 为 4.5 Å", "note": "截断半径；预设不设置，需显式给出", "code": {"repo": "nequip", "file": "docs/guide/configuration/model.md", "start": 25, "end": 26, "must": "4.5 Å for `S` and 6 Å for the larger sizes"}},
+    {"name": "num_layers", "value": "6（L/XL 预设）；代码默认 4", "note": "交互块层数，最后一层只输出标量", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 41, "end": 50, "must": "\"num_layers\": 6"}},
+    {"name": "l_max", "value": "3（L）/ 4（XL）；代码默认 1", "note": "边球谐与隐藏特征的最高阶", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 41, "end": 50, "must": "\"l_max\": 4"}},
+    {"name": "num_features", "value": "L: [128, 64, 32, 32]；XL: [320, 96, 64, 32, 32]", "note": "各阶 l 的通道数（0e, 1o, 2e, 3o, …）", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 41, "end": 50, "must": "\"num_features\": [128, 64, 32, 32]"}},
+    {"name": "parity", "value": "False（预设）；代码默认 True", "note": "只保留与球谐同宇称的 irreps，文档称显著提速、精度损失小", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 53, "end": 58, "must": "\"parity\": False"}},
+    {"name": "type_embed_num_features", "value": "32（预设）；Matbench 模型卡记录 OAM-L 为 48", "note": "元素嵌入维度", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 53, "end": 58, "must": "\"type_embed_num_features\": 32"}},
+    {"name": "radial MLP", "value": "depth 1 × width 128（SiLU，无偏置）", "note": "Bessel 编码 → 张量积逐边权重", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 53, "end": 58, "must": "\"radial_mlp_width\": 128"}},
+    {"name": "num_bessels", "value": "8（默认不可训练）", "note": "Bessel 径向基个数", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 230, "end": 233, "must": "num_bessels: int = 8"}},
+    {"name": "polynomial_cutoff_p", "value": "代码默认 6；基础模型配置为 5", "note": "多项式包络阶数", "code": {"repo": "matbench-discovery", "file": "models/nequip/nequip-oam-l-0.1.yml", "start": 83, "end": 95, "must": "polynomial_cutoff: 5"}},
+    {"name": "nonlinearity", "value": "gate：偶宇称 SiLU / 奇宇称 tanh", "note": "等变门控非线性", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 249, "end": 252, "must": "convnet_nonlinearity_type: str = \"gate\""}},
+    {"name": "readout_mlp_hidden_layers_depth", "value": "0（线性读出）", "note": "原子能读出 MLP 隐藏层数", "code": {"repo": "nequip", "file": "nequip/model/nequip_models.py", "start": 225, "end": 228, "must": "readout_mlp_hidden_layers_depth: int = 0"}},
+    {"name": "参数量 / ZBL", "value": "OAM-L 约 9.6M、OAM-XL 约 32.1M；zbl_potential: true", "note": "Matbench Discovery 模型卡", "code": {"repo": "matbench-discovery", "file": "models/nequip/nequip-oam-l-0.1.yml", "start": 55, "end": 62, "must": "model_params: 9600000"}}
+  ],
+  "speedNotes": [
+    "FLOPs 几乎都花在每层每条边的 CG 张量积上（∝ 层数 × 边数 × 通道 × 路径数）；基础模型 6 层、l_max=3/4，比只有 2 层的 MACE 更深，单原子推理更贵。",
+    "parity=False 只保留与球谐同宇称的通道，文档称可显著提速且精度损失很小；S/M/L/XL 预设（2–6 层、l_max 1–4）构成速度—精度阶梯，S 还用更短的 4.5 Å 截断。",
+    "OpenEquivariance / cuEquivariance 修饰器把“张量积 + scatter”融合成 GPU 内核，配合 nequip-compile 的 AOTInductor 编译是官方推荐的推理加速；训练可用 torch.compile、TF32/bf16 混合精度与 DDP 多 GPU。",
+    "力和应力共用一次 autograd 反传（同时对坐标与应变求导）；LAMMPS ML-IAP 路径改为对边向量求导，再由 LAMMPS 组装力。",
+    "Matbench Discovery 模型卡：OAM-L 约 9.6M 参数（4×H100，每卡 100 h），OAM-XL 约 32.1M 参数（8×H100，每卡 300 h）。"
+  ],
+  "weakNotes": [
+    "截断 r_max=6 Å，6 层消息传递让能量最多依赖约 36 Å 内的原子；但网络中没有任何显式的 r⁻⁶ 色散或 r⁻¹ 静电项，感受野外的长程尾巴完全缺失。",
+    "基础模型训练数据为 OMat24 / sAlex / MPtrj（PBE/PBE+U 级计算），本身几乎不含 vdW，层状材料层间结合、分子晶体、物理吸附会被低估。",
+    "仓库内没有 D3/D4 色散接口，需要用户在 ASE 等外部框架里自行叠加色散校正。",
+    "没有总电荷/自旋输入（框架虽可用 categorical_graph_field_embed 嵌入整数图级字段，但基础模型未使用），带电缺陷、离子液体、电化学界面等体系风险较大。",
+    "ZBL 先验只修正极短程的核间排斥（防止原子“穿透”），与弱相互作用无关。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 多项式平滑包络 → 力和二阶导连续，适合声子与热导率：Matbench Discovery κ_SRME 为 NequIP-MP-L 0.4659、OAM-L 0.1657、OAM-XL 0.1252。",
+    "几何优化与稳定性预测：Matbench Discovery 全测试集 F1 = 0.752（MP-L）/ 0.87（OAM-L）/ 0.885（OAM-XL），弛豫结构 RMSD 0.0856 / 0.0647 / 0.063。",
+    "原生应力与维里 → NPT MD、状态方程、弹性常数；ZBL 先验提高高温、高压 MD 的鲁棒性。",
+    "可通过 ASE、LAMMPS（pair_nequip_allegro / ML-IAP）、TorchSim 直接跑 MD；基础模型可在小数据集上微调（官方 fine-tuning 文档）。",
+    "没有偶极/极化率/磁矩读出头，红外/拉曼光谱和磁性体系需另行扩展。"
+  ],
+  "strengths": ["严格 E(3) 等变，数据效率高（论文标题即 data-efficient）", "保守力、平滑截断、ZBL 先验，物理约束齐全", "OAM-XL 在 Matbench Discovery 上 κ_SRME 低至 0.1252", "工程栈成熟：编译推理、OpenEquivariance/cuEq 内核、LAMMPS ML-IAP 多 GPU、ASE/TorchSim", "S/M/L/XL 预设便于在速度与精度间取舍"],
+  "weaknesses": ["6 层 + 高 l_max 张量积，推理比 MACE / Allegro 慢", "消息传递使空间分解需要逐层 ghost 通信", "无色散、静电与电荷/自旋输入", "每层只做 2 体张量积，体序靠堆层而非显式构造", "除 E/F/S 外几乎没有额外性质输出"],
+  "pretrained": ["NequIP-OAM-S / M / L / XL（nequip.net；OMat24 预训练 → sAlex + MPtrj 微调）", "NequIP-MP-L（仅 MPtrj，Matbench “compliant” 模型）"],
+  "mbdKeys": ["nequip-mp-l-0.1", "nequip-oam-l-0.1", "nequip-oam-xl-0.1"],
+  "arenaKeys": ["NequIP-OAM-L"]
+}

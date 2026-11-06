@@ -1,0 +1,206 @@
+{
+  "id": "gap",
+  "name": "GAP",
+  "fullName": "GAP: Gaussian Approximation Potential（SOAP 核 + 稀疏高斯过程回归）",
+  "year": 2010,
+  "authors": "A. P. Bartók, M. C. Payne, R. Kondor, G. Csányi",
+  "paper": {"title": "Gaussian Approximation Potentials: The Accuracy of Quantum Mechanics, without the Electrons", "venue": "Phys. Rev. Lett. 104, 136403 (2010)；SOAP：Phys. Rev. B 87, 184115 (2013)", "url": "https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.104.136403"},
+  "repos": ["GAP"],
+  "family": "linear-kernel",
+  "tags": ["SOAP 功率谱", "稀疏高斯过程", "多项式点积核", "预测方差/不确定度", "严格局域", "2b+3b+SOAP 组合"],
+  "framework": "Fortran 90（QUIP/libAtoms 插件；Python 接口 quippy）",
+  "license": "ASL 学术许可（非商用）",
+  "oneLiner": "GAP 不训练神经网络，而是做“核回归”：先用 SOAP 把每个原子的邻居密度变成旋转不变的功率谱指纹 q，再与训练集中挑出的 M 个代表性环境 q_s 比相似度 (q·q_s)^ζ，按稀疏高斯过程学到的权重 α_s 加权求和得到原子能，同时还能给出预测方差。",
+  "analogy": "像一位二手车估价师：手里有几千辆“标杆车”的档案（稀疏点），每辆都标好了权重价（α）。来了一辆新车，他逐一比较它和每辆标杆车有多像（核函数），越像的标杆贡献越大，加起来就是估价（原子能）。如果新车和所有档案都不像，他会直说“这辆我没把握”——这就是 GAP 自带的预测方差。",
+  "arch": {
+    "geometry": "邻居距离与方向：高斯原子密度在径向基 g_n(r) × 球谐 Y_lm 上展开（SOAP）；另有 2 体 r_ij、3 体 (r_ij+r_ik, (r_ij−r_ik)², r_jk) 描述符",
+    "equivariance": "旋转/平移/置换不变（功率谱对 m 求和消去旋转，输出均为标量）",
+    "lmax": "SOAP 的 l_max 必填、无默认；文档示例 l_max=6，hybrid-md 预设 3/4/6",
+    "bodyOrder": "功率谱为 3 体（中心+2 邻居）密度关联；核 (q·q_s)^ζ（文档 ζ=4）与归一化进一步提高体序；常叠加显式 2 体/3 体项",
+    "layers": "无层：一次描述符计算 + 一次核回归",
+    "cutoff": "SOAP cutoff 必填（文档示例 5.0 Å）；过渡宽度代码默认 0.5 Å（示例 1.0 Å）",
+    "receptiveField": "单个原子能只依赖 r_c 内的邻居；文档指出原子间有效作用范围为 2r_c",
+    "message": "无消息传递：ρ_i = Σ_j f_cut(r_ij)·高斯(σ_at) → 展开系数 c_nlm → 功率谱 p_nn'l → 归一化 q_i",
+    "readout": "稀疏 GP 均值：ε(q_i)=Σ_s α_s δ²(q_i·q_s)^ζ；2b/3b 项用 ARD 高斯核并乘截断函数",
+    "forces": "conservative",
+    "forcesDetail": "解析链式法则 F = −Σ(∂ε/∂q)·(∂q/∂r)；∂q/∂r 在 soap_calc 中解析计算（含归一化投影）；训练时力作为能量导数观测",
+    "stress": "维里 W = −Σ_n (∂E/∂r_n)⊗r_n（邻居镜像坐标）；训练时以 grad_data·pos 作为维里观测",
+    "longRange": "无；只能用 baseline 势（core_param_file，任意 QUIP 势）叠加：energy = baseline + GAP + e0",
+    "dispersion": "无内置；靠训练泛函（如更新版 C 势用 optB88-vdW）或 baseline 势",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "预测方差及其梯度（不确定度）；可拟合局域性质 local_property；训练可加入 Hessian 观测",
+    "strictlyLocal": true,
+    "complexity": "预测 O(N·[M_nb·n_max(l_max+1)² + d·M_sp])，d≈(l_max+1)(n_max·S)²/2；力另需 O(N·M_nb·d)；训练 QR ∝ N_obs·M_sp²",
+    "accel": "仅 CPU：OpenMP（描述符/预测）、MPI+ScaLAPACK 分布式 QR 拟合；经 QUIP 接入 LAMMPS 与 ASE（quippy）"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "无 GPU 实现，每个原子要与数千个稀疏点做高维点积，力还需描述符对每个邻居的导数；在描述符/核模型中属于最慢的一类，明显慢于 ACE、SNAP、NEP。"},
+    "expressiveness": {"v": 4, "why": "SOAP 角分辨率高，ζ 次核与归一化提升有效体序，非参数核 + 数千稀疏点很灵活；但功率谱本身只是 3 体关联，存在不完备性。"},
+    "longRange": {"v": 2, "why": "本身严格局域；官方唯一通道是 baseline 势相加（energy = baseline + GAP + e0），没有内置静电/色散。"},
+    "scalability": {"v": 4, "why": "严格局域，可经 QUIP 在 LAMMPS 中做空间分解并行；但仅 CPU，且训练求解随稀疏点数平方增长。"},
+    "physics": {"v": 4, "why": "保守力、余弦平滑截断（一阶导连续）、e0 孤立原子参考能、可用 2 体项或 baseline 提供近程排斥；远离训练数据时核值趋零，缺乏物理外推保证。"},
+    "coverage": {"v": 3, "why": "E/F/维里之外，官方提供预测方差（含梯度）和局域性质拟合；无偶极、极化率、磁矩等张量输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：构型 + 训练数据（扩展 XYZ）",
+      "plain": "预测时输入是原子坐标、元素与周期晶胞；拟合时每个构型可附带能量（eV）、力（eV/Å）、维里（eV，即应力×体积），也可只给一部分。gap_fit 先从能量中扣除孤立原子能 e0（以及可选的 baseline 势），只让 GAP 学习剩下的“结合能”部分。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\},\\ \\mathbf C;\\qquad \\mathbf y=\\Big\\{E-\\textstyle\\sum_i e_0(Z_i)-E_{\\text{baseline}},\\ \\ \\partial E/\\partial\\mathbf r=-\\mathbf F,\\ \\ -\\mathbf W\\Big\\}",
+      "code": [
+        {"file": "doc_src/gap_fit.rst", "start": 28, "end": 37, "must": "eV/A and the virial stress in units of eV", "caption": "文档：能量/力/维里的单位与符号约定"},
+        {"file": "gap_fit_module.F90", "start": 243, "end": 245, "must": "energy = baseline + GAP + e0", "caption": "e0 参数：energy = baseline + GAP + e0"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：截断半径内的邻居（含周期镜像）",
+      "plain": "对每个中心原子 i，遍历 libAtoms 邻居表中距离小于 r_c 的原子 j（周期体系含镜像，坐标为 pos + lattice·shift）。邻居按元素映射到各自的密度通道；需要力时同时记下邻居编号和镜像坐标，后面求导数和维里都要用。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ r_{ij}=\\lVert\\mathbf r_j+\\mathbf C\\mathbf S_{ij}-\\mathbf r_i\\rVert<r_c\\,\\}",
+      "code": [
+        {"file": "descriptors.F90", "start": 8389, "end": 8404, "must": "i_species = species_map(at%Z(j))", "caption": "soap_calc：遍历截断内邻居，记录编号与镜像坐标"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何：高斯“原子云”密度 + 余弦平滑截断",
+      "plain": "SOAP 把每个邻居换成宽度 σ_at 的三维高斯，叠加成中心原子周围的“邻居密度” ρ_i（中心原子自身按 central_weight 计入）。每个邻居的贡献乘以截断函数 f_cut：r_c−w 以内为 1，过渡区按余弦平滑降到 0（coordination_function 由 libAtoms 提供，本仓库只调用），保证原子进出截断球时能量和力都连续。高斯与径向基的重叠积分可解析求出：指数因子乘修正球贝塞尔函数 i_l，代码用递推计算。",
+      "math": "\\rho_i(\\mathbf r)=w_c e^{-\\alpha r^2}+\\sum_{j}f_{\\text{cut}}(r_{ij})\\,e^{-\\alpha\\lvert\\mathbf r-\\mathbf r_{ij}\\rvert^2},\\ \\ \\alpha=\\frac{1}{2\\sigma_{\\text{at}}^2};\\qquad f_{\\text{cut}}(r)=\\tfrac12\\Big[1+\\cos\\frac{\\pi(r-r_c+w)}{w}\\Big]\\ \\ (r_c-w<r<r_c)",
+      "code": [
+        {"file": "descriptors.F90", "start": 8406, "end": 8436, "must": "f_cut = coordination_function(r_ij, this%cutoff, this%cutoff_transition_width)", "caption": "截断函数 + 高斯重叠积分（修正球贝塞尔递推）"},
+        {"file": "descriptors.F90", "start": 2605, "end": 2621, "must": "this%alpha = 0.5_dp / this%atom_sigma**2", "caption": "soap_initialise：α=1/(2σ²)，等距高斯径向基中心"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符 ①：把邻居密度展开成 c_nlm（径向基 × 球谐）",
+      "plain": "把 ρ_i 投影到“径向基 g_n(r) × 球谐 Y_lm”上得到系数 c_nlm——相当于把邻居云按“多远”（n ≤ n_max）和“哪种角度模式”（l ≤ l_max）分解。默认径向基是在 [0, r_c+若干σ] 上等距排布的高斯（EQUISPACED_GAUSS），再经正交化矩阵 W 变换；多元素体系中每种邻居元素各有一套通道。所有操作都只是对邻居求和，代价 ∝ 邻居数。",
+      "math": "c^{(i)}_{nlm}=\\sum_{j\\in\\mathcal N(i)}f_{\\text{cut}}(r_{ij})\\,g_{nl}(r_{ij})\\,Y_{lm}(\\hat{\\mathbf r}_{ij}),\\qquad g_{nl}(r)=\\sum_{a}e^{-\\alpha(r^2+r_a^2)}\\,i_l(2\\alpha r r_a)\\,W_{an}",
+      "code": [
+        {"file": "descriptors.F90", "start": 8462, "end": 8497, "must": "radial_coefficient = matmul( radial_fun, this%transform_basis )", "caption": "径向系数 × 截断 × 球谐，累加到 X_r/X_i（c_nlm 实部/虚部）"},
+        {"file": "descriptors.F90", "start": 8375, "end": 8384, "must": "this%central_weight * real(radial_coefficient(0,a)", "caption": "中心原子自身的高斯（central_weight）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符 ②：功率谱 p_nn'l 与归一化（旋转不变指纹）",
+      "plain": "旋转会让同一 l 内的 2l+1 个 c_nlm 互相混合，但组合 Σ_m c_nlm c*_n'lm 不变——这就是功率谱 p_nn'l，SOAP 指纹的本体。它是密度的二次量，相当于同时看中心原子和两个邻居（3 体）。代码对每个 l 用一次 dgemm 得到全部 (n,n') 组合，非对角项乘 √2，最后把整个向量归一化为单位长度，使两个相同环境的核值恰好为 1。",
+      "math": "p^{(i)}_{nn'l}=\\sum_{m=-l}^{l}c^{(i)}_{nlm}\\,\\big(c^{(i)}_{n'lm}\\big)^{*},\\qquad \\mathbf q_i=\\frac{\\mathbf p_i}{\\lVert\\mathbf p_i\\rVert}",
+      "code": [
+        {"file": "descriptors.F90", "start": 8575, "end": 8618, "must": "descriptor_i(i_pow) = Pl(ia, jb)", "caption": "Pl = X_rᵀX_r + X_iᵀX_i，按 (l, n, n') 展开成描述符"},
+        {"file": "descriptors.F90", "start": 8651, "end": 8661, "must": "descriptor_out%x(i_desc_i)%data = descriptor_i / norm_descriptor_i", "caption": "归一化（normalise=T 默认）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符 ③：显式 2 体 / 3 体项与 SOAP 叠加",
+      "plain": "实际的 GAP 势通常是几个描述符之和：2 体项（distance_2b 或 distance_Nb order=2，描述符就是 r_ij 的幂）负责近程排斥和键长，3 体项（angle_3b：r_ij+r_ik、(r_ij−r_ik)²、r_jk）负责键角，SOAP 负责剩下的多体效应。低体序项用 ARD 高斯核，并乘以各键截断函数之积；文档示例就是“2 体 + SOAP”的组合。",
+      "math": "q^{(2b)}_{ij}=r_{ij}^{\\,p},\\quad \\mathbf q^{(3b)}_{ijk}=\\big(r_{ij}+r_{ik},\\,(r_{ij}-r_{ik})^2,\\,r_{jk}\\big);\\qquad k_{\\text{SE}}(\\mathbf x,\\mathbf x')=\\delta^2\\exp\\Big[-\\tfrac12\\sum_d\\frac{(x_d-x'_d)^2}{\\theta_d^2}\\Big]",
+      "code": [
+        {"file": "descriptors.F90", "start": 4929, "end": 4957, "must": "descriptor_out%x(i_desc)%data(:) = r_ij**this%exponents", "caption": "distance_2b：每个原子对一个描述符 + 截断权重"},
+        {"file": "descriptors.F90", "start": 5260, "end": 5275, "must": "descriptor_out%x(i_desc)%data(2) = (r_ij - r_ik)**2", "caption": "angle_3b：三元组描述符，截断权重 fc_j·fc_k"},
+        {"file": "doc_src/gap_fit.rst", "start": 160, "end": 185, "must": "distance_Nb", "caption": "文档示例：2 体 (ard_se) + SOAP (dot_product, ζ=4) 组合"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：与 M 个稀疏点比相似度（核函数）",
+      "plain": "GAP 的读出是高斯过程的后验均值：局域能 = 新环境 q 与 M 个代表性环境（稀疏点 q_s）的核值按 α_s 加权求和。SOAP 用多项式点积核 δ²(q·q_s)^ζ：q 已归一化，q·q_s 就像两个环境之间夹角的余弦，相同环境为 1，ζ 越大越“挑剔”。代码对全部稀疏点只做一次 dgemv 再逐元素取 ζ 次幂；δ（energy_scale）是该项能量的典型尺度。",
+      "math": "\\varepsilon(\\mathbf q)=\\sum_{s=1}^{M}\\alpha_s\\,k(\\mathbf q,\\mathbf q_s),\\qquad k_{\\text{SOAP}}(\\mathbf q,\\mathbf q_s)=\\delta^2\\,(\\mathbf q\\cdot\\mathbf q_s)^{\\zeta}",
+      "code": [
+        {"file": "gp_predict.F90", "start": 3753, "end": 3774, "must": "k(:) = this%delta**2 * fast_pow_1d(covariance_x_xStars(:), this%zeta)", "caption": "gpCoordinates_Predict：点积核（dgemv + 快速幂）"},
+        {"file": "gp_predict.F90", "start": 3787, "end": 3817, "must": "exp( -0.5_dp * dot_product(xI_xJ_theta,xI_xJ_theta) )", "caption": "ARD_SE 高斯核（2b/3b 描述符），乘稀疏点截断 fc_i"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "训练：挑稀疏点、解正则化最小二乘得到 α",
+      "plain": "先从所有原子环境中挑出 M 个稀疏点（sparse_method，默认 RANDOM，SOAP 常用 CUR_POINTS）。能量、力、维里都写成“对局域能的线性泛函”（力行是核对坐标的导数），组成 K_NM；每个观测按其误差 σ（default_sigma）加权，Λ=diag(σ²)。代码把 Λ^{-1/2}K_NM 与 K_MM 的 Cholesky 因子上下拼接，用 QR 解最小二乘（数值更稳，另有 ScaLAPACK 分布式版本）。",
+      "math": "\\boldsymbol\\alpha=\\big(\\mathbf K_{MM}+\\mathbf K_{MN}\\boldsymbol\\Lambda^{-1}\\mathbf K_{NM}\\big)^{-1}\\mathbf K_{MN}\\boldsymbol\\Lambda^{-1}\\mathbf y\\ \\Leftrightarrow\\ \\min_{\\boldsymbol\\alpha}\\Big\\lVert\\begin{bmatrix}\\boldsymbol\\Lambda^{-1/2}\\mathbf K_{NM}\\\\ \\mathbf U\\end{bmatrix}\\boldsymbol\\alpha-\\begin{bmatrix}\\boldsymbol\\Lambda^{-1/2}\\mathbf y\\\\ \\mathbf 0\\end{bmatrix}\\Big\\rVert^2,\\ \\ \\mathbf U^{\\top}\\mathbf U=\\mathbf K_{MM}",
+      "code": [
+        {"file": "gap_fit_module.F90", "start": 565, "end": 573, "must": "'sparse_method', 'RANDOM'", "caption": "稀疏点数量与选取方法"},
+        {"file": "gp_predict.F90", "start": 807, "end": 851, "must": "a(n_globalY+1:,:) = factor_c_subYsubY", "caption": "gpSparse_fit：拼接 [Λ^{-1/2}K_NM ; chol(K_MM)] 供 QR 求解"},
+        {"file": "gp_predict.F90", "start": 1810, "end": 1830, "must": "this%sigma_yPrime(i_yPrime)**2", "caption": "Λ：每个能量/导数观测的 σ²"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：各描述符局域能之和 + e0 + baseline",
+      "plain": "对每个描述符实例（SOAP：每个原子；2 体：每个原子对；3 体：每个三元组）算一次 ε 并乘以它的截断权重，再全部相加，最后加回孤立原子能 e0 和（若有）baseline 势。能量是局域项之和，因此严格广延、可按原子分解。逐原子求和与力的组装在 QUIP 的势接口中完成（不在本仓库）；训练端用同样的“描述符 + 截断权重”写法登记能量观测。",
+      "math": "E=\\sum_{d}\\sum_{\\xi\\in d}f_c(\\xi)\\,\\varepsilon_d(\\mathbf q_\\xi)+\\sum_i e_0(Z_i)+E_{\\text{baseline}}",
+      "code": [
+        {"file": "gp_predict.F90", "start": 3853, "end": 3864, "must": "gpCoordinates_Predict = dot_product( k, this%alpha )", "caption": "ε = k·α，并按需给出 ∂ε/∂q"},
+        {"file": "gap_fit_module.F90", "start": 1285, "end": 1290, "must": "cutoff_in=my_descriptor_data%x(i)%covariance_cutoff, current_y=ie", "caption": "训练：每个描述符实例带截断权重计入构型能量"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：核导数 × 描述符导数（解析链式法则）",
+      "plain": "力是总能对坐标的负梯度，由两部分相乘：核对描述符的导数（点积核为 δ²ζΣα_s(q·q_s)^{ζ−1}q_s，代码先把 α 缩放成 alpha_scaled，再一次 dgemv 得到），以及描述符对每个邻居坐标的导数（soap_calc 中解析算出，含归一化的投影项；中心原子的导数等于各邻居导数之和的负值，保证平移不变）。训练时力也作为“能量导数观测”进入 GP，所以力严格保守。",
+      "math": "\\mathbf F_k=-\\sum_{\\xi}\\frac{\\partial\\varepsilon}{\\partial\\mathbf q_\\xi}\\cdot\\frac{\\partial\\mathbf q_\\xi}{\\partial\\mathbf r_k},\\quad \\frac{\\partial\\varepsilon}{\\partial\\mathbf q}=\\delta^2\\zeta\\sum_s\\alpha_s(\\mathbf q\\cdot\\mathbf q_s)^{\\zeta-1}\\mathbf q_s,\\quad \\frac{\\partial\\mathbf q}{\\partial\\mathbf r}=\\frac{1}{\\lVert\\mathbf p\\rVert}\\big(\\mathbf 1-\\mathbf q\\mathbf q^{\\top}\\big)\\frac{\\partial\\mathbf p}{\\partial\\mathbf r}",
+      "code": [
+        {"file": "gp_predict.F90", "start": 3766, "end": 3773, "must": "alpha_scaled(:) = this%alpha(:) * this%delta**2 * this%zeta", "caption": "核导数：α 预缩放后一次 dgemv 得 ∂ε/∂q"},
+        {"file": "descriptors.F90", "start": 8794, "end": 8807, "must": "c_tmp = matmul(descriptor_i,grad_descriptor_i) / norm_descriptor_i**2", "caption": "归一化描述符的梯度；中心原子 = −Σ 邻居"},
+        {"file": "gap_fit_module.F90", "start": 1311, "end": 1326, "must": "force_loc(k,j), xloc(i), dcutoff_in=", "caption": "训练：力作为描述符梯度的线性泛函"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力 / 维里：描述符导数 × 镜像坐标",
+      "plain": "维里由同一组描述符导数乘以邻居（周期镜像）的笛卡尔坐标求和得到，除以体积即应力（注意 QUIP 与 VASP 的应力符号约定相反）。训练端代码直接体现了这一点：每个维里分量的观测是 grad_data·pos(l) 的线性组合，目标值为 −virial。文档强调维里对弹性常数很重要：各向同性形变下力恒为零，只有维里能提供曲率信息。",
+      "math": "W_{\\alpha\\beta}=-\\sum_{\\xi}\\sum_{n\\in\\xi}\\frac{\\partial\\varepsilon}{\\partial\\mathbf q_\\xi}\\cdot\\frac{\\partial\\mathbf q_\\xi}{\\partial r_{n,\\alpha}}\\,r_{n,\\beta},\\qquad \\boldsymbol\\sigma=\\mathbf W/V\\ (\\text{QUIP sign convention})",
+      "code": [
+        {"file": "gap_fit_module.F90", "start": 1328, "end": 1344, "must": "grad_data(:,k,n)*pos(l)", "caption": "维里观测 = Σ 描述符梯度 × 镜像坐标"},
+        {"file": "gap_fit_module.F90", "start": 1243, "end": 1263, "must": "-virial(l,k)", "caption": "维里对称化后作为导数观测（目标 −virial）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "附加输出：预测方差（模型“没把握”的程度）",
+      "plain": "高斯过程天然给出不确定度：用稀疏点之间的核矩阵 K_MM，预测方差 = 先验方差（δ²+f0²+正则项²）减去 k*ᵀK_MM⁻¹k*。新环境离所有稀疏点都很远时 k* 很小，方差接近先验值，提示“正在外推”。代码还给出方差对描述符的梯度，可用于主动学习或偏置采样。",
+      "math": "\\sigma_*^2(\\mathbf q)=\\delta^2+f_0^2+\\rho^2-\\mathbf k_*^{\\top}\\mathbf K_{MM}^{-1}\\mathbf k_*,\\qquad \\nabla_{\\mathbf q}\\sigma_*^2=-2\\,(\\nabla_{\\mathbf q}\\mathbf k_*)^{\\top}\\mathbf K_{MM}^{-1}\\mathbf k_*",
+      "code": [
+        {"file": "gp_predict.F90", "start": 3866, "end": 3880, "must": "variance_estimate = diag_covariance - dot_product(k,k_mm_k)", "caption": "预测方差及其梯度"},
+        {"file": "gp_predict.F90", "start": 4005, "end": 4016, "must": "k_mm = fast_pow_2d(k_mm, this%zeta)", "caption": "方差所需的稀疏点核矩阵 K_MM"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff (SOAP)", "value": "必填，无默认；文档示例 5.0 Å", "note": "截断半径", "code": {"file": "descriptors.F90", "start": 2512, "end": 2513, "must": "'cutoff', PARAM_MANDATORY"}},
+    {"name": "cutoff_transition_width", "value": "0.50 Å（代码默认）；文档示例 1.0 Å", "note": "余弦过渡区宽度 w", "code": {"file": "descriptors.F90", "start": 2512, "end": 2513, "must": "'cutoff_transition_width', '0.50'"}},
+    {"name": "l_max / n_max", "value": "必填；文档示例 l_max=6, n_max=12", "note": "角/径向基数目（hybrid-md 预设 3/6、4/8、6/12）", "code": {"file": "doc_src/gap_fit.rst", "start": 172, "end": 175, "must": "l_max=6 n_max=12"}},
+    {"name": "atom_sigma", "value": "必填；文档示例 0.5 Å", "note": "原子高斯宽度 σ_at", "code": {"file": "descriptors.F90", "start": 2519, "end": 2521, "must": "'atom_gaussian_width', PARAM_MANDATORY"}},
+    {"name": "zeta (soap_exponent)", "value": "代码默认 1.0；文档与预设均用 4", "note": "点积核的幂次 ζ", "code": {"file": "gap_fit_module.F90", "start": 601, "end": 605, "must": "'soap_exponent', '1.0'"}},
+    {"name": "delta (energy_scale)", "value": "必填；文档示例 SOAP 0.2 eV、2 体 2.0 eV", "note": "核的能量尺度 δ", "code": {"file": "gap_fit_module.F90", "start": 557, "end": 560, "must": "'energy_scale'"}},
+    {"name": "n_sparse", "value": "代码默认 0（需指定）；文档示例 SOAP 8000、2 体 15", "note": "稀疏点数 M", "code": {"file": "gap_fit_module.F90", "start": 565, "end": 566, "must": "'n_sparse'"}},
+    {"name": "sparse_method", "value": "RANDOM（默认）；SOAP 常用 CUR_POINTS，2 体用 UNIFORM", "note": "稀疏点选取方式", "code": {"file": "gap_fit_module.F90", "start": 571, "end": 573, "must": "'sparse_method', 'RANDOM'"}},
+    {"name": "default_sigma", "value": "必填；文档示例 {0.002 0.2 0.2 0.0}", "note": "能量/力/维里/Hessian 的正则化误差 σ", "code": {"file": "gap_fit_module.F90", "start": 259, "end": 260, "must": "'default_kernel_regularisation', '//MANDATORY//'"}},
+    {"name": "sparse_jitter", "value": "1.0e-10（代码默认）；文档示例 1.0e-8", "note": "K_MM 对角线附加正则", "code": {"file": "gap_fit_module.F90", "start": 265, "end": 266, "must": "'sparse_jitter'"}},
+    {"name": "radial_basis", "value": "EQUISPACED_GAUSS（默认），可选 POLY / GTO", "note": "SOAP 径向基", "code": {"file": "descriptors.F90", "start": 2557, "end": 2560, "must": "this%radial_basis = \"EQUISPACED_GAUSS\""}},
+    {"name": "central_weight / normalise", "value": "1.0 / T", "note": "中心原子高斯权重；描述符归一化", "code": {"file": "descriptors.F90", "start": 2522, "end": 2530, "must": "'normalise', 'T'"}}
+  ],
+  "speedNotes": [
+    "每个原子的预测开销分三块：密度展开 ∝ 邻居数 × n_max × (l_max+1)²；功率谱 ∝ (n_max·n_species)² × (l_max+1)；核求值 ∝ 稀疏点数 M × 描述符维数 d。M 取数千、d 上千时核求值往往占主导。",
+    "力需要描述符对每个邻居坐标的解析导数（dX_r → grad_data），代价 ∝ 邻居数 × d × 3，通常比能量本身更贵。",
+    "点积核对所有稀疏点只需一次 BLAS dgemv + 快速幂（fast_pow_1d），梯度也是一次 dgemv（α 预缩放为 alpha_scaled）。",
+    "训练构造 (N_obs+M)×M 矩阵并做 QR，代价 ∝ N_obs·M²、内存 ∝ N_obs·M；支持 OpenMP 与 MPI + ScaLAPACK 分布式求解。",
+    "仅 CPU 实现；多元素时 SOAP 维数按 (n_max·n_species)² 增长，可用 tensor-reduction（Z_mix / R_mix / K）压缩。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖 r_c（文档示例 5.0 Å）内的邻居；文档指出原子间有效作用范围为 2r_c（经由中间原子的多体项），更远的色散 r⁻⁶ 尾巴与静电 r⁻¹ 全部被截断。",
+    "没有内置色散、静电，也没有总电荷/自旋输入；训练数据的泛函由用户决定——data.rst 中 a-C 势注明“不含 vdW”，更新的 C 势则改用 optB88-vdW 泛函，在截断内隐式学到色散。",
+    "gap_fit 支持 baseline 势（core_param_file，QUIP 格式），能量 = baseline + GAP + e0，可把长程或近程物理项作为基线、GAP 只拟合残差。",
+    "层间距较大的 vdW 层状材料、分子晶体、物理吸附、带电缺陷、离子液体与界面电荷转移等依赖长程项的体系，单靠 GAP 容易失效，需要 baseline 或其他长程方案。"
+  ],
+  "downstreamNotes": [
+    "能量是 SOAP 的光滑函数、力为解析导数且严格保守，可用于 MD、几何优化与声子；余弦截断只保证一阶导连续，对高阶导数敏感的性质需注意截断参数。",
+    "训练可直接拟合维里与 Hessian（Hessian 协方差用有限差分，hessian_displacement 默认 1.0e-2），有助于弹性常数和振动性质。",
+    "预测方差可用于主动学习；仓库附带的 hybrid_md_package 与 CASTEP 联用做“加速 AIMD”：按设定间隔对比 DFT 与 GAP 的误差（如 ediff 容差），超标就补算 DFT 并重新拟合。",
+    "官方已发布 Si、C、Ge₂Sb₂Te₅、HfO₂、LiCl 熔盐等 GAP 势（见 doc_src/data.rst），多用于非晶、液体与相变研究；但没有偶极/极化率等张量输出，光谱需另建模型。"
+  ],
+  "strengths": ["小数据集上数据效率高，精度可系统提升（加稀疏点/调 l_max、n_max）", "自带贝叶斯不确定度（预测方差及其梯度）", "严格局域、能量可加、力保守，物理图像清晰", "描述符与核可自由组合（2b + 3b + SOAP + baseline）", "大量已发表的单质与化合物 GAP 势"],
+  "weaknesses": ["预测代价 ∝ 稀疏点数，远慢于 ACE/SNAP/NEP，且无 GPU 实现", "训练时间 ∝ N_obs·M²，大数据集、多元素体系难以扩展", "多元素时 SOAP 维数按元素数平方增长", "无长程静电与色散，需靠 baseline", "ASL 许可禁止商用"],
+  "pretrained": ["GAP-18 Si（通用硅势，PRX 2018）", "a-C 非晶碳（PRB 2017）", "C（optB88-vdW，JCP 2020）", "Ge2Sb2Te5", "HfO2 多相", "LiCl / LiCl-KCl 熔盐", "Li@C", "Si:H"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

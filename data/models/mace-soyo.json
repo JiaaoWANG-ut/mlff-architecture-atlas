@@ -1,0 +1,211 @@
+{
+  "id": "mace-soyo",
+  "name": "MACE-SOYO",
+  "fullName": "MACE-SOYO: multi-head MACE-MH-1 variant (attention-style edge weights + equivariant RMSNorm)",
+  "year": 2026,
+  "authors": "Q.-M. Liang, J.-J. Du, Z.-P. Liu（复旦大学）",
+  "paper": {"title": "（仓库 README 与 Matbench Discovery 条目均未给出论文，paper/doi 为空）", "venue": "GitHub 仓库 + Matbench Discovery 提交（2026-10-26）", "url": ""},
+  "repos": ["MACE-SOYO", "mace"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "MACE-MH-1 改进版", "边权注意力 + 等变 RMSNorm", "多头微调", "Muon + WSD 训练", "AOTI / cuEquivariance"],
+  "framework": "PyTorch + cuEquivariance + nvalchemiops（仅 NVIDIA CUDA；AOTInductor 导出推理）",
+  "license": "MIT（代码与权重）",
+  "oneLiner": "在 MACE-MH-1 骨架（512 通道、L≤1、ν=3、2 层、6 Å、ZBL + Agnesi）上做“小手术”：张量积的边权不再只看元素种类，而由两端原子当前的特征 + 距离共同决定（简单注意力），每层入口加等变 RMSNorm、读出更深，并改用 Muon + WSD 学习率训练，配合 AOTI / torch.compile 提速。",
+  "analogy": "MACE 原来像按“元素花名册”分配话筒音量的主持人：两个原子之间这条线多重要，只看它们是什么元素、相距多远；MACE-SOYO 的主持人会先看看两位发言人“此刻的状态”再调音量（边权注意力），每轮发言前还把所有人的音量先拉到同一水平（RMSNorm），最后的会议纪要（读出）也写得更细。",
+  "arch": {
+    "geometry": "边向量 r_ij → Agnesi 变换距离的 16 个 Bessel 基 + p=6 多项式包络；方向 → 实球谐 Y_l^m（l≤3，cuEquivariance）",
+    "equivariance": "O(3)/E(3) 等变（cuEquivariance irreps；隐藏层 512×0e+512×1o，最后一层只留标量）",
+    "lmax": "边球谐 l≤3（max_ell=3）；节点特征 L≤1（max_l=1）；张量积消息 l≤3",
+    "bodyOrder": "每层对称收缩 ν=3 → 每层 4 体（与 MACE 相同，且收缩权重与元素无关）",
+    "layers": "2（num_layers=2）",
+    "cutoff": "6 Å（发布配置；MACESoyo 代码默认 5 Å）",
+    "receptiveField": "2 × 6 Å = 12 Å",
+    "message": "128 通道通道级 CG 张量积；边权 = LayerNorm-MLP(径向 + 两端节点标量)×包络；消息 ÷ (βρ_i+α) 可学习密度归一化 + 门控",
+    "readout": "第 1 层线性读出；最后一层两隐层 MLP（64×头数，SiLU，按头掩码）；+ ZBL + 每头 E0（FP64 求和，无 scale/shift）",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂r：训练用 autograd（可 make_fx/torch.compile 编译），推理用 AOTI 导出的同一 E/F/S 图；LAMMPS 中对边向量求导",
+    "stress": "对称应变同时作用于晶胞与（由分数坐标重建的）坐标，σ = (1/V)∂E/∂ε；仅三维周期（TTT）结构输出",
+    "longRange": "无内置静电或长程模块；仅 2 层 × 6 Å 感受野",
+    "dispersion": "可选外挂 D3(BJ)（TorchSim/nvalchemiops）或 CUDA 版 LASP-D3（零阻尼/BJ），默认截断 24.59394 Å，不打包进 AOTI",
+    "chargeSpin": "可选 use_spin_charge：总电荷 + 自旋多重度嵌入（源自 MACE-OMol），仅面向分子；发布的 MPtrj/OAM 模型未启用",
+    "otherOutputs": "无（仅 E/F/S）；多头可选择不同 DFT 数据集的“口径”",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·C·P_TP) 边上张量积 + O(N·M·d_w²) 边权 MLP + O(N·C·P_ν) 节点对称收缩",
+    "accel": "cuEquivariance 融合卷积/对称收缩、nvalchemiops GPU 邻居表、torch.compile 训练、AOTInductor .pt2、TorchSim 批处理、LAMMPS ML-IAP/Kokkos（测试中）"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "仍是 512 通道、l≤3 张量积 + ν=3 收缩的 MACE 级模型；但 AOTI + cuEq 融合 + GPU 邻居表使 README 中 MD 每步耗时约为 MACE-MH-1 的一半（11.2 vs 22.7 ms）。"},
+    "expressiveness": {"v": 5, "why": "保留 MACE 每层 4 体（ν=3）高体序，并让边权随两端原子的化学环境变化，属表达力最强的一档。"},
+    "longRange": {"v": 3, "why": "只有 2×6 Å 感受野、无静电；官方提供 D3(BJ) 与 LASP-D3 两种色散外挂。"},
+    "scalability": {"v": 3, "why": "2 层消息传递需要层间特征交换；已有 LAMMPS ML-IAP/Kokkos 多 GPU 实现，但仍在测试且只支持 CUDA。"},
+    "physics": {"v": 5, "why": "保守力、p=6 多项式包络、原子能求和保证广延性、发布模型默认开启 ZBL 近程排斥、cuEquivariance 严格 O(3) 等变。"},
+    "coverage": {"v": 2, "why": "官方只输出能量、力、应力（可叠加 D3）；电荷/自旋只是输入条件，没有偶极、Hessian、磁矩等专门输出。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "输入与邻居图：分数坐标 → 应变晶胞 → GPU 邻居表",
+      "plain": "输入是元素 Z、分数坐标、晶胞、周期标志，以及每个结构所属数据集“头”的编号 head_id（可选总电荷/自旋）。笛卡尔坐标由分数坐标乘以（带虚拟应变的）晶胞重建并打开梯度；邻居搜索交给 nvalchemiops 的 neighbor_list 在 GPU 上对整批结构一次完成（MACE 原版用 CPU 上的 matscipy）。之后所有计算只在 6 Å 内的边上进行，代价随原子数线性增长。",
+      "math": "\\mathbf r_i=\\mathbf s_i\\,\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon_{\\rm sym}),\\qquad \\mathbf r_{ij}=\\mathbf r_j+\\mathbf n_{ij}\\mathbf C'-\\mathbf r_i,\\quad \\lVert\\mathbf r_{ij}\\rVert<r_c=6\\,\\text{Å}",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 185, "end": 198, "must": "base_pos.requires_grad_(True)", "caption": "MACESoyo.forward：应变晶胞、由分数坐标重建坐标、建图、边向量"},
+        {"file": "mace_soyo/utils/neighbors.py", "start": 6, "end": 25, "must": "edges, _, image = neighbor_list(", "caption": "nvalchemiops 批量 GPU 邻居表（返回周期像平移 image）"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码（同 MH-1）：Agnesi 距离变换 → 16 个 Bessel；p=6 包络；球谐 l≤3",
+      "plain": "这一步沿用 MACE-MH-1（代码改写自 mace/modules/radial.py）：距离先按两原子共价半径做 Agnesi 变换，把不同元素对的成键距离映射到可比的 (0,1) 区间，再展开为 16 个 Bessel 函数（MH-1 对照配置为 10 个）。截断包络 f_cut(p=6) 不乘在径向基上，而是乘在后面的张量积边权与密度上，保证能量在 6 Å 处平滑归零。方向用 cuEquivariance 的实球谐 Y_l^m（l≤3）编码，这是等变性的来源。",
+      "math": "\\tilde r_{ij}=\\Big[1+\\frac{a\\,(r_{ij}/r_0)^{q}}{1+(r_{ij}/r_0)^{q-p}}\\Big]^{-1},\\ r_0=\\tfrac12(R^{\\rm cov}_{Z_i}+R^{\\rm cov}_{Z_j});\\qquad R_n=\\sqrt{\\tfrac{2}{r_c}}\\,\\frac{\\sin(n\\pi\\tilde r_{ij}/r_c)}{\\tilde r_{ij}},\\ n\\le16;\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l\\le3",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 149, "end": 156, "must": "dist_rbf = self.distance_transform(dist, edge_index, z)", "caption": "开启 ZBL 时径向基作用在 Agnesi 变换后的距离上"},
+        {"file": "mace_soyo/model/model_block.py", "start": 244, "end": 256, "must": "r_over_r_0 = x / r_0", "caption": "AgnesiTransform（q=0.9183, p=4.5791, a=1.0805）"},
+        {"file": "mace_soyo/model/model_block.py", "start": 196, "end": 212, "must": "sinc_term = torch.sin(torch.pi * x_safe) / (torch.pi * x_safe)", "caption": "BesselBasis（sinc 写法，等价于 sin(nπr/r_c)/r）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：元素查表 512 维标量（可选：总电荷 + 自旋多重度）",
+      "plain": "每种元素直接查一张 105×512 的嵌入表得到初始标量特征（等价于 MACE 的 one-hot + 线性层）。若开启 use_spin_charge（思路来自 MACE-OMol），总电荷与自旋多重度各查一张表、拼接后过 Linear + SiLU，加到同一结构的所有原子上；缺标签的结构用掩码关闭这一项。发布的 MPtrj/OAM 模型均未开启（Matbench Discovery yml：use_spin_charge: false）。",
+      "math": "h^{(0)}_i=E_{\\rm emb}[Z_i]+m\\cdot\\mathrm{SiLU}\\big(W_c\\,[E_Q[Q]\\,\\Vert\\,E_S[2S+1]]\\big)",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 140, "end": 144, "must": "x = self.z_emb(z - 1)", "caption": "元素嵌入 + 可选电荷/自旋条件"},
+        {"file": "mace_soyo/model/model_block.py", "start": 54, "end": 78, "must": "condition = torch.where(mask, self.condition_mlp(condition), 0.0)", "caption": "SpinChargeEmbedding：图级条件广播到每个原子"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ①（新增）：残差分支 + 等变 RMSNorm",
+      "plain": "每层先用一个线性层留出残差分支，再对输入特征做等变 RMSNorm（改写自 Nequix/eSEN）：在每个 l 块内对 m 分量和通道求平均平方，再对各 l 块等权平均，全体只除以同一个 RMS，因此不破坏旋转等变性；标量块另有可学习平移 β。MACE-MH-1 没有这一步，它让每层输入的数值尺度保持稳定。",
+      "math": "\\hat h_{i,l}=\\gamma_l\\odot\\frac{h_{i,l}}{\\sqrt{\\frac{1}{L+1}\\sum_{l'=0}^{L}\\langle h_{i,l'}^2\\rangle_{m,c}+\\epsilon}}\\ (+\\beta\\ \\text{for}\\ l=0),\\qquad x^{\\rm res}_i=W_{sc}\\,h_i",
+      "code": [
+        {"file": "mace_soyo/model/model_block.py", "start": 407, "end": 428, "must": "inv_rms = torch.rsqrt(torch.stack(norms).sum(dim=0) + self.eps)", "caption": "EquivariantRMSNorm.forward"},
+        {"file": "mace_soyo/model/model_block.py", "start": 561, "end": 569, "must": "x = self.node_norm(x)", "caption": "交互块入口：先存残差，再归一化"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ②（核心改动）：边权“简单注意力”——由两端原子的当前特征决定",
+      "plain": "张量积的逐边权重 w_ij 决定“邻居 j 的信息以多大比重、经哪条角动量通道流向 i”。MACE-MH-1 中它只取决于径向特征和两端元素 one-hot 的嵌入，对同一元素对在任何环境下都一样；MACE-SOYO 改为取决于径向特征和两端原子在本层归一化后的 512 维标量特征，再过 3 段 LayerNorm-SiLU-Linear（宽 96），即 README 所说的 simple attention。实现上先对节点做一次投影、再按边索引相加，避免对每条边拼接后做大矩阵乘。",
+      "math": "w_{ij}=\\mathrm{MLP}_{\\rm LN}\\big(W_rR(\\tilde r_{ij})+W_s\\,\\hat h^{0e}_j+W_t\\,\\hat h^{0e}_i\\big)\\cdot f_{\\rm cut}(r_{ij})\\qquad\\text{(MH-1: }W_s\\,\\mathrm{onehot}(Z_j),\\ W_t\\,\\mathrm{onehot}(Z_i)\\text{)}",
+      "code": [
+        {"file": "mace_soyo/model/model_block.py", "start": 571, "end": 582, "must": "raw_tp_weights = self.pair_feat(edge_rbf_tp + x_sender_tp[j] + x_receiver_tp[i])", "caption": "边权输入 = 径向基 + 发送/接收原子的标量特征"},
+        {"file": "mace_soyo/model/model_block.py", "start": 501, "end": 513, "must": "self.pair_feat = nn.Sequential(", "caption": "3 段 LayerNorm-SiLU-Linear 的边权 MLP"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 1557, "end": 1567, "must": "source_embedding = self.source_embedding(node_attrs)", "caption": "MACE-MH-1 对照：边权只用元素 one-hot 的源/目标嵌入"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块 ③（同 MH-1）：张量积 A 基 → 密度归一化 + 门控 → 对称收缩 B 基（ν=3）",
+      "plain": "其余主干沿用 MACE-MH-1：邻居特征（128 通道）与球谐做通道级 CG 张量积并按接收原子求和（cuEquivariance 融合内核），得到 A 基；同时为每条边估计一个“有效邻居”密度并求和得 ρ_i，消息除以 (βρ_i+α)（α 初值 20、β 初值 0，均可学习），再经门控非线性（标量 SiLU，l>0 用 sigmoid 门）。最后对 l≤3 的特征做 ν=3 阶对称收缩（与元素无关，一套权重共用）得到 4 体的 B 基，加回残差。",
+      "math": "A_i=\\sum_{j}w_{ij}\\big(\\tilde h_j\\otimes Y(\\hat{\\mathbf r}_{ij})\\big),\\ \\ \\rho_i=\\sum_j\\tanh(\\phi_{ij}^2)\\,f_{\\rm cut}(r_{ij});\\qquad m_i=\\mathrm{Gate}\\Big(W_x\\tilde h_i+\\frac{W_aA_i}{\\beta\\rho_i+\\alpha}\\Big);\\qquad h^{(t+1)}_i=W\\,\\mathrm{SC}_{\\nu\\le3}(W'm_i)+x^{\\rm res}_i",
+      "code": [
+        {"file": "mace_soyo/model/model_block.py", "start": 591, "end": 610, "must": "denom = density * self.beta + self.alpha", "caption": "密度 → 张量积卷积 → 归一化门控 → 对称收缩 + 残差"},
+        {"file": "mace_soyo/model/model_block.py", "start": 317, "end": 340, "must": "num_elements=1,", "caption": "cuet.SymmetricContraction：元素无关（num_elements=1）"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 1569, "end": 1591, "must": "message = self.linear_1(message) / (density * self.beta + self.alpha)", "caption": "MACE-MH-1 原版的同一密度归一化"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出（加重 + 多头）：最后一层两隐层 MLP，按数据集“头”掩码",
+      "plain": "第 1 层线性读出、最后一层 MLP 读出，这一框架同 MACE；区别是 SOYO 的最后读出有两层隐藏层（每个头宽 64，SiLU），而 MACE 默认只有一层 16 宽。多头时所有头的隐藏单元并排计算，再用掩码只保留该结构所属头的那一块，于是一个共享骨架能同时拟合 OMat24、sAlex+MPtrj 等不同 DFT 设置的数据。微调时骨架整体继承，新头从指定的旧头复制读出权重（可选重设 E0）。",
+      "math": "E^{(2)}_{i,h}=W_3\\big[M_h\\odot\\sigma\\big(W_2[M_h\\odot\\sigma(W_1h^{(2)}_{i})]+b_2\\big)\\big]+b_3,\\qquad E^{(1)}_{i,h}=w^{(1)}_h\\cdot h^{(1)}_{i,0e}",
+      "code": [
+        {"file": "mace_soyo/model/readout.py", "start": 40, "end": 59, "must": "self.linear_hidden = ScalarLinear(width, width)", "caption": "NonLinearReadout：两隐层 + 头掩码"},
+        {"file": "mace_soyo/utils/model_checkpoint.py", "start": 119, "end": 134, "must": "for new_id, old_id in enumerate(head_map):", "caption": "微调：按 head_map 复制读出头"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 111, "end": 119, "must": "self.linear_2(x)", "caption": "MACE 对照：单隐层 NonLinearReadoutBlock"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：各层读出 + ZBL 排斥 + 每头 E0，FP64 求和（无 scale/shift）",
+      "plain": "原子能 = ZBL 近程排斥（在两原子共价半径之和内用 p=6 包络截断，防止原子过近“塌缩”）+ 两层读出之和 + 该头的元素参考能 E0。与 MACE 的 ScaleShiftMACE 不同，SOYO 没有按数据集统计的 scale/shift，网络直接输出能量。网络本身可用 float32，但 E0 与总能在 float64 中累加，避免大总能数据丢精度；能量是原子能之和，保证广延性。",
+      "math": "E=\\sum_i\\Big[E^{(h)}_0(Z_i)+\\tfrac12\\sum_{j}V_{\\rm ZBL}(r_{ij})\\,f^{p=6}_{\\rm cut}\\big(r_{ij};R^{\\rm cov}_{Z_i}+R^{\\rm cov}_{Z_j}\\big)+\\sum_{t=1}^{2}E^{(t)}_{i,h}\\Big]",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 157, "end": 174, "must": "atomic_energy = atomic_energy.double() + atomic_e0", "caption": "逐层读出累加，FP64 加 E0 后按结构求和"},
+        {"file": "mace_soyo/model/model_block.py", "start": 129, "end": 153, "must": "v_edges = (14.3996 * Z_u_real * Z_v_real) / dist * phi", "caption": "ZBLBasis：屏蔽库仑排斥 × 包络"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标自动微分（训练可编译、推理 AOTI、LAMMPS 对边向量求导）",
+      "plain": "与 MACE 一样，力是 −∂E/∂r，因此严格保守。SOYO 的差别在工程上：训练时可把含二阶反传的 E/F/S 图用 make_fx/torch.compile 编译（README 称训练约快 30%）；推理时把同一个 TensorEFS 计算图用 AOTInductor 导出为 .pt2 包，由 ASE/TorchSim 直接调用；LAMMPS ML-IAP 接口里则先对边向量 r_ij 求导得到“边力”，再交给 LAMMPS 累加到原子并处理多 GPU 通信。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}\\qquad\\text{LAMMPS: }\\ \\frac{\\partial E}{\\partial\\mathbf r_{ij}}\\ \\to\\ \\mathbf F_i",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 206, "end": 214, "must": "position_grad, strain_grad = grad(", "caption": "一次反传同时得到力与应变梯度"},
+        {"file": "mace_soyo/utils/compile_utils.py", "start": 108, "end": 117, "must": "forces = -grads[0]", "caption": "TensorEFS：AOTI 导出/编译训练所用的纯张量 E/F/S"},
+        {"file": "mace_soyo/export/lammps_mliap.py", "start": 219, "end": 238, "must": "edge_forces = torch.autograd.grad(", "caption": "LAMMPS ML-IAP：对边向量求导"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对称应变同时作用于晶胞与坐标",
+      "plain": "引入全零的应变张量 ε 并对称化，晶胞变为 C(1+ε_sym)，坐标由分数坐标乘以变形后的晶胞得到；于是一次反传同时给出力和 ∂E/∂ε，除以体积即应力。只有三个方向都周期（TTT）的结构才施加应变并输出应力，其余结构应力为零占位。这与 MACE 的对称 displacement 技巧等价。",
+      "math": "\\boldsymbol\\varepsilon_{\\rm sym}=\\tfrac12(\\boldsymbol\\varepsilon+\\boldsymbol\\varepsilon^{\\top}),\\ \\ \\mathbf C'=\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon_{\\rm sym}),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"file": "mace_soyo/model/model.py", "start": 181, "end": 192, "must": "sym_strain = 0.5 * (strain + strain.transpose(-1, -2))", "caption": "仅对 TTT 结构施加对称应变"},
+        {"file": "mace_soyo/model/model.py", "start": 207, "end": 214, "must": "stress = strain_grad / safe_volume[:, None, None]", "caption": "σ = (∂E/∂ε)/V"},
+        {"repo": "mace", "file": "mace/modules/utils.py", "start": 118, "end": 160, "must": "symmetric_displacement = 0.5 * (", "caption": "MACE 对照：get_symmetric_displacement"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "色散：可选外挂 D3(BJ) 或 LASP-D3（无内置静电）",
+      "plain": "网络只看 2 层 × 6 Å，没有静电项。ASE / TorchSim 计算器可选 use_d3=True（TorchSim/nvalchemiops 的 D3(BJ)）或 use_laspd3=True（CUDA 版 LASP-D3，零阻尼或 BJ，仅支持三维周期，README 称最多快 3 倍），把色散的能量、力、应力直接加到网络输出上，默认截断 24.59394 Å。README 提醒：只有当所选头的训练标签不含色散时才应打开，且 D3 不会打包进 AOTI 模型。",
+      "math": "E_{\\rm tot}=E_{\\rm SOYO}+E_{\\rm D3},\\quad \\mathbf F_{\\rm tot}=\\mathbf F_{\\rm SOYO}+\\mathbf F_{\\rm D3},\\quad \\boldsymbol\\sigma_{\\rm tot}=\\boldsymbol\\sigma_{\\rm SOYO}+\\boldsymbol\\sigma_{\\rm D3}",
+      "code": [
+        {"file": "mace_soyo/inference/ase_calc.py", "start": 275, "end": 295, "must": "d3_results = self.d3model(d3_state)", "caption": "MACESoyoCalculator：AOTI 输出 + LASP-D3 或 D3(BJ)"},
+        {"repo": "mace", "file": "mace/calculators/foundations_models.py", "start": 347, "end": 369, "must": "SumCalculator([mace_calc, d3_calc])", "caption": "MACE 对照：mace_mp(dispersion=True)"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "输出 E/F/S 与训练配方：Huber 损失 + Muon/AdamW + WSD 学习率",
+      "plain": "模型只输出能量、力、应力，三者都用 δ=0.01 的 Huber 损失（FP64），按 E:F:S=1:1:1 加权，缺应力标签或非周期结构不计应力损失。优化器把普通二维权重矩阵交给 Muon（Nesterov 动量 0.95、Newton–Schulz 5 步），嵌入、读出、归一化、偏置和对称收缩权重交给 AdamW。学习率用来自 DPA4 的 WSD：0.2 个 epoch 从 0.1× 线性升温，平台期保持 1e-3，最后 65% 的步数余弦降到 1e-5；另有 EMA 0.999 与梯度裁剪 10。仓库中的 MACE-MH-1 对照配置则用 Adam(amsgrad) + ReduceLROnPlateau。",
+      "math": "\\mathcal L=\\sum_{k\\in\\{E,F,S\\}}\\lambda_k\\,\\mathrm{Huber}_{0.01}(\\hat y_k-y_k),\\ \\lambda_E{:}\\lambda_F{:}\\lambda_S=1{:}1{:}1;\\qquad \\eta(t)=\\eta_{\\min}+\\tfrac12(\\eta_{\\max}-\\eta_{\\min})\\big(1+\\cos\\pi\\tfrac{t-t_d}{T-t_d}\\big),\\ t\\ge t_d=T-\\lfloor0.65T\\rfloor",
+      "code": [
+        {"file": "run_ddp.py", "start": 298, "end": 331, "must": "torch.optim.Muon(", "caption": "Muon + AdamW 双优化器与 Huber(δ=0.01) 损失"},
+        {"file": "run_ddp.py", "start": 65, "end": 90, "must": "cosine_ratio = min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))", "caption": "WSD：升温 → 平台 → 余弦衰减"},
+        {"file": "mace_soyo/utils/training_utils.py", "start": 16, "end": 33, "must": "use_adam = (", "caption": "哪些参数走 Muon、哪些走 AdamW"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff r_c", "value": "6.0 Å（发布配置；代码默认 5.0）", "note": "截断半径；2 层 → 感受野 12 Å", "code": {"file": "config/config-mptraj.example.yml", "start": 34, "end": 43, "must": "cutoff: 6.0"}},
+    {"name": "num_rbf", "value": "16", "note": "Bessel 径向基个数（MH-1 对照配置为 10）"},
+    {"name": "node_dim × max_l", "value": "512 × (0e + 1o)", "note": "节点隐藏特征；最后一层只保留 512×0e"},
+    {"name": "pair_dim", "value": "128", "note": "张量积通道数（输入 128×0e+128×1o，消息 l≤3）"},
+    {"name": "max_ell / ν / 层数", "value": "3 / 3 / 2", "note": "边球谐最高阶 / 对称收缩阶数 / 交互层数"},
+    {"name": "edge_weight_dim", "value": "96", "note": "边权 MLP 宽度（3 段 LayerNorm-SiLU-Linear）"},
+    {"name": "readout_hidden", "value": "64（每个头）", "note": "最后读出两隐层宽度 = 64 × 头数", "code": {"file": "config/config-mptraj.example.yml", "start": 6, "end": 8, "must": "readout_hidden: 64"}},
+    {"name": "包络阶数 p", "value": "6", "note": "PolynomialCutoff 默认值（MACE CLI 默认 5）", "code": {"file": "mace_soyo/model/model_block.py", "start": 157, "end": 179, "must": "p: float = 6.0"}},
+    {"name": "学习率 / 调度", "value": "1e-3 → 1e-5；WSD（0.2 epoch 自 0.1× 升温，末 65% 余弦衰减）", "note": "Muon（二维矩阵）+ AdamW（其余），weight_decay 1e-3", "code": {"file": "config/config-mptraj.example.yml", "start": 27, "end": 33, "must": "wsd_decay_ratio: 0.65"}},
+    {"name": "损失 / 训练", "value": "Huber δ=0.01，E:F:S=1:1:1；EMA 0.999；梯度裁剪 10", "note": "MPtrj 版 100 epoch、每卡 batch 48；OAM 版 10 epoch、batch 128（Matbench Discovery yml）", "code": {"file": "run_ddp.py", "start": 330, "end": 334, "must": "torch.nn.HuberLoss(delta=0.01"}},
+    {"name": "参数量", "value": "6,429,511（MPtrj）/ 6,475,336（OAM）", "note": "Matbench Discovery yml 的 model_params", "code": {"repo": "matbench-discovery", "file": "models/mace_soyo/mace-soyo-mptrj.yml", "start": 15, "end": 19, "must": "model_params: 6429511"}},
+    {"name": "基线 MACE-MH-1 对照", "value": "512x0e+512x1o / 128x0e+128x1o，ν=3，2 层，6 Å，Agnesi + ZBL，num_radial_basis 10", "note": "仓库内同一 MPtrj 划分的对照训练配置", "code": {"file": "example/mace-mh1-mptraj.yml", "start": 23, "end": 37, "must": "use_agnostic_product: true"}}
+  ],
+  "speedNotes": [
+    "FLOPs 主要在三处：每条边上 128 通道、输出 l≤3 的通道级张量积；每条边上的边权 MLP（3 段宽 96 的 LayerNorm-SiLU-Linear）；节点上 512 通道、ν=3 的对称收缩。边权输入先在节点上投影一次再按边索引相加，省掉了逐边拼接后的大矩阵乘。",
+    "README 实测（576 原子 NVT，每步含建邻居表）：MACE-SOYO 11.2 ms，MACE-MH-1（cuEq + torch.compile）22.7 ms，DPA4-Mini 10.2 ms，DPA4-Neo 20.5 ms。",
+    "工程加速：cuEquivariance 融合卷积（uniform_1d）与对称收缩、nvalchemiops GPU 邻居表、AOTInductor 预编译 .pt2；训练可用 torch.compile 编译含二阶导的 E/F/S 图（README：约快 30%）。代价是只支持 NVIDIA CUDA，.pt2 需在目标 GPU 上重新导出。",
+    "训练成本：MPtrj 100 epoch 约 4×A100 × 30 h（README：5.0 GPU·天，每卡 batch 48，峰值显存约 52 GB；其自测 MACE-MH-1-cueq 为 8.3 GPU·天）。",
+    "精度：网络默认 float32，E0 与总能用 float64 累加；AOTI 导出 dtype 默认 float32，与训练精度相互独立。"
+  ],
+  "weakNotes": [
+    "截断 6 Å、2 层消息传递 → 能量最多依赖约 12 Å 内的原子；没有任何静电项，截断外的色散尾巴与库仑作用都被截掉。",
+    "发布模型的训练数据 MPtrj、OMat24、sAlex 属 PBE(+U) 类 DFT 数据（OAM 模型的头名即 omat_pbe），几乎不含 vdW：层状材料层间结合、分子晶体、物理吸附应打开 use_d3 或 use_laspd3。",
+    "D3 只在推理时外挂（TorchSim/nvalchemiops 的 D3(BJ) 或 CUDA 版 LASP-D3，默认截断 24.59394 Å），不进入 AOTI 包；README 提醒只有当所选头的标签不含色散时才打开，LASP-D3 只支持三维周期体系。",
+    "总电荷/自旋嵌入只面向分子，README 明确不建议用于周期体系；它只是全局条件、不预测原子电荷，因此带电缺陷、界面电荷转移、离子液体等需要长程静电的问题没有官方方案。"
+  ],
+  "downstreamNotes": [
+    "保守力 + p=6 平滑包络适合声子与热导：Matbench Discovery κ_SRME 为 0.3496（MPtrj 版）和 0.1837（OAM 版）。",
+    "几何优化与稳定性筛选：Matbench Discovery（unique prototypes）F1 为 0.777（MPtrj）/ 0.903（OAM），结构 RMSD 0.0832 / 0.0619；评测用 FIRE + FrechetCellFilter（fmax 0.02 eV/Å）。",
+    "MD：提供 ASE、TorchSim（批量）、LAMMPS ML-IAP（Kokkos 多 GPU，测试中）三种接口；Matbench Discovery 为 OAM 版报告了 MD 指标（如 RDF 误差 3.5658%）。",
+    "多头微调：继承骨架、从任意旧头复制读出并可重设 E0，便于迁移到新的 DFT 设置；README 预告的九头模型将覆盖 OMat24、sAlex+MPTrj、OC20/22/25、OMol25+OPoly26、ODAC25、OMC25、MatPES-r2SCAN。"
+  ],
+  "strengths": ["保留 MACE 的高体序（ν=3）与保守力，改动集中、易理解", "边权随化学环境变化 + 等变 RMSNorm，同划分对照下 Matbench Discovery 指标优于自训 MACE-MH-1（README）", "AOTI、torch.compile、cuEq 融合、GPU 邻居表使 MD 每步耗时约为 MACE-MH-1 的一半", "多头 + 读出复制式微调，便于扩展到多个 DFT 数据集"],
+  "weaknesses": ["只支持 NVIDIA CUDA，AOTI 包需按 GPU 重新导出", "无长程静电，色散需外挂 D3", "独立开发、暂无论文，LAMMPS 接口仍在测试，README 自述需更广泛评估", "只输出 E/F/S，缺少 Hessian、偶极等扩展输出"],
+  "pretrained": ["MACE-SOYO-MPtrj v0.1（单头 mptraj）", "MACE-SOYO-OAM v0.1（双头 omat_pbe / salexmp；基准用 salexmp 头，见 Matbench Discovery 条目）"],
+  "mbdKeys": ["mace-soyo-mptrj", "mace-soyo-oam"],
+  "arenaKeys": []
+}

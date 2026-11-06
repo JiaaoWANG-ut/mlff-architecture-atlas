@@ -1,0 +1,185 @@
+{
+  "id": "ewaldmp",
+  "name": "Ewald MP",
+  "fullName": "Ewald Message Passing：基于 Ewald 求和的长程消息传递",
+  "year": 2023,
+  "authors": "A. Kosmala, J. Gasteiger, N. Gao, S. Günnemann",
+  "paper": {"title": "Ewald-based Long-Range Message Passing for Molecular Graphs", "venue": "ICML 2023", "url": ""},
+  "repos": ["EwaldMP"],
+  "family": "long-range-module",
+  "tags": ["长程消息传递", "倒空间 / Ewald 求和", "结构因子", "可学习频率滤波", "插件：SchNet/PaiNN/DimeNet++/GemNet-T"],
+  "framework": "PyTorch + PyTorch Geometric / torch_scatter（fork 自早期 OCP / fairchem-v1）",
+  "license": "Hippocratic License 3.0（本仓库新增文件）；继承自 OCP 的代码为 MIT",
+  "oneLiner": "在任意短程 GNN 的每一层旁并联一个“倒空间”消息块：把原子特征按位置做傅里叶变换得到结构因子，乘以可学习的频率滤波器，再逆变换回每个原子——以 O(N·N_k) 的代价让每个原子一次“听到”整个体系（含周期镜像）的信息。",
+  "analogy": "短程 GNN 像在拥挤房间里只和身边几个人耳语；Ewald 块则像房间里的广播台：每个人把自己的信息按不同“频道”（波矢 k）播出去（结构因子），广播台按学到的偏好调大或调小各个频道（滤波器），再把混合后的广播送回每个人耳中（逆变换）。远处的人也能影响你，而广播台的工作量只与“人数 × 频道数”成正比。",
+  "arch": {
+    "geometry": "宿主短程部分：距离/角度；Ewald 块：相位 k·x_i（周期：倒格矢 Σn_α b_α；非周期：Δk 体素网格 + SVD 主轴系）",
+    "equivariance": "输出为旋转不变标量：周期时 k 随晶胞同转，k·x 不变；非周期靠 SVD 主轴系（奇异值简并时仅近似）",
+    "lmax": "无球谐；方向信息隐含在平面波 e^{ik·x} 中",
+    "bodyOrder": "Ewald 块本身是 2 体卷积核 Σ_k Φ(k)cos k·(x_i−x_j)，作用于已含多体信息的特征；总体序由宿主决定",
+    "layers": "每个宿主交互层并联 1 个 Ewald 块（W_down 跨层共享，W_up 与更新 MLP 每层独立）",
+    "cutoff": "实空间 6 Å（宿主）；倒空间：周期为索引盒 N_x/N_y/N_z，非周期 |k| ≤ 0.4–1.0 Å⁻¹",
+    "receptiveField": "单个 Ewald 块即覆盖整个结构（周期体系含全部镜像）；分辨率限于波长 ≳ 2π/k_max",
+    "message": "结构因子 s(k)=Σ_j h_j e^{ik·x_j} → ×可学习滤波 Φ(k) → 逆变换 Σ_k Re[s(k)e^{−ik·x_i}] ×0.01 → 残差 MLP",
+    "readout": "沿用宿主（SchNet MLP 原子能；DimeNet++ 拼接 Ewald 原子特征进 OutputPPBlock；GemNet-T 逐层输出求和）",
+    "forces": "both",
+    "forcesDetail": "SchNet/DimeNet++：autograd（DimeNet++ 默认 detach_ewald，长程部分不进力）；OC20 的 PaiNN/GemNet-T：直接力头",
+    "stress": "未实现（代码中无应力/维里计算）",
+    "longRange": "核心功能：倒空间求和的可学习长程相互作用，非物理电荷静电；k=0 项被排除",
+    "dispersion": "无显式色散项；只能从训练数据中隐式学到类色散的长程项（README 用 simple-dftd3 做分箱分析）",
+    "chargeSpin": "无（不输入总电荷/自旋，也不预测原子电荷）",
+    "otherOutputs": "无（OE62 仅能量；OC20 能量 + 力）",
+    "strictlyLocal": false,
+    "complexity": "每块 O(N·N_k·C)，无 O(N²) 原子对；周期 N_k=((2N_x+1)(2N_y+1)(2N_z+1)−1)/2，如 (2,2,5)→137",
+    "accel": "纯 PyTorch（index_add_、逐元素 cos/sin），相位与阻尼跨层复用；无专用内核/LAMMPS，继承 OCP 的 ASE 计算器"
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：元素、坐标、晶胞；非周期分子先转到 SVD 主轴系",
+      "plain": "输入与宿主模型相同：原子序数 Z、笛卡尔坐标 x，周期体系（OC20）还有晶胞矩阵。非周期分子（OE62）的 k 网格固定在空间中、不随分子转动，所以代码先把每个分子平移到质心，再用 SVD 旋转到主轴坐标系（原子数 > 2 时），使结果与分子朝向无关。该步骤在 Python 循环里逐结构完成，并关闭混合精度。",
+      "math": "\\mathcal S=\\{(Z_i,\\mathbf x_i)\\}_{i=1}^{N},\\ \\mathbf C\\ (\\text{periodic});\\qquad \\text{aperiodic: }\\mathbf x_i\\leftarrow(\\mathbf x_i-\\bar{\\mathbf x})\\,V,\\ \\ X-\\bar X=U\\Sigma V^{\\top}",
+      "code": [
+        {"file": "ocpmodels/models/schnet.py", "start": 202, "end": 211, "must": "pos_svd_frame(data)", "caption": "SchNetWrap._forward：非周期 + Ewald 时改用 SVD 主轴系坐标"},
+        {"file": "ocpmodels/common/utils.py", "start": 1134, "end": 1160, "must": "U, S, V = torch.svd(pos_batch)", "caption": "pos_svd_frame：逐结构去质心并旋转到 SVD 主轴"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "两套“邻居”：6 Å 实空间短程图 + 每个结构一组 k 点",
+      "plain": "Ewald MP 不替换短程图：宿主 GNN 仍在 6 Å 截断的邻居图上做局域消息传递。另外每个结构准备一组 k 向量（倒空间“频率”），同一结构内所有原子共享——长程信息不是沿边传播，而是通过这组全局平面波一次性交换。周期体系的 k 由各自晶胞算出，非周期体系所有结构共用同一个网格。",
+      "math": "\\mathcal N(i)=\\{j:\\ \\lVert\\mathbf x_j-\\mathbf x_i\\rVert<r_c=6\\,\\mathring{\\mathrm A}\\}\\qquad \\mathcal K_{\\mathcal S}=\\{\\mathbf k_1,\\dots,\\mathbf k_{N_k}\\}\\ \\text{(one set per structure)}",
+      "code": [
+        {"file": "ocpmodels/models/schnet.py", "start": 213, "end": 220, "must": "= self.generate_graph(data)", "caption": "宿主的短程半径图"},
+        {"file": "ocpmodels/models/schnet.py", "start": 239, "end": 252, "must": "k_cell, _ = x_to_k_cell(data.cell)", "caption": "周期：索引 × 倒格基得到 k；非周期：复用固定体素网格"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "构造 k 向量：周期用倒格矢索引盒，非周期用球形体素网格 + 径向基",
+      "plain": "周期体系：由晶格矢量算出倒格矢 b₁,b₂,b₃，取整数索引盒 |n_α| ≤ N_α（OC20 配置如 2/2/5）。因为 k 与 −k 携带相同的实数信息，代码只保留一半并去掉 k=0。非周期体系：用间距 Δk 的立方网格，只保留 |k| ≤ k_c 的点，并预先在 |k| 上计算高斯径向基（带 p=5 多项式包络），后面的滤波器只依赖 |k|，因而各向同性。",
+      "math": "\\mathbf b_1=2\\pi\\frac{\\mathbf a_2\\times\\mathbf a_3}{\\mathbf a_1\\cdot(\\mathbf a_2\\times\\mathbf a_3)},\\ \\mathbf k_{\\mathbf n}=\\sum_{\\alpha}n_\\alpha\\mathbf b_\\alpha,\\ |n_\\alpha|\\le N_\\alpha\\qquad \\text{aperiodic: }\\mathbf k=\\Delta k\\,\\mathbf n,\\ \\lVert\\mathbf k\\rVert\\le k_c,\\ \\phi_r(\\lVert\\mathbf k\\rVert)",
+      "code": [
+        {"file": "ocpmodels/common/utils.py", "start": 1077, "end": 1093, "must": "torch.cartesian_prod(*k_index_sets)", "caption": "get_k_index_product_set：整数索引盒，取半并去掉原点"},
+        {"file": "ocpmodels/common/utils.py", "start": 1163, "end": 1176, "must": "b1 = 2 * np.pi * cross_a2a3 / vol", "caption": "x_to_k_cell：由晶胞算倒格矢"},
+        {"file": "ocpmodels/common/utils.py", "start": 1096, "end": 1131, "must": "k_grid = k_grid[torch.sum(k_grid**2, dim=-1) <= k_cutoff**2]", "caption": "get_k_voxel_grid：球内体素 + |k| 的高斯径向基"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "特征准备：原子特征 h、相位 k·x 与 sinc 阻尼",
+      "plain": "Ewald 块的输入就是宿主当前层的原子标量特征 h（SchNet/PaiNN 的标量通道，GemNet-T/DimeNet++ 的原子嵌入），先过一个两层残差块。然后计算每个原子在每个 k 上的相位 k·x_i；非周期时再乘 sinc 阻尼（torch.sinc 为归一化 sinc），相当于把每个 k 点看成边长 Δk 的体素做积分，抑制离散网格在实空间造成的周期伪像。相位与阻尼只在第一个 Ewald 块计算，之后各层复用。",
+      "math": "\\tilde h_i=\\mathrm{Res}(h_i),\\qquad \\theta_{i\\mathbf k}=\\mathbf k\\cdot\\mathbf x_i,\\qquad d_i=\\prod_{\\alpha=1}^{3}\\mathrm{sinc}\\big(\\tfrac12\\Delta k\\,x_{i\\alpha}\\big)\\ \\ (d_i=1\\ \\text{if periodic})",
+      "code": [
+        {"file": "ocpmodels/models/ewald_block.py", "start": 99, "end": 114, "must": "dot = torch.sum(torch.gather(k, 0, b) * x.unsqueeze(-2), dim=-1)", "caption": "EwaldBlock.forward：预残差、相位 k·x、sinc 阻尼"},
+        {"file": "ocpmodels/models/ewald_block.py", "start": 61, "end": 74, "must": "self.pre_residual = ResidualLayer(", "caption": "共享的 W_down、每层的 W_up、预残差与更新 MLP"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "结构因子：把原子特征做傅里叶变换",
+      "plain": "把每个通道的原子特征当作“密度”，按位置做离散傅里叶变换：s(k)=Σ_j h_j e^{ik·x_j}，代码用 index_add_ 分别累加实部（cos）和虚部（sin）。这与晶体学结构因子形式相同，只是“散射强度”换成了可学习特征，而不是电子数或电荷。对周期体系，k 是倒格矢，e^{ik·x} 对晶格平移不变，所以这个求和自动包含了所有周期镜像。",
+      "math": "s_c(\\mathbf k)=\\sum_{j\\in\\mathcal S}d_j\\,\\tilde h_{jc}\\,e^{\\,i\\mathbf k\\cdot\\mathbf x_j}=\\underbrace{\\sum_j d_j\\tilde h_{jc}\\cos(\\mathbf k\\cdot\\mathbf x_j)}_{\\text{real}}+\\,i\\underbrace{\\sum_j d_j\\tilde h_{jc}\\sin(\\mathbf k\\cdot\\mathbf x_j)}_{\\text{imag}}",
+      "code": [
+        {"file": "ocpmodels/models/ewald_block.py", "start": 131, "end": 151, "must": "sf_real = hres.new_zeros(", "caption": "结构因子的实部与虚部（按结构 index_add_）"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "可学习频率滤波器 Φ(k)",
+      "plain": "在倒空间里，每个 k 点、每个通道乘一个可学习权重 Φ_c(k)，决定哪些波长的信息被放大或抑制。Φ 用低秩分解 W_up·W_down 参数化：W_down 在所有层间共享，W_up 每层一个。周期体系以倒格子索引为输入（每个 k 点一个自由参数），非周期体系以 |k| 的高斯径向基为输入，因而只依赖 |k|。它取代了经典 Ewald 中固定的库仑核 4π/k²·e^{−k²/4η²}——是学出来的，不对应某个特定物理势。",
+      "math": "\\Phi^{(t)}_c(\\mathbf k_{\\mathbf n})=\\big(W^{(t)}_{\\text{up}}W_{\\text{down}}\\big)_{c,\\mathbf n}\\ \\ (\\text{periodic})\\qquad \\Phi^{(t)}_c(\\mathbf k)=\\sum_{r}\\big(W^{(t)}_{\\text{up}}W_{\\text{down}}\\big)_{c,r}\\,\\phi_r(\\lVert\\mathbf k\\rVert)\\ \\ (\\text{aperiodic})",
+      "code": [
+        {"file": "ocpmodels/models/ewald_block.py", "start": 116, "end": 129, "must": "torch.matmul(self.up.linear.weight, self.down.linear.weight)", "caption": "两种情形下的滤波器构造"},
+        {"file": "ocpmodels/models/schnet.py", "start": 150, "end": 172, "must": "self.num_k_degrees_of_freedom,", "caption": "W_down（k 自由度 → 瓶颈）跨层共享，每层一个 EwaldBlock"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "逆变换：长程消息送回每个原子",
+      "plain": "把滤波后的结构因子逆变换回每个原子位置：h_i^ew ∝ Σ_k Φ(k) Re[s(k) e^{−ik·x_i}]。展开后等价于对体系内所有原子对做卷积 Σ_j h_j Σ_k Φ(k) cos(k·(x_i−x_j))，即一个“学出来的长程两体核”，但从不显式枚举原子对，代价只有 O(N·N_k)。结果乘以代码写死的 0.01（GemNet-T 还乘一个 ScaleFactor），再过 Dense + num_hidden 个残差层作为更新函数。",
+      "math": "h^{\\text{ew}}_{ic}=\\mathrm{MLP}\\Big(0.01\\sum_{\\mathbf k}\\Phi_c(\\mathbf k)\\,d_i\\,\\mathrm{Re}\\big[s_c(\\mathbf k)\\,e^{-i\\mathbf k\\cdot\\mathbf x_i}\\big]\\Big)=\\mathrm{MLP}\\Big(0.01\\sum_{j\\in\\mathcal S}d_id_j\\,\\tilde h_{jc}\\sum_{\\mathbf k}\\Phi_c(\\mathbf k)\\cos\\big(\\mathbf k\\cdot(\\mathbf x_i-\\mathbf x_j)\\big)\\Big)",
+      "code": [
+        {"file": "ocpmodels/models/ewald_block.py", "start": 153, "end": 171, "must": "h_update = 0.01 * torch.sum(", "caption": "滤波 + 逆变换 + 更新 MLP"},
+        {"file": "ocpmodels/models/ewald_block.py", "start": 76, "end": 84, "must": "ResidualLayer(units, nLayers=2, activation=activation)", "caption": "更新函数：Dense + num_hidden 个残差层"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "与短程消息并联：h ← (h + Δh_SR + h_ew)/√3",
+      "plain": "Ewald 消息与宿主的短程消息并列：同一层里分别算出 Δh_SR（SchNet 连续滤波卷积、PaiNN 消息层、GemNet-T 原子更新块）和 h_ew，再一起加到残差上；SchNet 与 GemNet-T 中乘 (2+1)^{-1/2}=1/√3 以保持方差。PaiNN 中 Ewald 只更新标量通道 x，矢量通道 vec 不受影响。由于每层都加一次，下一层的短程消息也能把长程信息继续传给边/角度特征。",
+      "math": "h_i^{(t+1)}=\\tfrac{1}{\\sqrt3}\\Big(h_i^{(t)}+\\Delta h_i^{\\text{SR}}+h_i^{\\text{ew}}\\Big)",
+      "code": [
+        {"file": "ocpmodels/models/schnet.py", "start": 262, "end": 293, "must": "+ h_ewald", "caption": "SchNet：短程卷积 + Ewald 块相加"},
+        {"file": "ocpmodels/models/painn/painn.py", "start": 546, "end": 568, "must": "x = x + dx + dx_ewald + dx_at", "caption": "PaiNN：Ewald 只加到标量特征"},
+        {"file": "ocpmodels/models/gemnet/layers/interaction_block.py", "start": 243, "end": 260, "must": "h = h + h2 + h3 + h4", "caption": "GemNet-T：原子更新块 + Ewald 块"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：沿用宿主（DimeNet++ 额外拼接 Ewald 原子特征）",
+      "plain": "Ewald MP 不改变读出方式。SchNet 用 lin1→激活→lin2 得到原子能；GemNet-T 每层的 OutputBlock 输出原子能与边力标量。DimeNet++ 的主状态在边上，因此代码借用 GemNet 的原子嵌入单独维护一份原子特征 h，只由 Ewald 块更新，并在每个 OutputPPBlock 中与“边→原子”聚合的特征拼接后再进 MLP。",
+      "math": "E_i=W_2\\,\\sigma\\big(W_1h_i^{(T)}\\big)\\ (\\text{SchNet})\\qquad P_i^{(t)}=\\mathrm{MLP}\\Big(\\big[\\textstyle\\sum_{j}W_{\\text{rbf}}e_{\\text{rbf}}(r_{ji})\\odot m_{ji}\\ \\Vert\\ h_i^{(t)}\\big]\\Big)\\ (\\text{DimeNet++})",
+      "code": [
+        {"file": "ocpmodels/models/dimenet_plus_plus.py", "start": 222, "end": 233, "must": "x = torch.cat([x, h], dim=-1)", "caption": "OutputPPBlock：拼接 Ewald 原子特征"},
+        {"file": "ocpmodels/models/dimenet_plus_plus.py", "start": 638, "end": 667, "must": "h = self.skip_connection_factor * (h + h_ewald + h_at)", "caption": "DimeNet++：边交互 + 独立的 Ewald 原子特征"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能量：原子能求和",
+      "plain": "总能量是原子能之和（SchNet readout=add；GemNet-T extensive=True 时按结构求和），保持广延性。注意 Ewald 部分是全局的，所以这里的“原子能”已经依赖整个结构，而不只依赖截断球内的原子。",
+      "math": "E=\\sum_{i\\in\\mathcal S}E_i\\qquad(\\text{GemNet-T: }E_i=\\textstyle\\sum_{t=0}^{T}E_i^{(t)})",
+      "code": [
+        {"file": "ocpmodels/models/schnet.py", "start": 298, "end": 306, "must": "energy = scatter(h, batch, dim=0, reduce=self.reduce)", "caption": "SchNet：MLP 原子能 → 求和"},
+        {"file": "ocpmodels/models/gemnet/gemnet.py", "start": 706, "end": 719, "must": "E_t += E", "caption": "GemNet-T：逐层输出累加后按结构求和"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：autograd 或直接力头（取决于宿主与配置）",
+      "plain": "SchNet、DimeNet++ 用 autograd 求 −∂E/∂x；但 DimeNet++ 默认 detach_ewald=True，Ewald 块使用截断梯度的坐标，长程部分对力没有贡献（代码注释称 Ewald 块对力的贡献很小），此时力不再是总能量的严格梯度。OC20 配置里 PaiNN 与 GemNet-T 打开 direct_forces，用输出头直接预测力（GemNet-T：边上标量 × 单位方向向量再求和），更快但不保守。OE62 只训练能量，不回归力。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf x_i}\\ (\\text{SchNet, DimeNet++})\\qquad \\mathbf F_t=\\sum_{s}F_{st}\\,\\hat{\\mathbf v}_{st}\\ (\\text{GemNet-T direct})",
+      "code": [
+        {"file": "ocpmodels/models/schnet.py", "start": 308, "end": 324, "must": "torch.autograd.grad(", "caption": "SchNet：能量对坐标求导"},
+        {"file": "ocpmodels/models/gemnet/gemnet.py", "start": 721, "end": 733, "must": "F_st_vec = F_st[:, :, None] * V_st[:, None, :]", "caption": "GemNet-T 直接力：边标量 × 方向"},
+        {"file": "ocpmodels/models/dimenet_plus_plus.py", "start": 623, "end": 629, "must": "pos_detach = pos.detach() if self.detach_ewald else pos", "caption": "DimeNet++：Ewald 块默认用 detach 后的坐标"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "num_k_x / num_k_y / num_k_z（周期，OC20）", "value": "2 / 2 / 5（GemNet-T、DimeNet++）；1 / 1 / 3（SchNet、PaiNN）", "note": "倒格子整数索引盒，取半并去掉 k=0：(2,2,5)→137 个 k 点，(1,1,3)→31 个（YAML 行尾注释是复制来的，与含义不符）", "code": {"file": "configs_oc20/gemnet_oc20_ewald.yml", "start": 113, "end": 120, "must": "num_k_z: 5"}},
+    {"name": "k_cutoff（非周期，OE62）", "value": "0.4（SchNet）/ 0.6（PaiNN）/ 0.8（DimeNet++）/ 1.0（GemNet-T）Å⁻¹", "note": "频率截断：只保留 |k| ≤ k_c 的体素", "code": {"file": "configs_oe62/gemnet_oe62_ewald.yml", "start": 74, "end": 79, "must": "k_cutoff: 1.0"}},
+    {"name": "delta_k", "value": "0.2 Å⁻¹", "note": "非周期体素网格间距（四个 OE62 Ewald 配置相同）", "code": {"file": "configs_oe62/schnet_oe62_ewald.yml", "start": 56, "end": 61, "must": "delta_k: 0.2"}},
+    {"name": "num_k_rbf", "value": "128（GemNet-T/PaiNN/DimeNet++）；48（SchNet）", "note": "|k| 上的高斯径向基个数；径向基截断为 k_c + 0.1（≤48 个）或 + 0.25", "code": {"file": "ocpmodels/common/utils.py", "start": 1113, "end": 1127, "must": "k_offset = 0.1 if num_k_rbf <= 48 else 0.25"}},
+    {"name": "downprojection_size", "value": "16（GemNet-T）；8（SchNet/PaiNN/DimeNet++）", "note": "滤波器低秩瓶颈宽度 Φ = W_up·W_down，W_down 跨层共享", "code": {"file": "configs_oc20/gemnet_oc20_ewald.yml", "start": 113, "end": 120, "must": "downprojection_size: 16"}},
+    {"name": "num_hidden", "value": "3（SchNet/DimeNet++/GemNet-T）；0（PaiNN）", "note": "更新函数中的残差层数；GemNet-T 的 EwaldBlock 实际传入 num_atom（配置同为 3）", "code": {"file": "ocpmodels/models/gemnet/layers/interaction_block.py", "start": 117, "end": 129, "must": "self.ewald_block = EwaldBlock("}},
+    {"name": "cutoff（实空间短程）", "value": "6.0 Å", "note": "所有 Ewald 变体的宿主截断；对照的 _cutoff 变体在 OE62 上用 12 Å（GemNet-T 为 8 Å），_atomic 变体加 12 Å 原子-原子卷积", "code": {"file": "configs_oe62/schnet_oe62_ewald.yml", "start": 48, "end": 65, "must": "cutoff: 6.0"}},
+    {"name": "detach_ewald（DimeNet++）", "value": "True（默认）", "note": "Ewald 块用 pos.detach()，长程部分不参与力的反传", "code": {"file": "ocpmodels/models/dimenet_plus_plus.py", "start": 431, "end": 435, "must": "self.detach_ewald = ewald_hyperparams.get("}},
+    {"name": "跳连因子 / 输出缩放", "value": "(2+1)^{-1/2}；逆变换结果 ×0.01", "note": "均为代码中的固定常数", "code": {"file": "ocpmodels/models/schnet.py", "start": 198, "end": 200, "must": "2.0 + float(self.use_ewald) + float(self.use_atom_to_atom_mp)"}}
+  ],
+  "speedNotes": [
+    "开销 ∝ N·N_k·C：结构因子（index_add_ 聚合）和逆变换都是“原子 × k 点 × 通道”的逐元素运算，没有 O(N²) 原子对；相位 k·x 与 sinc 阻尼只在第一个 Ewald 块计算，之后各层复用。",
+    "中间张量形状为 (N, N_k, C)，N_k 或通道数大时显存是主要瓶颈；周期体系 N_k 由索引盒决定（如 (2,2,5)→137），非周期由 k_c/Δk 决定。",
+    "与“加大截断半径”相比：均匀密度下邻居数 ∝ r_c³，6 Å → 12 Å 约多 8 倍边；Ewald 块的代价与截断无关。仓库专门提供 _cutoff 与 _atomic（12 Å 原子-原子卷积）对照配置。",
+    "k 点少而稀疏，直接求和而非 FFT/PME，无专用 CUDA 内核；非周期体系每个结构要在 Python 循环中做一次 SVD。README 提示即使最快的模型在单张 A100 上训练 OC20 也要数天。"
+  ],
+  "weakNotes": [
+    "这是“学出来的”长程相互作用，不是物理电荷的 Ewald 静电：网络不预测电荷，Φ(k) 也不受 4π/k² 库仑形式约束，可以拟合类色散、类极化或类静电的平滑长程项，但没有 1/r、1/r⁶ 渐近行为的保证。",
+    "对静电而言，k=0 项被排除且 Φ(k) 有界，无法表示库仑核在 k→0 的发散（净电荷、宏观偶极/极化效应）；也没有总电荷/自旋输入，带电体系、电荷转移、外场仍无法正确描述。",
+    "对色散等弱相互作用：短程细节交给 6 Å 宿主 GNN，倒空间只保留波长 ≳ 2π/k_max 的平滑成分，正好覆盖分子间、吸附质-表面之间的中长程尾巴；但能学到多少取决于训练数据是否包含这类能量（OE62 为 PBE0 能量，配置中另有注释掉的 d3fit 变体）。",
+    "周期体系的滤波器绑定在倒格子索引 (n₁,n₂,n₃) 上：晶胞越大，同一索引对应的波长越长，换成超胞或尺寸差异很大的晶胞时同一组权重的物理含义会变，外推需谨慎。",
+    "非周期体系用固定 Δk 网格，实空间等效周期约 2π/Δk（Δk=0.2 Å⁻¹ 时约 31 Å），更大的分子/团簇会出现混叠，sinc 阻尼只能部分抑制。"
+  ],
+  "downstreamNotes": [
+    "作为插件：在配置里给宿主（SchNet/PaiNN/DimeNet++/GemNet-T）加 ewald_hyperparams 即可启用，不改短程部分；OE62 只训练能量（regress_forces: False），OC20 训练能量 + 力（S2EF 2M）。",
+    "MD/声子：只有 autograd 且不 detach 的设置才给出保守力；DimeNet++ 默认 detach_ewald、PaiNN 与 GemNet-T 的 OC20 配置用直接力，均非严格保守，不适合需要能量守恒或 Hessian 的任务。",
+    "非周期体系依赖 SVD 主轴系：奇异值接近简并时主轴不唯一，而立方 k 网格不具备连续旋转对称，能量面可能有轻微不光滑，对几何优化/MD 是潜在风险。",
+    "无应力/维里、无 LAMMPS 接口、无公开预训练权重（README 只提供训练/评估笔记本与 seml 配置）；弹性常数、NPT 模拟需要自行扩展。"
+  ],
+  "strengths": ["与宿主无关的插件，四种主流 GNN 均可直接加装", "代价 O(N·N_k)，比加大截断或全连接原子对便宜", "单层即获全局（含周期镜像）感受野", "周期与非周期体系统一处理（倒格矢 / 体素网格）"],
+  "weaknesses": ["学到的是“类长程”项而非物理静电/色散，渐近行为无保证", "无电荷、自旋、外场输入，k=0（宏观极化）被排除", "非周期依赖 SVD 坐标系，周期滤波器绑定晶格索引，可迁移性受限", "无应力、无预训练模型、无 LAMMPS 接口", "部分宿主配置（直接力、detach_ewald）力不保守"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

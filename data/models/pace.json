@@ -1,0 +1,198 @@
+{
+  "id": "pace",
+  "name": "ACE / PACE",
+  "fullName": "Atomic Cluster Expansion（原子团簇展开）—— PACE 高性能实现 + pacemaker 拟合工具",
+  "year": 2019,
+  "authors": "R. Drautz（ACE 理论）；Y. Lysogorskiy, A. Bochkarev, R. Drautz 等（PACE / pacemaker）",
+  "paper": {"title": "Atomic cluster expansion for accurate and transferable interatomic potentials", "venue": "Physical Review B 99, 014104 (2019)；PACE 实现见 npj Comput. Mater. 7 (2021)", "url": "https://journals.aps.org/prb/abstract/10.1103/PhysRevB.99.014104"},
+  "repos": ["python-ace"],
+  "family": "linear-kernel",
+  "tags": ["原子团簇展开 ACE", "完备多体基", "广义 CG 耦合", "Finnis–Sinclair 嵌入", "ZBL 近程排斥", "外推等级 γ"],
+  "framework": "C++ 求值器 + Python（pyace / pybind11）；拟合后端 TensorFlow（tensorpotential）",
+  "license": "ASL 学术软件许可（非商用）",
+  "oneLiner": "把邻居密度投影到“径向函数 × 球谐”正交基上得到原子基 A，再把 ν 个 A 相乘、用广义 Clebsch–Gordan 系数耦合成旋转不变的多体基 B；能量是 B 的线性组合再经过一个 Finnis–Sinclair 型非线性嵌入（默认 ρ₁+√ρ₂），严格局域、可系统收敛且极快。",
+  "analogy": "像做“和弦分析”：先把每个邻居发出的“音”按音高（径向 n）和方向音色（球谐 l,m）分频道记录总响度（A 基）；再把 2 个、3 个……频道的响度相乘，并按“和声规则”（CG 系数）组合成与听者朝向无关的“和弦特征”（B 基）；最后只需一个加权求和（外加一点开根号式修饰）就给出这个原子的能量。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离 r（SBessel / ChebExpCos / ChebPow 径向基 g_k → 可学习 R_nl）+ 方向（复球谐 Y_lm）",
+    "equivariance": "严格 E(3) 不变：A 基对旋转等变，经广义 CG 耦合到总角动量 0 后完全不变",
+    "lmax": "lmax_by_orders：模板 UNARY [0,3,3,2,2,1] → l ≤ 3",
+    "bodyOrder": "按阶 rank ν：UNARY/BINARY 模板 ν≤6（7 体），TERNARY/ALL ν≤5",
+    "layers": "1（单层团簇展开，无消息传递）",
+    "cutoff": "用户设定 rcut（pacemaker -t 默认 7 Å，文档示例 5 Å），可按元素对不同",
+    "receptiveField": "= r_c（严格局域）",
+    "message": "无消息传递：A_{μnlm} = Σ_j R_nl^{μiμj}(r_ij)·Y_lm(r̂_ij)；B = Σ_m 广义CG·Π_{t≤ν} A",
+    "readout": "ρ_p = Σ c_p·B（ndensity=2）→ FS 嵌入 E_i = ρ₁ + F_{0.5}(ρ₂)，再加 E0",
+    "forces": "conservative",
+    "forcesDetail": "C++ 手写解析链式法则：先求 ω = ∂E_i/∂A，再对每条边 Σ ω·∇(R_nl Y_lm) 得 f_ij，F_i += f_ij、F_j −= f_ij",
+    "stress": "维里 Σ r_ij ⊗ f_ij（与 LAMMPS virial_fdotr 相同），σ = W / V",
+    "longRange": "无（严格局域，截断外贡献为 0）",
+    "dispersion": "无内置 D3；只能由训练数据在截断内隐式学到",
+    "chargeSpin": "无总电荷 / 自旋输入",
+    "otherOutputs": "逐原子能量、外推等级 γ（MaxVol 活跃集，D-最优）、B 基投影（主动学习 / 结构选择）",
+    "strictlyLocal": true,
+    "complexity": "O(N·M·n_r·(l_max+1)²) 构建 A + O(N·Σ_B N_ms·ν) 乘积；对 N 线性，基函数数随元素数组合式增长",
+    "accel": "C̃ 预合并系数、R_nl/g_k/ZBL 样条查表、可选递归求值器；LAMMPS ML-PACE（pair_style pace / pace/extrapolation，MPI）；拟合用 tensorpotential 单 GPU"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "单层、严格局域，只有样条查表与复数乘积，C++/LAMMPS 在 CPU 上即很快，属描述符/线性模型这一最快档。"},
+    "expressiveness": {"v": 5, "why": "ACE 基在体序与角分辨上完备（模板到 7 体、l≤3），可系统收敛；实际受基函数数量与多元素组合爆炸限制。"},
+    "longRange": {"v": 1, "why": "严格局域，没有色散、静电或电荷模块。"},
+    "scalability": {"v": 5, "why": "单层严格局域，LAMMPS ML-PACE 直接按空间分解做 MPI 并行，线性扩展。"},
+    "physics": {"v": 5, "why": "解析保守力、截断处平滑、原子能加和 + E0 保证广延性、自动 ZBL 近程排斥、CG 耦合给出精确旋转不变。"},
+    "coverage": {"v": 2, "why": "能量/力/应力/原子能之外，官方只额外提供逐原子外推等级 γ；无偶极、电荷、磁矩等输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞（ASE Atoms）",
+      "plain": "PyACECalculator 接收 ASE Atoms：笛卡尔坐标、原子序数、晶胞与周期性；快速邻居表路径只支持“全周期”或“全非周期”。ACE 不依赖自动微分框架——后面的力与应力都由 C++ 中手写的解析导数给出。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{\\text{all},\\text{none}\\}",
+      "code": [{"file": "src/pyace/atomicenvironment.py", "start": 108, "end": 118, "must": "build_atomic_env(positions_, cell_, species_type_, pbc, cutoff)", "caption": "aseatoms_to_atomicenvironment：读取坐标/元素/晶胞并构建原子环境与邻居表"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：每个中心原子 r_c 内的邻居（按元素对截断）",
+      "plain": "邻居表（含周期镜像）先按最大截断构建；进入 C++ 后，每个中心原子 i 再用元素对 (μ_i, μ_j) 自己的截断过滤，并缓存距离 r 与单位方向 r̂。只有一个截断球、没有多层消息传递，这就是“严格局域”：E_i 只取决于 r_c 内的原子，因此能完美地做空间分解并行。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ r_{ij}=\\lVert\\mathbf r_j-\\mathbf r_i\\rVert<r_c^{\\mu_i\\mu_j}\\,\\},\\qquad \\hat{\\mathbf r}_{ij}=(\\mathbf r_j-\\mathbf r_i)/r_{ij}",
+      "code": [{"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 274, "end": 309, "must": "if (r_xyz >= current_cutoff)", "caption": "compute_atom：按元素对截断过滤邻居，缓存 r 与 r̂"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "径向：SBessel 基 g_k(r) → 每对元素可学习的 R_nl(r)",
+      "plain": "模板默认的 SBessel（简化球 Bessel）由两个 sinc 相加构成，在 r_c 处函数值和一阶导数都为零，天然平滑截断，再经递推正交化。每对元素 (μ_i, μ_j) 有自己的可学习系数 c_nlk，把 g_k 线性组合成依赖 l 的 R_nl——这是 ACE 的“径向通道”。也可选 ChebExpCos（Chebyshev × 余弦包络）、ChebPow 等；运行时 R_nl 被预制成步长 0.001 Å 的样条表，只需查表。",
+      "math": "f_k(r)=(-1)^k\\frac{\\sqrt2\\,\\pi}{r_c^{3/2}}\\frac{(k+1)(k+2)}{\\sqrt{(k+1)^2+(k+2)^2}}\\Big[\\mathrm{sinc}\\tfrac{(k+1)\\pi r}{r_c}+\\mathrm{sinc}\\tfrac{(k+2)\\pi r}{r_c}\\Big],\\ \\ g_k=\\tfrac{1}{\\sqrt{d_k}}\\Big(f_k+\\sqrt{\\tfrac{e_k}{d_{k-1}}}\\,g_{k-1}\\Big)\\qquad R^{\\mu_i\\mu_j}_{nl}(r)=\\sum_k c^{\\mu_i\\mu_j}_{nlk}\\,g_k(r)",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_radial.cpp", "start": 403, "end": 406, "must": "(sinc(x * (n + 1) * pi / rc) + sinc(x * (n + 2) * pi / rc))", "caption": "SBessel 辅助函数 f_n：两个 sinc 之和"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_radial.cpp", "start": 426, "end": 443, "must": "en = sqr(n) * sqr(n + 2) / (4 * pow(n + 1, 4) + 1);", "caption": "simplified_bessel：递推正交化得到 g_k 及其导数"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_radial.cpp", "start": 465, "end": 479, "must": "frval += crad(elei, elej, n, l, k) * gr(k);", "caption": "radfunc：R_nl = Σ_k crad·g_k（元素对相关）"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向：笛卡尔形式的复球谐 Y_lm(r̂)",
+      "plain": "方向用复球谐函数编码：由 ẑ 分量算归一化缔合 Legendre 多项式，再乘上相位 (x̂+iŷ)^m，同时得到对 r̂ 的导数（供解析力使用）。只存 m ≥ 0 的部分，负 m 由对称关系免费得到。球谐在旋转下按 Wigner 矩阵变换，这正是后面能“耦合出”严格不变量的前提。",
+      "math": "Y_l^m(\\hat{\\mathbf r})=\\bar P_l^m(\\hat z)\\,(\\hat x+i\\hat y)^m\\ \\ (m\\ge0),\\qquad Y_l^{-m}=(-1)^m\\,\\overline{Y_l^{m}}",
+      "code": [{"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_spherical_cart.cpp", "start": 141, "end": 167, "must": "ylm(l, m) = phase * plm(l, m);", "caption": "compute_ylm：P̄_lm(z) × 相位 (x+iy)^m，并同时求 dY/dr̂"}]
+    },
+    {
+      "stage": "interaction",
+      "title": "原子基 A：对邻居求和的“密度投影”（两体信息）",
+      "plain": "对每个邻居只计算一次 R_nl·Y_lm，并按邻居元素 μ 分组累加，得到原子基 A_{iμnlm}；一阶（ν=1）函数直接用 g_k·Y_00。A 相当于把邻居原子密度投影到“径向 × 球谐”正交基上，代价与邻居数 M 成正比，与之后的体序无关——这是 ACE 避免 ν 重邻居求和的关键技巧。核排斥能也在这个循环里顺带累加。",
+      "math": "A_{i\\mu nlm}=\\sum_{j\\in\\mathcal N(i)}\\delta_{\\mu\\mu_j}\\,R^{\\mu_i\\mu_j}_{nl}(r_{ij})\\,Y_l^m(\\hat{\\mathbf r}_{ij}),\\qquad A_{i\\mu k}^{(1)}=\\sum_{j}\\delta_{\\mu\\mu_j}\\,g_k(r_{ij})\\,Y_0^0,\\qquad A_{i\\mu nl,-m}=(-1)^m\\overline{A_{i\\mu nlm}}",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 324, "end": 364, "must": "A_lm(l, m) += R * Y;", "caption": "ALGORITHM 1：样条查表 R_nl、计算 Y_lm，累加到 A（及 rank-1 的 A）"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 368, "end": 381, "must": "A_lm(l, -m) = A_lm(l, m).conjugated() * factor;", "caption": "负 m 分量由复共轭对称得到"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "乘积基 B：ν 个 A 相乘 + 广义 Clebsch–Gordan 耦合（多体、不变）",
+      "plain": "把 ν 个 A（可来自不同元素、径向与 l 通道）相乘，再用“广义 CG 系数”——沿一棵耦合树把普通 CG 系数连乘——对所有 m 组合求和，把总角动量耦合到 0，得到旋转不变的 (ν+1) 体基函数 B。由于 A 已经对邻居求过和，ν 阶乘积的代价只与原子数成正比。部署前，线性系数 c 与广义 CG 会被预先合并成 c̃（.yace 格式），求值时不再显式出现 CG。",
+      "math": "\\mathcal C^{\\mathbf L}_{\\mathbf{lm}}=\\prod_{\\text{tree nodes}}C^{L_cM_c}_{l_am_a,\\,l_bm_b},\\qquad B_{i\\nu}=\\sum_{\\mathbf m}\\mathcal C^{\\mathbf L}_{\\mathbf{lm}}\\prod_{t=1}^{\\nu}A_{i\\mu_tn_tl_tm_t},\\qquad \\tilde c^{(p)}_{\\boldsymbol\\mu\\mathbf{nlm}}=\\sum_{\\mathbf L}c^{(p)}_{\\boldsymbol\\mu\\mathbf{nl}\\mathbf L}\\,\\mathcal C^{\\mathbf L}_{\\mathbf{lm}}",
+      "code": [
+        {"file": "lib/ace/src/ace/ace_couplings.cpp", "start": 476, "end": 511, "must": "gen_Clebsch_Gordan_coef *= cg_value;", "caption": "沿耦合树连乘 CG 系数得到广义 CG"},
+        {"file": "lib/ace/src/ace/ace_b_basis.cpp", "start": 77, "end": 88, "must": "bas_func->coeff[p] * bas_func->gen_cgs[ms_ind]", "caption": "B 基 → C̃ 基：把系数 c 与广义 CG 预合并为 c̃"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "线性展开：ρ_p = Σ c_p·B（前向/后向乘积三角）",
+      "plain": "对每个基函数的每个 m 组合，用“前向/后向乘积三角”一次算出 A 的连乘 B 以及“去掉第 t 个 A 的乘积” ∂B/∂A_t，后者直接留给力计算。ρ_p 只是 B 的线性组合（取实部），每个原子有 ndensity=2 个这样的“密度”。到这一步为止，模型对系数 c 是线性的——这就是 ACE 被归入线性/核类模型的原因。",
+      "math": "\\rho^{(p)}_i=\\sum_{\\nu}c^{(p)}_{\\nu}B_{i\\nu}=\\sum_{\\boldsymbol\\mu\\mathbf{nlm}}\\tilde c^{(p)}_{\\boldsymbol\\mu\\mathbf{nlm}}\\,\\mathrm{Re}\\prod_{t=1}^{\\nu}A_{i\\mu_tn_tl_tm_t},\\qquad \\frac{\\partial B}{\\partial A_t}=\\prod_{s<t}A_s\\prod_{s>t}A_s",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 434, "end": 475, "must": "rhos(p) += B.real_part_product(func->ctildes[ms_ind * ndensity + p]);", "caption": "ALGORITHM 2：A 的乘积（前向/后向三角）→ 累加 ρ_p"},
+        {"file": "lib/ace/src/ace/ace_b_evaluator.cpp", "start": 426, "end": 436, "must": "func->gen_cgs[ms_ind] * func->coeff[p]", "caption": "B 基求值器：ρ_p += Re(广义CG·c_p·ΠA)，同时记录 B 投影"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "非线性嵌入：Finnis–Sinclair 型 E_i = Σ_p w_p F(ρ_p)",
+      "plain": "PACE 不是纯线性 ACE：每个密度 ρ_p 再通过一个幂函数嵌入。默认 fs_parameters [1,1,1,0.5] 表示 E_i = ρ₁ + F_{0.5}(ρ₂)，即“线性项 + 平方根项”，形式类似 EAM / Finnis–Sinclair。“ShiftedScaled”版本加了 e^{−|ρ|} 修正，使 F 在 ρ=0 处为零且导数有限，避免 √ρ 在零点导数发散。",
+      "math": "E^{\\text{ACE}}_i=\\sum_{p}w_p\\,F_{m_p}\\big(\\rho^{(p)}_i\\big),\\quad F_m(\\rho)=\\mathrm{sgn}(\\rho)\\Big[\\big(|\\rho|+x_m e^{-|\\rho|}\\big)^{m}-y_m e^{-|\\rho|}\\Big],\\ x_m=m^{-\\frac{1/m}{1-1/m}},\\ y_m=m^{-\\frac{1}{1-1/m}}\\qquad \\text{default: }E_i=\\rho^{(1)}_i+F_{1/2}\\big(\\rho^{(2)}_i\\big)",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_abstract_basis.cpp", "start": 67, "end": 84, "must": "F = sign_factor * (pow(xoff + a, mexp) - yoff);", "caption": "FexpShiftedScaled：平滑化的 sign(ρ)|ρ|^m"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_abstract_basis.cpp", "start": 101, "end": 121, "must": "value += F * wpre;", "caption": "FS_values_and_derivatives：E = Σ_p w_p F(ρ_p)，并给出 dF/dρ_p"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：ACE ↔ ZBL 内截断平滑切换 + E0",
+      "plain": "默认（repulsion: auto）pacemaker 取训练集中每对元素的最小距离作为内截断 r_in；当中心原子的最近邻进入 [r_in−Δ_in, r_in] 时，ACE 能量被多项式开关平滑地换成 ZBL 普适屏蔽库仑排斥（4 项指数屏蔽函数，系数来自 LAMMPS pair_zbl）。这样原子被挤得很近时也有物理正确的强排斥，而不是靠 ACE 在训练集外胡乱外推。最后加上每种元素的参考能 E0，总能是原子能之和（广延）。",
+      "math": "E=\\sum_i\\Big[f_i\\,E^{\\text{ACE}}_i+(1-f_i)\\sum_{j}V^{\\text{ZBL}}_{ij}+E_0(\\mu_i)\\Big],\\quad f_i=f_{\\text{poly}}\\big(r_{\\text{in}}-r_i^{\\min}\\big),\\quad V^{\\text{ZBL}}_{ij}=\\tfrac{K}{2}Z_iZ_j\\Big[\\tfrac{\\phi(r_{ij}/a)}{r_{ij}}+S(r_{ij})\\Big],\\ a=\\tfrac{0.4685}{Z_i^{0.23}+Z_j^{0.23}},\\ \\phi(x)=\\sum_{k=1}^{4}c_ke^{-d_kx}",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 502, "end": 535, "must": "evdwl_cut += basis_set->E0vals(mu_i);", "caption": "FS 嵌入 → ZBL/内截断混合 → 加 E0"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_radial.cpp", "start": 659, "end": 683, "must": "cr = prefactor * ACEZBL::K / 2 * Zi * Zj * (E_ij + S);", "caption": "ZBL 对势（带外截断平滑移位 S）"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_radial.cpp", "start": 60, "end": 68, "must": "phi += ZBL_phi_coefs[k] * exp(ZBL_phi_exps[k] * x);", "caption": "ZBL 普适屏蔽函数 φ(x)"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：手写伴随（adjoint）+ 链式法则，逐边得到 f_ij",
+      "plain": "先把 dF/dρ 与 c̃、∂B/∂A 合成“权重” ω = ∂E_i/∂A（相当于反向传播一次），然后对每个邻居 j 只需 Σ ω·∇(R_nl Y_lm)，加上核排斥项，得到成对力 f_ij。力的代价与能量同量级，且严格是能量的负梯度（保守），NVE 下能量守恒。成对力按牛顿第三定律分别加到 i、减到 j。",
+      "math": "\\omega_{i\\mu nlm}=\\frac{\\partial E_i}{\\partial A_{i\\mu nlm}}=\\sum_pF'\\big(\\rho^{(p)}_i\\big)\\sum\\tilde c^{(p)}\\frac{\\partial B}{\\partial A_{\\mu nlm}},\\qquad \\mathbf f_{ij}=\\frac{\\partial E_i}{\\partial\\mathbf r_j}=\\sum_{nlm}\\mathrm{Re}\\Big[\\omega_{i\\mu_jnlm}\\nabla_{\\mathbf r_{ij}}\\big(R_{nl}Y_l^m\\big)\\Big],\\qquad \\mathbf F_k=-\\sum_i\\frac{\\partial E_i}{\\partial\\mathbf r_k}",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 565, "end": 592, "must": "theta += dF_drho(p) * func->ctildes[ms_ind * ndensity + p];", "caption": "ALGORITHM 3：θ = Σ_p F'·c̃，权重 ω += θ·∂B/∂A"},
+        {"file": "lib/ace/ace-evaluator/src/ace-evaluator/ace_evaluator.cpp", "start": 672, "end": 711, "must": "grad_phi_nlm.a[0] = Y_DR * r_hat[0] + DY.a[0] * R_over_r;", "caption": "逐邻居：∇(R_nl Y_lm) 与 ω 收缩得到 f_ij"},
+        {"file": "lib/ace/ace-evaluator/src/extra/ace_calculator.cpp", "start": 121, "end": 160, "must": "forces(j, 0) -= fx;", "caption": "ACECalculator：F_i += f_ij，F_j −= f_ij，同时累加维里"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：成对力维里 Σ r_ij ⊗ f_ij / V",
+      "plain": "由于力是逐对给出的，维里可以直接累加 r_ij ⊗ f_ij（与 LAMMPS 的 virial_fdotr 完全相同），除以晶胞体积即为应力，几乎不需要额外计算。ASE 接口再把 Voigt 分量顺序换成 ASE 约定。",
+      "math": "\\sigma_{\\alpha\\beta}=\\frac{1}{V}\\sum_i\\sum_{j\\in\\mathcal N(i)}r_{ij,\\alpha}\\,\\frac{\\partial E_i}{\\partial r_{ij,\\beta}}",
+      "code": [
+        {"file": "lib/ace/ace-evaluator/src/extra/ace_calculator.cpp", "start": 148, "end": 154, "must": "virial(0) += dx * fx;", "caption": "维里 f·r 累加"},
+        {"file": "src/pyace/asecalc.py", "start": 176, "end": 181, "must": "self.stress = self.virial[[0, 1, 2, 5, 4, 3]] / self.volume", "caption": "PyACECalculator：σ = 维里 / V（换成 ASE Voigt 顺序）"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "不确定度：外推等级 γ（D-最优活跃集）",
+      "plain": "训练后用 MaxVol 算法从训练集所有原子环境的 B 投影矩阵中挑出“体积（行列式）最大”的一组作为活跃集（D-最优），并求其（伪）逆。预测时每个原子的 B 投影乘以该逆矩阵，取最大绝对值即 γ：γ ≤ 1 表示内插，γ > 1 表示外推。ASE 计算器默认在 γ ≥ 1.1 时可收集/导出外推结构，γ ≥ 5 时打印警告（可设为直接中止）；LAMMPS 的 pace/extrapolation 可在 MD 中实时监控并导出结构，用于主动学习。",
+      "math": "\\gamma_i=\\max_k\\Big|\\sum_m b_{i,m}\\big(\\mathbf A_{\\text{AS}}^{-1}\\big)_{km}\\Big|,\\qquad \\mathbf A_{\\text{AS}}=\\underset{\\text{rows}}{\\arg\\max}\\,|\\det\\mathbf A|\\ \\ (\\text{MaxVol})",
+      "code": [
+        {"file": "lib/ace/src/ace/ace_b_evaluator.cpp", "start": 750, "end": 770, "must": "current_gamma += asi_vector(k) * A_as_inv(i, k);", "caption": "逐原子 γ = max|b·A_AS⁻¹|"},
+        {"file": "src/pyace/activelearning.py", "start": 404, "end": 421, "must": "maxvol(cur_A0, tol=tol, max_iters=max_iters, verbose=verbose)", "caption": "compute_active_set：按元素用 MaxVol 选活跃集"},
+        {"file": "src/pyace/asecalc.py", "start": 187, "end": 200, "must": "max_gamma = max(self.ace.gamma_grade)", "caption": "ASE 计算器按 γ 阈值收集/导出外推结构，超上限警告或中止"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "rcut", "value": "7.0 Å（pacemaker -t 交互模板默认；文档示例 5 Å）", "note": "外截断，可按元素对设置", "code": {"file": "src/pyace/cli/pacemaker.py", "start": 326, "end": 327, "must": "default:7.0"}},
+    {"name": "radbase / dcut", "value": "SBessel / 0.01 Å（可选 ChebExpCos、ChebPow、ChebLinear；radparameters [5.25] 为 Cheb* 的 λ）", "note": "径向基 g_k", "code": {"file": "src/pyace/data/input_template.yaml", "start": 23, "end": 30, "must": "radbase: SBessel"}},
+    {"name": "nradmax_by_orders / lmax_by_orders", "value": "UNARY [15,6,4,3,2,2] / [0,3,3,2,2,1]；BINARY [15,6,3,2,2,1] / [0,3,2,1,1,0]", "note": "按阶 ν 的径向数与 l 上限 → 最高 7 体", "code": {"file": "src/pyace/data/input_template.yaml", "start": 32, "end": 37, "must": "nradmax_by_orders: [ 15, 6, 4, 3, 2, 2 ]"}},
+    {"name": "number_of_functions_per_element", "value": "700（交互模板默认）", "note": "每种元素保留的 B 基函数数", "code": {"file": "src/pyace/cli/pacemaker.py", "start": 322, "end": 324, "must": "default 700"}},
+    {"name": "embedding（npot / fs_parameters / ndensity）", "value": "FinnisSinclairShiftedScaled / [1, 1, 1, 0.5] / 2", "note": "E = 1·ρ₁¹ + 1·ρ₂^0.5", "code": {"file": "src/pyace/data/input_template.yaml", "start": 16, "end": 21, "must": "fs_parameters: [ 1, 1, 1, 0.5 ]"}},
+    {"name": "deltaSplineBins", "value": "0.001 Å", "note": "g_k、R_nl、核排斥的样条查表步长", "code": {"file": "src/pyace/data/input_template.yaml", "start": 12, "end": 13, "must": "deltaSplineBins: 0.001"}},
+    {"name": "repulsion", "value": "auto → ZBL；r_in = 训练集该元素对最小距离，Δ_in = 0.1 Å", "note": "内截断以内平滑切换为 ZBL", "code": {"file": "src/pyace/generalfit.py", "start": 402, "end": 411, "must": "setup_zbl_inner_core_repulsion(basis_conf, min_distance_per_bond)"}},
+    {"name": "loss", "value": "kappa 0.3，L1 1e-8，L2 1e-8", "note": "能量/力权衡系数 κ 与系数正则", "code": {"file": "src/pyace/data/input_template.yaml", "start": 52, "end": 53, "must": "kappa: 0.3"}},
+    {"name": "optimizer / maxiter", "value": "BFGS / 2000", "note": "全批量拟合（可选 L-BFGS-B）", "code": {"file": "src/pyace/data/input_template.yaml", "start": 58, "end": 61, "must": "maxiter: 2000"}},
+    {"name": "gamma_lower_bound / gamma_upper_bound", "value": "1.1 / 5.0", "note": "ASE 计算器外推等级阈值", "code": {"file": "src/pyace/asecalc.py", "start": 55, "end": 58, "must": "kwargs[\"gamma_upper_bound\"] = 5.0"}}
+  ],
+  "speedNotes": [
+    "FLOPs 主要在两处：每条边一次 R_nl 样条查表 + Y_lm 计算并累加到 A（∝ N·M·n_r·(l_max+1)²）；以及每个基函数每个 m 组合的 ν 次复数乘法（∝ N·基函数数）。没有逐边的大矩阵乘或张量积，CPU 上就很快。",
+    "C̃ 技巧：把线性系数 c 与广义 CG 预先合并（.yace 格式），求值时只剩“A 的乘积再加权求和”；前向/后向乘积三角一次给出所有 ∂B/∂A，因此解析力的代价与能量同量级。",
+    "径向函数、ZBL 都预制成 deltaSplineBins=0.001 Å 的样条表；还可选递归求值器（ACERecursiveEvaluator）复用公共的低阶子乘积。",
+    "基函数数随元素数组合式增长（每个 B 要指定 ν 个邻居元素），多元素体系成本与内存陡增；pacemaker 用 number_of_functions_per_element（模板 700）与 ladder 逐步加基函数来控制规模。",
+    "拟合默认用 TensorFlow 后端 tensorpotential 在单块 GPU 上做 BFGS 全批量优化，官方文档说明暂不支持多 GPU；推理则走 C++/LAMMPS（CPU MPI）。"
+  ],
+  "weakNotes": [
+    "严格局域：E_i 只依赖 r_c（模板默认 7 Å）内的原子，没有消息传递扩展感受野；截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失。",
+    "没有电荷/自旋输入、电荷平衡或 Ewald；带电缺陷、离子液体、极性表面、界面电荷转移等需要长程静电的体系会出错。",
+    "pacemaker 是拟合工具而非基础模型，参考泛函完全由用户数据决定；若参考 DFT 不含色散（如纯 PBE），层状材料层间结合、分子晶体、物理吸附会明显偏弱。",
+    "仓库内无官方 D3 / 色散外挂；需要时只能在训练数据中包含色散校正（在截断内隐式学习），或由用户在 LAMMPS 中自行叠加其它色散项。",
+    "外推等级 γ 能在 MD 中实时发现“没见过”的局域环境（异常压缩、陌生吸附构型等），提示需要补算 DFT，但它不能修复缺失的长程物理。"
+  ],
+  "downstreamNotes": [
+    "解析保守力 + 平滑截断 → 力连续，可用有限差分做声子、热导率与弹性常数；维里直接给出应力，适合 NPT、状态方程与力学模拟。",
+    "LAMMPS pair_style pace 适合大体系长时间 MD（缺陷、位错、晶界、相变、熔化等）；自动 ZBL 内核使高压与辐照级联等近距离碰撞仍然稳定。",
+    "pace/extrapolation + fix halt / dump：MD 中监控 γ，超阈值时导出或停机，配合 pace_activeset、pace_select（D-最优结构选择）形成主动学习闭环。",
+    "本仓库无偶极、极化率、电荷或磁矩输出，红外/拉曼光谱、磁性与电化学问题需要其它模型或扩展。"
+  ],
+  "strengths": ["体序完备、可系统收敛的基（rank、n、l 均可调）", "极快：C++ 求值、单层严格局域、LAMMPS MPI 线性扩展", "内建 ZBL 近程排斥，近距离碰撞稳定", "D-最优外推等级 γ，天然支持主动学习", "参数少、数据效率高，单元/二元金属与合金是经典应用"],
+  "weaknesses": ["多元素时基函数组合爆炸，难以覆盖全周期表", "严格局域：无长程静电、色散、电荷/自旋", "非线性只有 FS 型嵌入，复杂化学下容量不及深度等变 MPNN", "需手工设计基形状（nradmax/lmax_by_orders、rcut）", "ASL 学术许可，不可商用"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

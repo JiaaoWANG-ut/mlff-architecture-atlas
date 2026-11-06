@@ -1,0 +1,208 @@
+{
+  "id": "uma",
+  "name": "UMA",
+  "fullName": "UMA: Universal Model for Atoms（eSEN 式 SO(2) 等变主干 + 混合线性专家 MoLE）",
+  "year": 2025,
+  "authors": "Wood et al.（Meta FAIR Chemistry）",
+  "paper": {"title": "UMA: A Family of Universal Models for Atoms", "venue": "arXiv 2025", "url": "https://arxiv.org/abs/2506.23971"},
+  "repos": ["fairchem"],
+  "family": "spherical-equivariant",
+  "tags": ["SO(2) 等变卷积 (eSEN/eSCN)", "混合线性专家 MoLE", "多任务 / 多 DFT 水平", "总电荷 + 自旋输入", "保守力", "基础模型"],
+  "framework": "PyTorch（Triton 融合内核 / UMA Nitro + CUDA graphs）",
+  "license": "代码 MIT；模型权重许可随应用领域而异，需在 Hugging Face 申请访问",
+  "oneLiner": "UMA 以 eSEN 式的 SO(2) 等变消息传递为主干，把卷积里的线性层换成 32 个“线性专家”，由体系的元素组成、总电荷、自旋和任务（即要模仿的 DFT 水平）一次性决定混合系数；推理前可把专家合并成一个普通网络，于是用一个小模型的速度获得数亿参数的容量，一套权重覆盖材料、分子、催化、MOF 与分子晶体。",
+  "analogy": "像一位全科医生随身带着 32 本专科手册：看病前先看病人档案（由哪些元素组成、带不带电、自旋状态、报告要按哪家医院的标准写），据此把这些手册按比例“装订”成一本定制手册；之后整场问诊只翻这一本，速度和普通医生一样快，知识面却覆盖了全部专科。",
+  "arch": {
+    "geometry": "边向量 r_st → 距离（[0, r_c] 上 64/128 个高斯 × p=5 多项式包络）+ 方向（逐边 Wigner-D 旋到边坐标系）；源/靶元素嵌入进入径向 MLP",
+    "equivariance": "SO(3) 等变（球谐系数特征，边坐标系 SO(2) 卷积 + 门控与谱空间前馈）+ 平移不变",
+    "lmax": "UMA-S：lmax=2, mmax=2；UMA-M：lmax=4, mmax=2",
+    "bodyOrder": "每层为“邻居特征 × 方向”的两体消息 + 门控非线性，无显式 ν 阶收缩；多层叠加隐式提高体序",
+    "layers": "UMA-S 4 层；UMA-M 10 层（训练配置 K4L2 / K10L4）",
+    "cutoff": "6 Å（训练配置 cutoff_radius；代码默认 5 Å）+ max_neighbors 限制邻居数",
+    "receptiveField": "层数 × r_c：UMA-S ≈ 24 Å，UMA-M ≈ 60 Å",
+    "message": "[x_s‖x_t] → Wigner 旋转 → SO(2) 卷积（MoLE 线性层，径向 MLP 调制）→ 门控 → SO(2) 卷积 → 逆旋转 × 包络 → Σ_s",
+    "readout": "最终 RMSNorm → l=0 标量 → 3 层 MLP(SiLU) → 原子能求和；按 task 反归一化 + 加元素参考能",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R（torch.autograd.grad）；预训练阶段用直接力头（l=1 线性读出），发布模型经保守力微调",
+    "stress": "同一次反传对 r 与 h 求导重构维里，σ = V/|det h|（等价于对称应变求导）",
+    "longRange": "无显式静电 / Ewald；只有消息传递感受野（4–10 层 × 6 Å）",
+    "dispersion": "随 task 而定：omol（ωB97M-V）、omc/odac（PBE+D3）已含；omat/oc20 不含，可外挂官方 DFTD3Calculator（D3(BJ)，PBE/r²SCAN 参数，15 Å）",
+    "chargeSpin": "有：总电荷（−100…100）与自旋多重度（0…100）嵌入 + 任务嵌入 → 系统嵌入，加到 l=0 通道并参与 MoLE 路由；仅 omol 训练数据中变化",
+    "otherOutputs": "Hessian（对力再求导，vmap）、节点嵌入；无原子电荷/偶极/磁矩输出",
+    "strictlyLocal": false,
+    "complexity": "O(N·M)：每层每条边两次 Wigner 旋转 + 两次按 m 分块的 SO(2) 矩阵乘（∝E·C²），节点 SO(3) 线性前馈 ∝N·C²；MoLE 合并后与单个专家同价",
+    "accel": "UMA Nitro（融合 Triton 内核 + CUDA graphs，Ampere 及以上单 GPU）、merge_mole + torch.compile + TF32、图并行多 GPU（Ray，workers=N）、LAMMPS、ASE FAIRChemCalculator"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "UMA-S 合并专家后只有约 6.6M 活跃参数、4 层 lmax=2，配合 Nitro 内核在 H200 上 1000 原子 ASE MD 约 6 ns/day（README），与 MACE 同档；UMA-M（10 层 lmax=4）明显更慢。"},
+    "expressiveness": {"v": 5, "why": "SO(3) 等变（lmax 2/4）+ 多层门控非线性，再加 MoLE 带来的数亿到十亿级总参数，使一个模型能同时拟合多个 DFT 水平与五大领域。"},
+    "longRange": {"v": 3, "why": "只有层数×6 Å 的感受野和全局电荷/自旋嵌入，没有显式静电；但部分 task 本身含色散，官方还提供 GPU 版 D3(BJ) 外挂。"},
+    "scalability": {"v": 3, "why": "4–10 层消息传递，非严格局域；但官方支持图并行多 GPU（all-to-all 分区）与 LAMMPS，Nitro 单卡支持到 15,000 原子（README）。"},
+    "physics": {"v": 4, "why": "保守力与应力、p=5 多项式包络平滑截断、能量为原子贡献之和；但无 ZBL 近程排斥，需人工选 task，且代码注释指出 UMA-S-1.2 的组成嵌入均值会破坏广延性。"},
+    "coverage": {"v": 2, "why": "能量/力/应力之外官方只有 Hessian（及节点嵌入）；电荷、自旋只是输入，没有偶极、原子电荷、磁矩等输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、元素、晶胞 + 任务名、总电荷、自旋多重度",
+      "plain": "除了坐标 R、元素 Z、晶胞 h 外，UMA 还需要三个“全局标签”：task（要模仿哪个数据集的 DFT 水平：omat / omol / oc20 / odac / omc）、总电荷 Q 和自旋多重度（目前只有 omol 任务真正使用，默认 0 与 1，在 ASE 中写在 atoms.info 里）。forward 一开始就用这些标签算出系统嵌入与 MoLE 专家系数，然后对坐标（需要应力时连同晶胞）打开 requires_grad，后面的力与应力都由能量求导得到。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf h\\in\\mathbb R^{3\\times3},\\qquad \\big(\\text{task},\\ Q_{\\text{tot}},\\ 2S+1\\big)",
+      "code": [{"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 760, "end": 786, "must": "requires_grad_(True)", "caption": "forward 开头：电荷/自旋/任务嵌入 → MoLE 系数 → 坐标与晶胞打开梯度"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 截断 + 最大邻居数 + 周期镜像",
+      "plain": "默认在线建图（otf_graph）：找出所有距离小于 r_c 的原子对（含周期镜像），并用 max_neighbors 限制每个原子的邻居数；UMA 训练配置使用 6 Å 截断。always_use_pbc 默认为真，因此分子体系要放在足够大的真空盒子里。若某体系没有任何邻居（孤立原子），代码会插入一条假自环边以避免空张量。之后所有计算都在边上进行，代价随原子数线性增长。",
+      "math": "\\mathcal N(t)=\\{\\,s:\\ \\lVert\\mathbf r_s-\\mathbf r_t+\\mathbf n_{st}\\mathbf h\\rVert<r_c\\,\\},\\qquad |\\mathcal N(t)|\\le N_{\\max}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 639, "end": 657, "must": "graph_dict = generate_graph(", "caption": "在线建图：截断半径、最大邻居数、周期边界"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 682, "end": 690, "must": "edge_distance_vec = (", "caption": "（外部给图时）边向量 = r_s − r_t + 周期平移"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 高斯基 × 平滑包络；方向 → 每条边一个 Wigner-D 旋转",
+      "plain": "每条边的距离用 [0, r_c] 上均匀分布的高斯函数展开（UMA-S 64 个），与源、靶原子的元素嵌入拼接成边特征 x_edge，交给径向 MLP 产生逐边权重。平滑性来自 p=5 的多项式包络：它被直接乘进逆 Wigner 矩阵，使每条边的贡献在 r_c 处连同一、二阶导平滑归零。方向不是用球谐“乘”进去，而是为每条边构造一个 Wigner-D 旋转，把球谐系数转到以该边为极轴的局部坐标系——这是 eSCN/eSEN 一族的核心。初始化时 EdgeDegreeEmbedding 还把径向 MLP 输出（放在 m=0 分量）经逆旋转、乘包络后累加到原子上，让第 0 层特征就带有方向信息。",
+      "math": "\\phi_k(r)=\\exp\\!\\Big[-\\frac{(r-\\mu_k)^2}{2(2\\Delta\\mu)^2}\\Big],\\ \\mu_k\\in[0,r_c];\\quad f_{\\text{env}}(x)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c},\\ p=5;\\qquad \\tilde{\\mathbf x}=\\mathbf D(R_{st})\\,\\mathbf x",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/radial.py", "start": 27, "end": 39, "must": "env_val = 1 + (d_scaled**self.p) * (", "caption": "PolynomialEnvelope：多项式平滑包络"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 791, "end": 803, "must": "self._get_rotmat_and_wigner(", "caption": "每条边的 Wigner-D 旋转矩阵及其逆"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 838, "end": 866, "must": "wigner_inv_envelope = wigner_inv * edge_envelope", "caption": "高斯距离基 + 源/靶元素嵌入；包络预乘进逆旋转；EdgeDegreeEmbedding 初始化"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "原子嵌入 + 系统嵌入：元素 ⊕（电荷, 自旋, 任务）→ l=0 通道",
+      "plain": "每个原子的特征是 (lmax+1)²×128 的球谐系数张量（每个 (l,m) 一组 128 通道），初始只在 l=0 位置放元素嵌入。总电荷（−100…100）与自旋多重度（0…100）各查一张可学习嵌入表，任务对应一个默认冻结的向量；三者拼接后经线性层 + SiLU 混合成“系统嵌入” e_sys，加到该体系每个原子的 l=0 通道上（每个块开头还会再加一次）。这样同一套参数就能区分阴/阳离子、单重态/三重态，以及 ωB97M-V 与 PBE 等不同 DFT 水平。",
+      "math": "\\mathbf e_{\\text{sys}}=\\mathrm{SiLU}\\big(W_{\\text{mix}}[\\,\\mathbf e_Q(Q);\\ \\mathbf e_S(S);\\ \\mathbf e_{\\text{task}}\\,]\\big),\\qquad x^{(0)}_{i,00}=\\mathbf e_Z(Z_i)+\\mathbf e_{\\text{sys}}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 588, "end": 599, "must": "self.mix_csd(torch.cat((chg_emb, spin_emb, dataset_emb), dim=1))", "caption": "csd_embedding：电荷、自旋、任务嵌入拼接后混合"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/embedding.py", "start": 148, "end": 155, "must": "self._num_embeddings = 201", "caption": "ChgSpinEmbedding：电荷 −100…100、自旋 0…100 的嵌入表"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 810, "end": 821, "must": "sys_node_embedding = csd_mixed_emb[", "caption": "元素嵌入放入 l=0 通道，再加系统嵌入"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "MoLE 路由：组成 + 系统嵌入 → 32 个专家系数 → 合并成一个线性层",
+      "plain": "UMA 把每个 SO(2) 卷积里的线性层换成 32 个“专家”权重矩阵 W_e（Mixture of Linear Experts）。与常见的逐 token 路由 MoE 不同，系数每个体系只算一次：把“组成嵌入”（体系内所有原子元素嵌入的平均）与系统嵌入拼接，经 3 层 MLP + softmax（再加 0.005 下限）得到 α_e，再把专家权重加权求和成一个普通矩阵。因为 α 只依赖全局信息，推理时打开 merge_mole 即可预先把专家合并成单个 nn.Linear、丢掉路由网络，之后每步 MD 只付一个稠密小模型的代价；若组成、任务、电荷或自旋改变，就需要重新合并（预测单元会检查并回退到未合并模型）。",
+      "math": "\\boldsymbol\\alpha=\\mathrm{softmax}\\Big(\\mathrm{MLP}\\big[\\,\\tfrac1N\\textstyle\\sum_i\\mathbf c(Z_i);\\ \\mathbf e_{\\text{sys}}\\,\\big]\\Big)+0.005,\\qquad W=\\sum_{e=1}^{32}\\alpha_e\\,W_e\\ \\ (\\text{merged into one Linear})",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_moe.py", "start": 141, "end": 169, "must": "expert_mixing_coefficients_before_norm = self.routing_mlp(", "caption": "set_MOLE_coefficients：组成均值 + 系统嵌入 → 路由 MLP → 归一化系数"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/mole.py", "start": 150, "end": 168, "must": "linear.weight.copy_(weights[0])", "caption": "MOLE.merged_linear_layer：einsum 加权求和后写入普通 Linear"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_moe.py", "start": 92, "end": 121, "must": "model_search_and_replace(", "caption": "merge_MOLE_model：替换所有 MoLE 层，返回普通 eSCNMDBackbone"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：边坐标系里的 SO(2) 卷积（eSCN/eSEN 消息）",
+      "plain": "对每条边，先把源、靶两个原子的球谐特征沿通道拼接，用 Wigner-D 旋到以该边为极轴的坐标系。在这个坐标系里，等变的 Clebsch–Gordan 张量积退化为只在同一 |m| 内混合的线性运算：m=0 部分是普通矩阵乘，m>0 部分把 (+m, −m) 成对、以“复数乘法”式的 2×2 结构共享权重——这正是 eSCN/eSEN 大幅降低张量积开销的原因。径向 MLP 为每个 m 分块生成逐边调制系数；两次 SO(2) 卷积之间夹一个门控非线性（l=0 标量门控 l>0 通道），最后逆旋转回全局坐标、乘包络并对邻居求和。MoLE 专家正位于这些 SO(2) 线性层中。",
+      "math": "\\tilde{\\mathbf x}_{st}=\\mathbf D_{st}\\,[\\mathbf x_s\\Vert\\mathbf x_t],\\quad y_{\\pm m}=W^{r}_{m}\\big(\\rho_m\\tilde x_{\\pm m}\\big)\\mp W^{i}_{m}\\big(\\rho_m\\tilde x_{\\mp m}\\big),\\qquad \\mathbf m_t=\\sum_{s}f_{\\text{env}}(r_{st})\\,\\mathbf D_{st}^{-1}\\,\\mathrm{SO2}_2\\big(\\mathrm{Gate}(\\mathrm{SO2}_1(\\tilde{\\mathbf x}_{st}))\\big)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 234, "end": 246, "must": "self.so2_conv_1(x_message, x_edge)", "caption": "Edgewise：旋转 → SO(2) 卷积 → 门控 → SO(2) 卷积 → 逆旋转并求和"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 640, "end": 667, "must": "x_m = self.so2_m_conv[m - 1](x_m)", "caption": "SO2_Convolution：m=0 普通线性，m>0 逐阶处理，径向系数逐 m 调制"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/so2_layers.py", "start": 67, "end": 80, "must": "x_m_r = x_r_0 - x_i_1", "caption": "SO2_m_Conv：(+m, −m) 成对的复数乘法式权重"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：pre-norm 残差块 = 归一化 → 边上消息 → 归一化 → 逐原子门控前馈",
+      "plain": "每个 eSCNMD_Block 是 Transformer 式的 pre-norm 残差结构：先做按 l 的 RMS 归一化（rms_norm_sh），把系统嵌入再加到 l=0 通道，做上一步的边上消息并加回残差；再归一化，做逐原子前馈并加回残差。UMA 的前馈是 spectral 版本：l=0 标量经 Linear+SiLU 产生门控，SO(3) 线性层（每个 l 内混合通道）→ 门控激活 → SO(3) 线性层。UMA-S 堆 4 个块、UMA-M 堆 10 个，最后再做一次归一化；每多一层，感受野增加一个 r_c，隐式体序也随之提高。",
+      "math": "\\mathbf x\\leftarrow\\mathbf x+\\mathrm{Edgewise}\\big(\\mathrm{Norm}_1(\\mathbf x)+\\mathbf e_{\\text{sys}}\\delta_{l0}\\big),\\qquad \\mathbf x\\leftarrow\\mathbf x+W_2\\,\\mathrm{Gate}\\big(\\mathrm{MLP}(x_{00}),\\ W_1\\,\\mathrm{Norm}_2(\\mathbf x)\\big)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 447, "end": 473, "must": "x = self.norm_2(x)", "caption": "eSCNMD_Block.forward：两段 pre-norm 残差"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md_block.py", "start": 331, "end": 336, "must": "gating_scalars = self.scalar_mlp(x.narrow(1, 0, 1))", "caption": "SpectralAtomwise：标量门控的 SO(3) 线性前馈"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 877, "end": 891, "must": "x_message = self.blocks[i](", "caption": "主干循环：逐层调用块并传入系统嵌入"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "读出与总能：l=0 标量 → MLP → 原子能求和 → 按任务反归一化 + 元素参考能",
+      "plain": "最终特征只取 l=0（旋转不变）部分，经 Linear–SiLU–Linear–SiLU–Linear 的 MLP 得到原子能，再按体系求和，保证能量是原子贡献之和。保守力微调配置中只有一个共享能量头：DatasetSpecificSingleHeadWrapper 只是按 task 把结果分发到 omat_energy、omol_energy 等输出键，不同 DFT 水平之间的差别由任务嵌入和 MoLE 系数承担。预测单元再用该任务的归一化器反归一化，并加回该任务的线性元素参考能，得到可与 DFT 比较的总能。",
+      "math": "E=\\mathrm{denorm}_{\\text{task}}\\Big(\\sum_{i}\\mathrm{MLP}\\big(x^{(T)}_{i,00}\\big)\\Big)+\\sum_i E^{\\text{ref}}_{\\text{task}}(Z_i)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 114, "end": 123, "must": "node_energy = energy_block(scalar_embedding)", "caption": "compute_energy：取 l=0 → 能量 MLP → 按体系求和"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_moe.py", "start": 674, "end": 697, "must": "for dataset_name in self.dataset_names:", "caption": "DatasetSpecificSingleHeadWrapper：按 task 分发输出"},
+        {"repo": "fairchem", "file": "src/fairchem/core/units/mlip_unit/predict.py", "start": 783, "end": 793, "must": "task.element_references.undo_refs(", "caption": "反归一化并加回元素参考能"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标的自动微分（保守力）",
+      "plain": "保守力 F = −∂E/∂R 由 torch.autograd.grad 一次反传得到：力场严格无旋、NVE 下能量守恒，适合声子与长时间 MD。UMA 训练分两阶段：先用直接力头（Linear_Force_Head，从 l=1 通道线性读出力向量）配合各任务的能量头高效预训练，再关闭 direct_forces、改用自动微分力与应力微调。推理时只有训练中或需要 Hessian 才保留二阶计算图，普通 MD 不保留以节省显存。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}\\qquad(\\text{direct pretraining: }\\ \\mathbf F_i=W\\,x^{(T)}_{i,\\,l=1})",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 152, "end": 162, "must": "torch.autograd.grad(", "caption": "compute_forces：F = −∂E/∂r"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1133, "end": 1150, "must": "forces = compute_forces(energy_part", "caption": "MLP_EFS_Head：按配置选择力 / 力+应力的自动微分"},
+        {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_direct_pretrain.yaml", "start": 129, "end": 142, "must": "Linear_Force_Head", "caption": "预训练阶段：各任务能量头 + 直接力头"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：同一次反传对坐标与晶胞求导，重构维里",
+      "plain": "应力来自同一次反传：同时对坐标 r 和晶胞 h 求梯度，用 Σ g_i r_iᵀ 与 hᵀG_h 重构维里，对称化后除以晶胞体积。代码注释说明这与“施加对称应变 ε（r→r(1+ε), h→h(1+ε)）后求 ∂E/∂ε”等价，但不需要额外的位移张量；图并行时先在本地累加原子维里，再做一次全局归约。",
+      "math": "\\mathbf V=\\tfrac12\\Big[\\textstyle\\sum_i\\mathbf g_{i}\\mathbf r_i^{\\top}+\\mathbf h^{\\top}\\mathbf G_h+(\\cdots)^{\\top}\\Big],\\ \\ \\mathbf g_i=\\frac{\\partial E}{\\partial\\mathbf r_i},\\ \\mathbf G_h=\\frac{\\partial E}{\\partial\\mathbf h},\\qquad \\boldsymbol\\sigma=\\frac{\\mathbf V}{|\\det\\mathbf h|}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/outputs.py", "start": 196, "end": 226, "must": "cell_virial = cell.mT @ grad_cell", "caption": "compute_forces_and_stress：一次反传得到力与应力"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1135, "end": 1145, "must": "compute_forces_and_stress(", "caption": "需要应力时走力+应力联合分支"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/弱相互作用：靠 task 的 DFT 水平 + 可选 D3(BJ) 外挂",
+      "plain": "UMA 主干没有 Ewald 或电荷平衡模块：超出“层数×6 Å”的静电与色散都不在模型里。色散是否被学进去取决于所选 task 的 DFT 水平：omol 为 ωB97M-V（含非局域色散），omc、odac 为 PBE+D3，而 omat（PBE/PBE+U）与 oc20（RPBE）不含色散。官方 DFTD3Calculator 借助 nvalchemiops 在 GPU 上计算 D3(BJ) 的能量、力和解析应力（PBE 或 r²SCAN 参数，默认 15 Å 截断、外侧 20% 平滑），直接与 UMA 结果相加。总电荷/自旋只是全局嵌入，不产生显式长程静电。",
+      "math": "E_{\\text{tot}}=E^{\\text{task}}_{\\text{UMA}}+E_{\\text{D3(BJ)}}\\big(\\{r_{ij}<r^{\\text{D3}}_{\\text{cut}}\\}\\big)",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/calculate/dftd3_calculator.py", "start": 494, "end": 514, "must": "self.results[prop] = base_result + dispersion_result", "caption": "DFTD3Calculator：基础计算器结果 + D3 色散逐项相加"},
+        {"repo": "fairchem", "file": "src/fairchem/core/calculate/dftd3_calculator.py", "start": 448, "end": 469, "must": "cutoff: float = 15.0,", "caption": "D3(BJ) 参数：泛函（pbe / r2scan）、15 Å 截断、平滑比例"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：Hessian 与节点嵌入",
+      "plain": "力保留计算图时，可以对力再求一次导得到 Hessian（默认用 torch.vmap 并行求各行，仅支持单个体系），可直接用于振动频率、声子与过渡态分析。能量头还会返回最后一层的节点嵌入（detach 后），可作描述符或微调起点。UMA 不输出原子电荷、偶极或磁矩。",
+      "math": "H_{ia,jb}=\\frac{\\partial^2E}{\\partial r_{ia}\\,\\partial r_{jb}}=-\\frac{\\partial F_{jb}}{\\partial r_{ia}}",
+      "code": [
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1152, "end": 1172, "must": "hessian = compute_hessian(", "caption": "MLP_EFS_Head：对力再求导得到 Hessian"},
+        {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1125, "end": 1129, "must": "detach()", "caption": "输出最后一层节点嵌入"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff_radius", "value": "6 Å", "note": "训练配置截断半径（backbone 代码默认 5 Å）", "code": {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_direct_pretrain.yaml", "start": 29, "end": 32, "must": "cutoff_radius: 6"}},
+    {"name": "max_neighbors", "value": "30（直接力预训练）/ 300（保守力微调）", "note": "每个原子保留的最大邻居数", "code": {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_conserve_finetune.yaml", "start": 29, "end": 30, "must": "max_neighbors: 300"}},
+    {"name": "num_moe_experts", "value": "32", "note": "每个 SO(2) 线性层的专家数（UMA-S / UMA-M 训练配置相同）", "code": {"repo": "fairchem", "file": "configs/uma/training_release/uma_sm_direct_pretrain.yaml", "start": 29, "end": 32, "must": "num_moe_experts: 32"}},
+    {"name": "路由 MLP", "value": "Linear(256→64)–SiLU–Linear(64→64)–SiLU–Linear(64→32)–SiLU → softmax + 0.005", "note": "输入 = 组成嵌入均值 ⊕ 系统嵌入（各 128 维）", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/nn/mole_utils.py", "start": 187, "end": 210, "must": "model.routing_mlp = nn.Sequential("}},
+    {"name": "moe_dropout / use_composition_embedding", "value": "0.05 / true", "note": "专家系数 dropout；组成嵌入参与路由", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K4L2.yaml", "start": 1, "end": 6, "must": "use_composition_embedding: true"}},
+    {"name": "sphere / edge / hidden channels", "value": "128 / 128 / 128", "note": "每个 (l,m) 系数的通道数、边嵌入宽度、隐藏宽度", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K4L2.yaml", "start": 8, "end": 21, "must": "sphere_channels: 128"}},
+    {"name": "UMA-S 主干（K4L2）", "value": "lmax=2, mmax=2, 4 层", "note": "uma_sm 训练配置", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K4L2.yaml", "start": 9, "end": 31, "must": "num_layers: 4"}},
+    {"name": "UMA-M 主干（K10L4）", "value": "lmax=4, mmax=2, 10 层", "note": "uma_md 训练配置", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K10L4.yaml", "start": 9, "end": 31, "must": "num_layers: 10"}},
+    {"name": "num_distance_basis", "value": "64（UMA-S）/ 128（UMA-M）", "note": "[0, r_c] 上的高斯基，宽度 = 2 × 间距", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 454, "end": 460, "must": "self.distance_expansion = GaussianSmearing("}},
+    {"name": "norm / act / ff", "value": "rms_norm_sh / gate / spectral", "note": "按 l 的 RMSNorm、门控激活、谱空间前馈", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K4L2.yaml", "start": 27, "end": 31, "must": "ff_type: spectral"}},
+    {"name": "chg_spin_emb_type", "value": "rand_emb（可学习查表，cs_emb_grad=True）", "note": "总电荷、自旋多重度的嵌入方式", "code": {"repo": "fairchem", "file": "configs/uma/training_release/backbone/K4L2.yaml", "start": 33, "end": 34, "must": "chg_spin_emb_type:"}},
+    {"name": "能量头", "value": "Linear(128→128)–SiLU–Linear(128→128)–SiLU–Linear(128→1)", "note": "MLP_EFS_Head，作用于 l=0 标量", "code": {"repo": "fairchem", "file": "src/fairchem/core/models/uma/escn_md.py", "start": 1090, "end": 1096, "must": "self.energy_block = nn.Sequential("}}
+  ],
+  "speedNotes": [
+    "推理开销主要在每条边上的两次 Wigner 旋转（node→edge、edge→node 的批量矩阵乘）和两次 SO(2) 卷积；SO(2) 卷积把 CG 张量积变成按 m 分块的矩阵乘，lmax 增大时比完整张量积便宜得多。",
+    "MoLE 总参数很大（README：uma-s-1p2p1 为 6.6M 活跃 / 290M 总参数，uma-m-1p1 为 50M / 1.4B），但系数每个体系只算一次；merge_mole=True 时预先合并成单个线性层，每步成本≈一个稠密小模型，且大幅节省参数显存。组成、任务、电荷或自旋一变就要重新合并。",
+    "默认推理模式 UMA Nitro（Ampere 及以上 GPU，单卡单体系）使用融合内核与 CUDA graphs：README 给出 H200 上 1000 原子 ASE MD 约 6 ns/day，最多支持 15,000 原子；多卡场景用 multigpu 预设（merge_mole + torch.compile + TF32）。",
+    "保守力需要一次反传，Hessian 还要对力再求导，代价更高；activation_checkpointing（batch 预设开启，默认 nitro/multigpu 预设关闭）可以少量速度换取 10k+ 原子大体系的显存。",
+    "UMA-M（10 层、lmax=4）比 UMA-S（4 层、lmax=2）慢得多、显存更大，高通量筛选通常用 UMA-S。"
+  ],
+  "weakNotes": [
+    "截断 6 Å，但 UMA-S 4 层 → 感受野约 24 Å，UMA-M 10 层 → 约 60 Å；更远处的 1/r 静电与 r⁻⁶ 色散尾巴完全缺失。",
+    "色散由所选 task 的 DFT 水平决定（文档）：omol（ωB97M-V/def2-TZVPD，含非局域色散）、omc 与 odac（PBE+D3）已内含；omat（PBE/PBE+U）、oc20（RPBE）不含色散，层状 vdW 材料、物理吸附、较大分子在表面的吸附应外挂 DFTD3Calculator。",
+    "总电荷与自旋多重度只是全局嵌入，只在 OMol25（omol 任务）中变化，默认 0 / 1；能区分离子与自由基等电子态，但不给出电荷分布；其它任务假设中性、固定自旋。",
+    "omol 训练数据全为非周期分子，用于周期体系需谨慎；OC20 中没有氧化物与显式溶剂；带电缺陷、电极/电解质界面、离子液体等由长程静电主导的体系没有官方静电修正。"
+  ],
+  "downstreamNotes": [
+    "保守力 + C² 平滑包络 → 能量面光滑，可做声子、弹性常数与长时间 MD；原生 Hessian 输出便于振动频率与过渡态分析。",
+    "一套权重按 task 切换：催化吸附与过渡态搜索（oc20）、无机晶体弛豫与稳定性（omat，配合 FrechetCellFilter 变胞）、分子/聚合物/生物体系（omol，支持电荷与自旋）、MOF 吸附（odac）、分子晶体（omc）。",
+    "图并行多 GPU（Ray）与 LAMMPS 接口可做大尺度 MD；README 还介绍了用机器学习势模拟酶催化反应的新工作。",
+    "README 警告：OMat24 的 DFT 设置与 Materials Project 不兼容，计算形成能 / 凸包距离时应使用 OMat24 自己的参考化合物与修正。"
+  ],
+  "strengths": ["一个模型 + task 开关覆盖材料、分子、催化、MOF、分子晶体", "MoLE：数亿参数容量，合并后推理成本≈一个小模型", "原生支持总电荷与自旋多重度（omol）", "保守力/应力/Hessian，Nitro、torch.compile、多 GPU、LAMMPS 生态完善"],
+  "weaknesses": ["必须选对 task，不同 task 的能量处于不同 DFT 水平，不能混用", "无显式长程静电，色散依赖 task 或外挂 D3", "合并后的模型只适用于同一组成/电荷/自旋/任务，变化需重新合并", "权重需申请访问；UMA-M 推理慢、显存大"],
+  "pretrained": ["uma-s-1p2p1（UMA-S-1.2.1，6.6M 活跃 / 290M 总参数）", "uma-s-1p2", "uma-s-1p1", "uma-m-1p1（50M 活跃 / 1.4B 总参数）", "uma-s-1p2p1-ft-d4rev（omol，ωB97M-D4rev 微调）", "uma-s-1p2p1-ft-r2scan（omat，r²SCAN 微调）"],
+  "mbdKeys": [],
+  "arenaKeys": ["UMA-S-1P1"]
+}

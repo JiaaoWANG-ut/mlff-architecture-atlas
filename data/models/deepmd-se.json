@@ -1,0 +1,199 @@
+{
+  "id": "deepmd-se",
+  "name": "DeepPot-SE",
+  "fullName": "Deep Potential – Smooth Edition (DeepPot-SE, 描述符 se_e2_a)",
+  "year": 2018,
+  "authors": "L. Zhang, J. Han, H. Wang, W. Saidi, R. Car, W. E",
+  "paper": {"title": "End-to-end Symmetry Preserving Inter-atomic Potential Energy Model for Finite and Extended Systems", "venue": "NeurIPS 2018 (Advances in Neural Information Processing Systems 31)", "url": "https://arxiv.org/abs/1805.09003"},
+  "repos": ["deepmd-kit"],
+  "family": "descriptor-nn",
+  "tags": ["描述符 + 原子网络", "平滑 1/r 环境矩阵", "严格局域", "模型压缩（五次多项式查表）", "DPLR / DPRc / ZBL 扩展", "LAMMPS 多 GPU"],
+  "framework": "TensorFlow / PyTorch / JAX / Paddle 多后端（本文按 PyTorch 后端 deepmd/pt 讲解）+ C++/CUDA 自定义算子",
+  "license": "LGPL-3.0-or-later",
+  "oneLiner": "把每个原子的邻居写成一张平滑的“环境矩阵” R̃（每行 = s(r)·(1, x/r, y/r, z/r)），用只吃 s(r) 的小网络给每个邻居生成 M 维嵌入 G，再算 D = (GᵀR̃)(R̃ᵀG<) 自动消掉旋转与邻居编号的影响；最后每种元素一个全连接网络把 D 变成原子能，E = Σ E_i。",
+  "analogy": "像给每个原子拍一张“邻居合影”：每个邻居先按距离领到一张多维标签（嵌入网络），再把“标签 × 方向”累加成一张 M×4 的表；把这张表和它自己的转置相乘，相当于只比较“邻居两两之间的夹角和远近”，而不管相机朝哪个方向拍、邻居按什么顺序站——所以整体旋转或重新编号，描述都不变。",
+  "arch": {
+    "geometry": "相对坐标 r_ij → 平滑 1/r 权重 s(r) 与单位方向 (x,y,z)/r，拼成 4 列环境矩阵；夹角信息经 R̃R̃ᵀ 点积隐式获得",
+    "equivariance": "描述符对平移/旋转/置换严格不变；中间量 GᵀR̃ 的 3 个向量列对旋转等变（rot_mat，可供偶极/极化率头使用）",
+    "lmax": "无球谐；方向信息只到笛卡尔向量（相当于 l≤1），角度通过点积 cos θ_jk 进入",
+    "bodyOrder": "嵌入网络只吃 2 体距离（e2）；D 中 R̃R̃ᵀ 引入 j–i–k 夹角 → 显式 3 体，拟合网络再非线性组合",
+    "layers": "无消息传递；嵌入网 3 隐层（默认 [10,20,40]，水示例 [25,50,100]）+ 拟合网 3 隐层（默认 [120,120,120]）",
+    "cutoff": "r_c = 6.0 Å（argcheck 默认与水示例），开关函数起点 rcut_smth = 0.5 Å",
+    "receptiveField": "= r_c（严格局域），且每种邻居元素最多 sel[t] 个最近邻",
+    "message": "无消息传递；单次邻域求和 T_i = (1/N_c) Σ_j G(ŝ_ij)ᵀ ⊗ R̂_ij（M×4），N_c = Σ sel",
+    "readout": "D_i = T_i T_{i,<}ᵀ 展平（M×M<）→ 按中心元素选择的 tanh-ResNet MLP → E_i + 元素能量偏置 bias_atom_e",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂r：torch.autograd.grad 对含 ghost 的扩展坐标求导，再用 scatter_reduce 把 ghost 力加回本体原子；压缩模型的查表算子自带解析反向内核",
+    "stress": "维里 Ξ = Σ_k F_k ⊗ r_k（扩展坐标上的外积求和，无需应变变量）；ASE 接口中 σ = −(Ξ+Ξᵀ)/(2V)",
+    "longRange": "se_e2_a 本身无；官方扩展 DPLR（深度 Wannier 质心 + 倒空间 Ewald，仅 TF 后端）与 DPRc（QM/MM 程差修正，长程交给 PME）",
+    "dispersion": "无内置色散；可用 pairtab 表格对势（文档举例 D3、LJ、ZBL）线性叠加，或靠训练数据在截断内隐式学到",
+    "chargeSpin": "无总电荷/自旋输入；可通过 numb_fparam / numb_aparam 输入帧级、原子级额外参数",
+    "otherOutputs": "原子能、原子维里；同一描述符可接 dipole / polarizability / DOS / property 拟合头；LAMMPS 多模型偏差（model_devi）",
+    "strictlyLocal": true,
+    "complexity": "O(N·N_c·P_emb)（每个邻居槽位过一次嵌入网，含补零）+ O(N·M·M<) 矩阵乘 + O(N·P_fit)；严格线性于 N",
+    "accel": "模型压缩（查表 + 融合 CUDA/ROCm 内核 tabulate_fusion_se_a）、可选 Triton 环境矩阵内核、LAMMPS pair_style deepmd（MPI 域分解多 GPU）与 deepmd/kk（Kokkos）"
+  },
+  "scores": {
+    "speed": {"v": 5, "why": "没有消息传递、网络很小；压缩后嵌入网络变成查表并与 GᵀR̃ 融合，README 称在支持的描述符上推理可加速 10× 以上、内存最多降低 20×。"},
+    "expressiveness": {"v": 3, "why": "可学习的距离嵌入 + 显式 3 体角度信息，比固定对称函数灵活；但没有更高体序或等变特征，表达力不及 MACE/ACE 一类。"},
+    "longRange": {"v": 3, "why": "核心严格局域（6 Å 截断外完全没有）；官方提供 DPLR（Wannier 质心 + Ewald 静电，仅 TF）、DPRc（QM/MM）与 pairtab 外挂等可选方案。"},
+    "scalability": {"v": 5, "why": "严格局域，每个 MPI 进程只需 r_c 厚的 ghost 层；LAMMPS 空间分解多 GPU，仓库引用的工作实现了 1 亿原子的 DP 分子动力学。"},
+    "physics": {"v": 4, "why": "保守力、C² 连续的开关函数、原子能求和保证广延性，可选 DP+ZBL 近程排斥；但邻居数被 sel 上限截断，超限时能量会不连续。"},
+    "coverage": {"v": 4, "why": "同一框架可训练偶极、极化率、DOS 与任意性质拟合头，并输出原子能/原子维里与多模型偏差；但这些都需单独训练各自的模型。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素类型、晶胞",
+      "plain": "输入是坐标 coord、元素类型 atype（按 type_map 编号的整数）和可选的晶胞 box。PyTorch 后端在 forward_common_lower 里把含 ghost 原子的扩展坐标设为 requires_grad——后面的力和维里都是“能量对这些坐标求导”得到的。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i, t_i)\\}_{i=1}^{N},\\ t_i\\in\\{0,\\dots,N_{\\text{types}}-1\\},\\ \\mathbf C\\in\\mathbb R^{3\\times3}",
+      "code": [{"repo": "deepmd-kit", "file": "deepmd/pt/model/model/make_model.py", "start": 425, "end": 442, "must": "force_coord = force_coord.clone().requires_grad_(True)", "caption": "forward_common_lower：扩展坐标设为可求导，调用原子模型"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居表：周期镜像 + 按距离排序 + 按元素固定槽位 sel",
+      "plain": "先把周期镜像原子复制成 ghost 原子（extend），再对每个中心原子按距离排序、只保留 r_c 内的最近邻；然后按邻居元素分段，每种元素最多 sel[t] 个槽位，不足的槽位填 −1。固定长度的邻居表让后续矩阵形状固定、便于 GPU 批处理，但如果真实邻居数超过 sel，多出的远邻会被直接丢掉，所以 sel 要取得比最大邻居数大。",
+      "math": "\\mathcal N_t(i)=\\operatorname{top}_{\\text{sel}[t]}\\{\\,j:\\ t_j=t,\\ r_{ij}<r_c\\,\\}\\qquad N_c=\\sum_t \\text{sel}[t]",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/model/make_model.py", "start": 182, "end": 196, "must": "extend_input_and_build_neighbor_list(", "caption": "forward_common：扩展 ghost 原子并建邻居表"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/utils/nlist.py", "start": 132, "end": 149, "must": "torch.topk(rr, top_k, largest=False)", "caption": "build_neighbor_list：按距离取最近的 nsel 个"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/utils/nlist.py", "start": 192, "end": 199, "must": "nlist_distinguish_types(nlist, atype_neig, sel)", "caption": "超出 r_c 置 −1，并按元素分段到 sel 槽位"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "平滑环境矩阵 R̃：s(r)·(1, x/r, y/r, z/r)",
+      "plain": "对每个 (i, j) 计算 r_ij = r_j − r_i，构造 4 维行向量：第 1 列是乘了开关函数的 1/r，后 3 列是同一权重乘以单位方向。开关函数在 rcut_smth 到 r_c 之间用五次多项式 u³(−6u²+15u−10)+1 从 1 平滑降到 0，两端一、二阶导数都连续，所以原子进出截断球时能量和力都不跳变。最后按中心元素与邻居槽位减均值、除标准差做归一化。",
+      "math": "s(r)=\\frac{1}{r}\\Big[u^{3}(-6u^{2}+15u-10)+1\\Big],\\ u=\\mathrm{clip}\\Big(\\tfrac{r-r_s}{r_c-r_s},0,1\\Big)\\qquad \\tilde{\\mathcal R}_{ij}=\\Big(s,\\ \\tfrac{s\\,x_{ij}}{r_{ij}},\\ \\tfrac{s\\,y_{ij}}{r_{ij}},\\ \\tfrac{s\\,z_{ij}}{r_{ij}}\\Big)\\qquad \\hat{\\mathcal R}_{ij}=(\\tilde{\\mathcal R}_{ij}-\\mu)/\\sigma",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/env_mat.py", "start": 28, "end": 55, "must": "env_mat = torch.cat([t0, t1], dim=-1) * weight", "caption": "_make_env_mat：t0 = 1/r，t1 = r_ij/r²，乘开关权重"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/utils/preprocess.py", "start": 9, "end": 19, "must": "vv = uu2 * uu * (-6 * uu2 + 15 * uu - 10) + 1", "caption": "compute_smooth_weight：五次多项式开关函数（C² 连续）"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/env_mat.py", "start": 124, "end": 127, "must": "env_mat_se_a = (_env_mat_se_a - t_avg) / t_std", "caption": "按中心元素统计量归一化"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "嵌入网络：每类邻居一个小 MLP，把 s(r) 变成 M 维“距离指纹”",
+      "plain": "取归一化环境矩阵的第一列 ŝ_ij（平滑后的 1/r）作为唯一输入，送入嵌入网络 G（tanh 激活；后一层宽度等于或是前一层 2 倍时自动加 ResNet 跳连，2 倍时把输入复制拼接再相加）。type_one_side=true 时每种邻居元素一个网络，false（默认）时每个（中心元素, 邻居元素）组合一个网络。因为输入只有距离，这一步本身只含 2 体信息——这就是 se_e2_a 里 “e2” 的含义。",
+      "math": "\\mathcal G_{ij}=\\mathcal N^{(t_i,t_j)}_{e,2}\\big(\\hat s_{ij}\\big)\\in\\mathbb R^{M},\\qquad y^{(l+1)}=\\tanh\\big(W^{(l)}y^{(l)}+b^{(l)}\\big)+\\mathrm{skip}\\big(y^{(l)}\\big)",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 795, "end": 809, "must": "ti_mask = atype.ravel().eq(ti)", "caption": "按 type_one_side 选择嵌入网络（N_types 或 N_types² 个）"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 833, "end": 837, "must": "gg = ll.forward(ss)", "caption": "未压缩路径：嵌入网络求 G，再与 R̂ 做矩阵乘"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/network/mlp.py", "start": 204, "end": 219, "must": "yy = yy + torch.concat([xx, xx], dim=-1)", "caption": "MLPLayer：tanh + timestep + ResNet 跳连"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "模型压缩：嵌入网络 → 五次多项式查表 + 融合内核",
+      "plain": "嵌入网络的输入是一维的，所以可以事先在训练数据的距离范围内把它“拍成表”：把定义域切成等距小区间（第一段步长 0.01、外推段步长 0.1、外推比例 5），每个区间用五次多项式逼近每个输出通道。推理时 CUDA 内核一边查表求 G_ij，一边立刻与 R̂_ij 做外积累加，不用把整个 G 写回显存；邻居排好序后遇到空槽就提前结束循环。",
+      "math": "\\mathcal G_m(x)\\approx a^l_m x^5+b^l_m x^4+c^l_m x^3+d^l_m x^2+e^l_m x+f^l_m,\\ x\\in[x_l,x_{l+1})\\qquad (\\mathcal G^{\\top}\\hat{\\mathcal R})_{m}=\\sum_j \\mathcal G_m(\\hat s_{ij})\\,\\hat{\\mathcal R}_{ij}",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 292, "end": 314, "must": "self.table = DPTabulate(", "caption": "enable_compression：用 DPTabulate 建表"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 823, "end": 832, "must": "torch.ops.deepmd.tabulate_fusion_se_a(", "caption": "压缩路径：查表与 GᵀR̂ 融合的自定义算子"},
+        {"repo": "deepmd-kit", "file": "source/lib/src/gpu/tabulate.cu", "start": 330, "end": 362, "must": "FPTYPE res = extrapolated_polynomial5(var, xx, extrapolate_delta);", "caption": "CUDA 内核：五次多项式求值并立即乘 em 累加"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "描述符 D = (GᵀR̂)(R̂ᵀG<)：旋转、置换不变的多体特征",
+      "plain": "先把所有邻居的“嵌入 × 环境行”累加成 M×4 的矩阵 T_i（除以 N_c），再取前 M< 列（axis_neuron）与之相乘得到 M×M< 的描述符。旋转只作用在 R̂ 的 3 个方向列上，在 R̂R̂ᵀ 中旋转矩阵 QQᵀ = I 被消掉；同种邻居交换顺序时 G 和 R̂ 的行同步交换，求和不变。R̂R̂ᵀ 的元素含 s_j s_k cos θ_jk，于是 j–i–k 的夹角（3 体）信息进入了描述符。",
+      "math": "\\mathcal T_i=\\frac{1}{N_c}\\sum_{j}\\mathcal G_{ij}^{\\top}\\otimes\\hat{\\mathcal R}_{ij}\\in\\mathbb R^{M\\times4}\\qquad \\mathcal D_i=\\mathcal T_i\\,\\mathcal T_{i,<}^{\\top}=\\frac{1}{N_c^{2}}(\\mathcal G^{i})^{\\top}\\hat{\\mathcal R}^{i}(\\hat{\\mathcal R}^{i})^{\\top}\\mathcal G^{i}_{<}\\in\\mathbb R^{M\\times M_<}",
+      "code": [{"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 838, "end": 851, "must": "result = torch.matmul(", "caption": "累加 GᵀR̂、除以 nnei，再与前 axis_neuron 列相乘"}]
+    },
+    {
+      "stage": "readout",
+      "title": "拟合网络：按中心元素的 MLP → 原子能 E_i",
+      "plain": "把 M×M< 的描述符展平后输入拟合网络（默认 3 层 120 宽、tanh，带 timestep 的 ResNet 跳连），每种中心元素一套参数，输出一个标量原子能，再加上按元素的能量偏置 bias_atom_e（由训练集能量做最小二乘得到初值）。",
+      "math": "E_i=\\mathcal F_{t_i}\\big(\\mathrm{vec}(\\mathcal D_i)\\big)+b_{t_i}",
+      "code": [{"repo": "deepmd-kit", "file": "deepmd/pt/model/task/fitting.py", "start": 1079, "end": 1104, "must": "atom_property = ll(xx)", "caption": "GeneralFitting._forward_common：逐元素拟合网络 + bias_atom_e"}]
+    },
+    {
+      "stage": "energy",
+      "title": "总能 E = Σ E_i（可选 DP+ZBL 近程插值）",
+      "plain": "原子能直接求和得到总能，天然广延。若使用 DP+ZBL 模型（type: zbl），每个原子先算一个按 exp(−r/α) 加权的平均邻居距离 σ_i，在 sw_rmin–sw_rmax 之间用同样的五次平滑函数把 DP 原子能和 ZBL 表格对势（pairtab，每对能量各分一半）插值：原子靠得很近时自动切换到核—核排斥。",
+      "math": "E=\\sum_i E_i,\\qquad E_i^{\\text{DP+ZBL}}=(1-w_i)\\,E_i^{\\text{DP}}+w_i\\,\\tfrac12\\sum_{j}V_{\\text{ZBL}}(r_{ij}),\\quad \\sigma_i=\\frac{\\sum_j r_{ij}e^{-r_{ij}/\\alpha}}{\\sum_j e^{-r_{ij}/\\alpha}}",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/model/transform_output.py", "start": 170, "end": 186, "must": "model_ret[kk_redu] = torch.sum(vv.to(redu_prec), dim=atom_axis)", "caption": "fit_output_to_model_output：原子能求和"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/atomic_model/linear_atomic_model.py", "start": 726, "end": 760, "must": "smooth = -6 * u**5 + 15 * u**4 - 10 * u**3 + 1", "caption": "DPZBLLinearEnergyAtomicModel._compute_weight：ZBL 插值权重"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/atomic_model/pairtab_atomic_model.py", "start": 302, "end": 311, "must": "atomic_energy = 0.5 * torch.sum(", "caption": "PairTabAtomicModel：表格对势，每对能量分给两原子各一半"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：能量对坐标自动微分，ghost 力折回本体原子",
+      "plain": "力 = −∂E/∂r，用 torch.autograd.grad 对扩展坐标求导一次得到；ghost（周期镜像）原子上的力再按 mapping 用 scatter_reduce 加回对应的真实原子。由于只有 C² 开关函数和 tanh 网络，力处处连续且严格保守。",
+      "math": "\\mathbf F_k=-\\frac{\\partial E}{\\partial \\mathbf r_k}\\ (k\\in\\text{local}\\cup\\text{ghost}),\\qquad \\mathbf F_i=\\sum_{k:\\,\\mathrm{map}(k)=i}\\mathbf F_k",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/model/transform_output.py", "start": 78, "end": 88, "must": "torch.autograd.grad(", "caption": "task_deriv_one：autograd 求力"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/model/transform_output.py", "start": 427, "end": 443, "must": "new_ret[kk_derv_r] = torch.scatter_reduce(", "caption": "communicate_extended_output：ghost 力累加回本体原子"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "维里/应力：力与坐标的外积",
+      "plain": "不引入应变变量，而是直接把扩展坐标（含 ghost）上的力与坐标做外积再求和得到维里张量；ghost 原子是带晶格平移的镜像，所以这个求和自动包含周期边界的贡献。需要原子维里时再加一个总和为零的修正项。ASE 接口中应力取对称化维里的负值除以体积。",
+      "math": "\\Xi_{\\alpha\\beta}=\\sum_{k\\in\\text{local}\\cup\\text{ghost}}F_{k,\\alpha}\\,r_{k,\\beta},\\qquad \\boldsymbol\\sigma=-\\frac{1}{2V}\\big(\\Xi+\\Xi^{\\top}\\big)",
+      "code": [
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/model/transform_output.py", "start": 89, "end": 101, "must": "extended_virial = torch.einsum(", "caption": "维里 = 力 ⊗ 坐标（einsum）"},
+        {"repo": "deepmd-kit", "file": "deepmd/calculator.py", "start": 346, "end": 356, "must": "stress = -0.5 * (virial + virial.T) / atoms.get_volume()", "caption": "ASE 计算器：对称化维里换算为应力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程扩展：DPLR（Wannier 质心 + Ewald）与 DPRc（QM/MM）",
+      "plain": "DPLR 先训练一个“深度 Wannier”模型（同类描述符 + dipole 拟合头），预测 Wannier 质心相对所属原子（如水中的 O）的位移；LAMMPS 的 fix dplr 每步把质心放到 x_O + Δ 处，给离子和质心赋固定电荷，用高斯展宽的倒空间 Ewald 求和算静电能、力和维里，DP 只拟合剩下的短程部分（仅 TensorFlow 后端，文档注明接口尚不稳定）。DPRc 面向 QM/MM：用排除类型把 MM–MM 原子对的环境矩阵行置零，只修正截断内的 QM 与 QM/MM 相互作用，长程静电交给 MM 程序的 PME。",
+      "math": "E=E_{\\text{DP}}+E_{\\text{ele}},\\quad E_{\\text{ele}}=\\frac{1}{2\\pi V}\\sum_{\\mathbf m\\neq0}\\frac{e^{-\\pi^2 m^2/\\beta^2}}{m^2}\\,|S(\\mathbf m)|^2,\\quad S(\\mathbf m)=\\sum_i q_i e^{-2\\pi \\imath\\,\\mathbf m\\cdot\\mathbf r_i}+\\sum_n q_n e^{-2\\pi \\imath\\,\\mathbf m\\cdot\\mathbf W_n}",
+      "code": [
+        {"repo": "deepmd-kit", "file": "source/lmp/fix_dplr.cpp", "start": 568, "end": 591, "must": "x[idx0][dd] + tensor[res_idx * 3 + dd] * dist_unit_cvt_factor;", "caption": "fix dplr：用 DW 模型输出放置 Wannier 质心"},
+        {"repo": "deepmd-kit", "file": "source/lib/src/ewald.cc", "start": 206, "end": 222, "must": "exp(-M_PI * M_PI * nmm2 / (param.beta * param.beta)) / nmm2", "caption": "ewald_recp：倒空间能量项 e^{−π²m²/β²}/m² · |S(m)|²"},
+        {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 810, "end": 820, "must": "rr = rr * mm[:, :, None]", "caption": "排除类型掩码：DPRc 中 MM–MM 对的环境矩阵行被置零"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "部署：LAMMPS pair_style deepmd（MPI 多 GPU、模型偏差）",
+      "plain": "LAMMPS 的 pair_style deepmd 把本地 + ghost 原子的坐标和 LAMMPS 自己的邻居表（连同 MPI 通信信息 commdata）交给 C++ 推理库 DeepPot::compute，返回能量、力、维里（可选原子能/原子维里）。模型严格局域，每个进程/GPU 只需 r_c 厚的 ghost 壳层，就能按空间域分解扩展到超大体系。同时加载多个模型时还能输出模型间偏差（model_devi），用于主动学习挑选新构型。",
+      "math": "\\{E,\\ \\mathbf F,\\ \\Xi\\}=\\mathrm{DeepPot.compute}\\big(\\mathbf R_{\\text{loc}+\\text{ghost}},\\ \\mathbf t,\\ \\mathbf C,\\ \\text{nlist}_{\\text{LAMMPS}}\\big)",
+      "code": [{"repo": "deepmd-kit", "file": "source/lmp/pair_deepmd.cpp", "start": 365, "end": 383, "must": "deep_pot.compute(dener, dforce, dvirial, dcoord, dtype, dbox, nghost,", "caption": "PairDeepMD::compute：带 MPI 通信信息的邻居表调用 DeepPot"}]
+    }
+  ],
+  "hyper": [
+    {"name": "rcut", "value": "6.0 Å", "note": "截断半径（水示例同为 6.00）", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 422, "end": 422, "must": "default=6.0, doc=doc_rcut"}},
+    {"name": "rcut_smth", "value": "0.5 Å", "note": "开关函数起点 r_s", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 423, "end": 423, "must": "default=0.5, doc=doc_rcut_smth"}},
+    {"name": "sel", "value": "\"auto\"（统计最大邻居数 × 1.1，取 4 的倍数）；水示例 [46, 92]", "note": "每种邻居元素的最大槽位数 N_c = Σ sel", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 421, "end": 421, "must": "doc=doc_sel"}},
+    {"name": "neuron（嵌入网）", "value": "[10, 20, 40]（默认）；水示例 [25, 50, 100]", "note": "M = 最后一层宽度", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 424, "end": 426, "must": "default=[10, 20, 40]"}},
+    {"name": "axis_neuron (M<)", "value": "4（默认）；水示例 16", "note": "取 G 的前 M< 列构造描述符", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 427, "end": 434, "must": "default=4,"}},
+    {"name": "activation_function", "value": "tanh", "note": "嵌入网与拟合网默认激活", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 435, "end": 441, "must": "activation_function"}},
+    {"name": "type_one_side", "value": "false（默认，N_types² 个嵌入网）；水示例 true", "note": "嵌入网是否只按邻居元素区分", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 443, "end": 445, "must": "optional=True, default=False, doc=doc_type_one_side"}},
+    {"name": "neuron（拟合网）", "value": "[120, 120, 120]（默认）；水示例 [240, 240, 240]", "note": "每种元素一套", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 3048, "end": 3055, "must": "default=[120, 120, 120]"}},
+    {"name": "resnet_dt（拟合网）", "value": "true", "note": "跳连带可学习 timestep", "code": {"repo": "deepmd-kit", "file": "deepmd/utils/argcheck.py", "start": 3064, "end": 3064, "must": "default=True, doc=doc_resnet_dt"}},
+    {"name": "压缩表参数", "value": "extrapolate 5，stride 0.01 / 0.1", "note": "enable_compression 默认值", "code": {"repo": "deepmd-kit", "file": "deepmd/pt/model/descriptor/se_a.py", "start": 269, "end": 276, "must": "table_stride_1: float = 0.01"}},
+    {"name": "水示例完整配置", "value": "sel [46,92]，rcut 6.0，neuron [25,50,100]，axis 16，fitting [240,240,240]", "note": "examples/water/se_e2_a", "code": {"repo": "deepmd-kit", "file": "examples/water/se_e2_a/input_torch.json", "start": 7, "end": 34, "must": "se_e2_a"}}
+  ],
+  "speedNotes": [
+    "前向计算的大头在嵌入网络：每个原子对 N_c = Σ sel 个邻居槽位（包括补零的空槽）各跑一次小 MLP；之后 GᵀR̂ 与 D = T T<ᵀ 只是 M×4、4×M< 的小矩阵乘，拟合网络每原子只算一次。",
+    "模型压缩把一维输入的嵌入网络换成分段五次多项式表，并把查表与 GᵀR̂ 融合进同一个 CUDA/ROCm 内核（tabulate_fusion_se_a），避免把 G 写回显存，排好序的邻居遇到空槽即提前终止；README 称在支持的描述符上可获 10× 以上推理加速、内存最多降 20×。",
+    "力与维里靠 autograd 反传；压缩模型的查表算子带有专门的反向内核（tabulate_fusion_se_a_grad），反传同样走查表。",
+    "type_one_side=false 时嵌入网数量为 N_types²，并按中心元素循环加掩码，元素种类多时网络数与内核调用次数迅速增加；文档指出带类型嵌入的 se_e2_a 与无注意力层的 se_atten 数学等价，可作替代。",
+    "可选：CUDA 推理时设置 DP_TRITON_INFER ≥ 1 走 Triton 融合的环境矩阵内核；精度由 precision 参数选择 float32/float64。"
+  ],
+  "weakNotes": [
+    "严格局域：原子能只依赖 r_c（默认 6 Å）球内、每种元素最多 sel[t] 个最近邻；截断外的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失，邻居数超过 sel 时多余的远邻被丢弃。",
+    "DeepPot-SE 不是预训练基础模型，泛函完全取决于用户自己的 DFT 训练数据；若数据含 D3 等色散，截断内的部分可被隐式学到，截断外仍缺失。",
+    "官方长程方案 DPLR：深度 Wannier 模型预测 Wannier 质心位移，离子与质心电荷做倒空间 Ewald，DP 只拟合 E* − E_ele；目前只支持 TensorFlow 后端，且文档注明接口不稳定。",
+    "DPRc 面向 QM/MM：MM–MM 对的开关函数置零，只修正截断内的 QM 与 QM/MM 能量，长程静电交给 PME；支持 TensorFlow / PyTorch / JAX。",
+    "没有总电荷/自旋输入：带电缺陷、电极界面、离子液体等需 DPLR 或外部静电；层状 vdW、物理吸附需训练数据本身含色散或外挂 pairtab 表格对势。"
+  ],
+  "downstreamNotes": [
+    "保守力 + C² 连续开关函数 + 维里输出，适合长时间 NVE/NVT/NPT 分子动力学与状态方程、弹性常数计算。",
+    "LAMMPS pair_style deepmd 可同时加载多个模型并输出模型偏差（model_devi），用作不确定度指标，在主动学习中挑选需要补算 DFT 的构型。",
+    "同一描述符可接 dipole / polarizability 拟合头（rot_mat 提供等变方向），用于 Wannier 质心（DPLR）、IR/Raman 光谱；另有 DOS 与任意性质拟合头。",
+    "高能碰撞、高压等原子极度靠近的场景可用 DP+ZBL 模型，在短距离平滑切换到 ZBL 核—核排斥。",
+    "QM/MM 自由能、酶催化等可用 DPRc 把半经验 QM/MM 修正到 ab initio QM/MM 水平。"
+  ],
+  "strengths": ["结构简单、无消息传递、严格局域，易并行到上亿原子", "保守力 + C² 平滑截断，MD 稳定", "模型压缩（查表 + 算子融合）推理极快、省显存", "生态成熟：LAMMPS / i-PI / ASE / GROMACS 等接口与 DPLR、DPRc、ZBL、偶极/极化率扩展", "TensorFlow / PyTorch / JAX / Paddle 多后端"],
+  "weaknesses": ["只有 2 体嵌入 + 3 体角度，表达力不及等变/高体序模型", "邻居数受 sel 固定上限限制，超出会截断，补零浪费算力", "本体严格局域，无长程静电与色散（DPLR 仅 TF 后端）", "type_one_side=false 时网络数随元素数平方增长，不适合几十种元素的通用模型", "没有官方预训练基础模型，需自备 DFT 数据训练"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

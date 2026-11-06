@@ -1,0 +1,193 @@
+{
+  "id": "cuequivariance",
+  "name": "cuEquivariance",
+  "fullName": "NVIDIA cuEquivariance: Segmented Polynomials and Optimized CUDA Kernels for Equivariant Neural Networks",
+  "year": 2024,
+  "authors": "NVIDIA（cuEquivariance 团队）",
+  "paper": {"title": "NVIDIA cuEquivariance Documentation", "venue": "NVIDIA 官方文档 / GitHub（无配套论文）", "url": "https://docs.nvidia.com/cuda/cuequivariance/"},
+  "repos": ["cuEquivariance"],
+  "family": "infrastructure",
+  "tags": ["基础设施 / 内核库", "分段张量积 STP", "融合 CUDA 内核", "PyTorch + JAX", "MACE / NequIP 加速后端", "三角注意力"],
+  "framework": "Python 前端（PyTorch / JAX / NumPy）+ 以二进制包 cuequivariance-ops-* 发布的 C++/CUDA 内核",
+  "license": "Apache-2.0（开源前端；CUDA 内核以二进制 wheel 单独分发）",
+  "oneLiner": "cuEquivariance 本身不是力场，而是 NVIDIA 的等变网络加速库：把球谐、CG 张量积、MACE 对称收缩等运算统一写成“分段张量积（SegmentedTensorProduct）/分段多项式”描述符，再交给融合 CUDA 内核执行；MACE、NequIP 只需替换算子、保留原权重即可提速。",
+  "analogy": "像把各家餐厅（MACE、NequIP……）的菜谱翻译成统一的“标准配方卡”：卡上只写“第 i 块食材 × 第 j 块食材 × 系数 → 放进第 k 个碗”。中央厨房（CUDA 内核）只要看懂这一种卡片，就能流水线批量烹饪，不必为每道菜单独打造厨具。",
+  "arch": {
+    "geometry": "库本身不建图；提供 r̂ → 实球谐 Y_l^m（齐次多项式，默认先归一化）以及 O3/SO3/SU2 不可约表示与 CG 系数",
+    "equivariance": "由构造保证：路径系数全部来自 CG 系数或约化对称张量积基，任意 irreps 输入输出都严格等变",
+    "lmax": "不设上限，由调用方的 irreps / ls 决定",
+    "bodyOrder": "张量积为两输入双线性；symmetric_contraction 支持任意阶 degree（即 MACE 的 correlation ν）",
+    "layers": "n/a（算子库，层数由上层模型决定）",
+    "cutoff": "n/a（无邻居搜索；卷积层 tp_conv_fully_connected 只接收外部传入的 edge_envelope 衰减）",
+    "receptiveField": "n/a（由上层模型决定）",
+    "message": "通道级张量积 uv,iu,jv,kuv+ijk + input/output indices：gather(sender)→TP→scatter-add(receiver) 在一个内核内完成",
+    "readout": "n/a；提供等变 Linear（uv_iu_iv）、全连接张量积与按索引选权重的 indexed_linear",
+    "forces": "n/a",
+    "forcesDetail": "库不计算力；算子可微（PyTorch autograd、JAX JVP），上层模型对能量反传得到保守力",
+    "stress": "n/a（由上层模型通过应变求导实现）",
+    "longRange": "无",
+    "dispersion": "无",
+    "chargeSpin": "无",
+    "otherOutputs": "另提供 triangle_attention、triangle_multiplicative_update、attention_pair_bias（AlphaFold 类结构模型）",
+    "strictlyLocal": false,
+    "complexity": "单次调用 ≈ batch × Σ_路径 einsum 代价（STP.flop 用 opt_einsum 估算）；卷积 ∝ E·C·P，对称收缩 ∝ N·C·P_ν",
+    "accel": "uniform_1d / fused_tp / indexed_linear CUDA 内核、naive 回退、FP32/FP64、JAX jit；MACE enable_cueq、NequIP enable_CuEquivariance"
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "核心抽象：分段张量积 SegmentedTensorProduct",
+      "plain": "cuEquivariance 把等变网络里的各种运算看成同一种东西：几个一维数组（operand），每个被切成若干“段”（segment，例如一个 l=2 的 irrep 块）；再列出一串“路径”（path），每条路径说明“输入 1 的第几段 × 输入 2 的第几段 × 系数 → 加到输出的第几段”。描述符与具体 irreps、与数据流都无关，只描述数学；参考实现就是逐路径做一个小 einsum 再累加。这样 CG 张量积、球谐、线性层都能交给同一套内核。",
+      "math": "\\mathrm{out}\\big[s_n^{(p)}\\big]\\mathrel{+}=\\sum_{p\\in\\text{paths}}\\operatorname{einsum}\\Big(C^{(p)},\\,x_1\\big[s_1^{(p)}\\big],\\dots,x_{n-1}\\big[s_{n-1}^{(p)}\\big]\\Big)",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/segmented_polynomials/segmented_tensor_product.py", "start": 47, "end": 65, "must": "Irreps-agnostic and dataflow-agnostic descriptor of a segmented tensor product", "caption": "SegmentedTensorProduct：操作数（含下标与分段）+ 路径（段索引 + 系数）"},
+        {"file": "cuequivariance/cuequivariance/segmented_polynomials/segmented_tensor_product.py", "start": 155, "end": 178, "must": "from_subscripts(\"uv,ui,vj+ij\")", "caption": "from_subscripts：用 einsum 式下标字符串创建描述符，再 add_segment / add_path"},
+        {"file": "cuequivariance/cuequivariance/segmented_polynomials/evaluate.py", "start": 100, "end": 137, "must": "np.einsum(", "caption": "NumPy 参考语义：对每条路径切出各操作数的段、做 einsum、累加到输出段"}
+      ]
+    },
+    {
+      "stage": "input",
+      "title": "内存布局：mul_ir（e3nn）与 ir_mul",
+      "plain": "同一组 irreps 在内存里可以“通道在外、m 在内”（mul_ir，e3nn 的习惯，每块形状 (mul, 2l+1)），也可以“m 在外、通道在内”（ir_mul，形状 (2l+1, mul)）。cuEquivariance 的描述符内部统一用 ir_mul：把 m 拆进路径之后只剩通道维 u 这一个“均匀模式”，正好适合 uniform_1d 内核。对外则用 TransposeIrrepsLayout 在两种布局间转置，保证能直接接到 e3nn 风格的模型上；布局相同时转置退化为恒等映射。",
+      "math": "\\texttt{mul\\_ir}:\\ x_{u,m}\\in\\mathbb R^{\\mathrm{mul}\\times(2l+1)}\\qquad\\texttt{ir\\_mul}:\\ x_{m,u}\\in\\mathbb R^{(2l+1)\\times\\mathrm{mul}}",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/group_theory/irreps_array/irreps_layout.py", "start": 23, "end": 65, "must": "return (ir.dim, mul)", "caption": "IrrepsLayout：mul_ir 对应 e3nn，ir_mul 为 irrep 维在前"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/transpose.py", "start": 43, "end": 56, "must": "TransposeSegments(", "caption": "TransposeIrrepsLayout：两种布局间逐段转置，相同布局则为 Identity"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "球谐函数：也是一个分段多项式",
+      "plain": "边方向 r̂ 的实球谐 Y_l^m 是 x、y、z 的 l 次齐次多项式。cuEquivariance 用 sympy 生成每个 Y_l^m 的系数，把“同一个向量输入重复 l 次”写成 STP 的 l 个操作数，每个单项式 x^a y^b z^c 就是一条路径；多个 l 再堆叠（stack）成一个多项式。PyTorch 模块 SphericalHarmonics 默认先把向量归一化，再交给 uniform_1d 内核计算。",
+      "math": "\\hat{\\mathbf r}=\\frac{\\mathbf r}{\\lVert\\mathbf r\\rVert},\\qquad Y_l^m(\\hat{\\mathbf r})=\\sum_{a+b+c=l}c^{lm}_{abc}\\,\\hat x^{a}\\hat y^{b}\\hat z^{c}",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/group_theory/descriptors/spherical_harmonics_.py", "start": 23, "end": 52, "must": "sympy_spherical_harmonics(ir_vec, ell)", "caption": "_spherical_harmonics_core：多项式系数 → 路径；对重复操作数对称化"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/operations/spherical_harmonics.py", "start": 55, "end": 93, "must": "torch.nn.functional.normalize(vectors, dim=1)", "caption": "cuet.SphericalHarmonics：默认归一化 + uniform_1d 方法"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "通道级张量积：NequIP / MACE 卷积的核心",
+      "plain": "消息传递里最贵的一步是“邻居特征 h_j ⊗ 球谐 Y(r̂_ij)”的 CG 张量积，每个通道各算各的（channelwise），权重来自径向 MLP。描述符 channelwise_tensor_product 对每一对输入 irreps (l1, l2)、每个允许的输出 l3 和每组 CG 系数添加一条路径；下标 uv,iu,jv,kuv+ijk 表示“权重[uv]·输入1[iu]·输入2[jv] → 输出[kuv]，系数 C_ijk”，最后按输出对路径归一化。PyTorch 层 ChannelWiseTensorProduct 前后做布局转置、中间调用一次 SegmentedPolynomial；MACE 的 TensorProduct 包装器在 cueq_config 打开时直接换成它（或换成融合版本）。",
+      "math": "z^{(l_1l_2\\to l_3)}_{k,uv}=\\sum_{i,j}C^{l_3}_{ijk}\\;w_{uv}\\;x_{i,u}\\;Y_{j,v}\\qquad(\\texttt{uv,iu,jv,kuv+ijk})",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/group_theory/descriptors/irreps_tp.py", "start": 232, "end": 270, "must": "uv,iu,jv,kuv+ijk", "caption": "_channelwise_tensor_product_core：遍历 (l1,l2→l3) 与 CG 解，逐条 add_path"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/operations/tp_channel_wise.py", "start": 221, "end": 258, "must": "input_indices=indices_in,", "caption": "ChannelWiseTensorProduct.forward：转置 → SegmentedPolynomial([weight, x1, x2]) → 转置"},
+        {"repo": "mace", "file": "mace/modules/wrapper_ops.py", "start": 285, "end": 319, "must": "cue.descriptors.channelwise_tensor_product(", "caption": "MACE TensorProduct 包装器：cueq 打开时用通道级描述符（可选卷积融合）"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "融合 gather–张量积–scatter：一次内核完成消息传递",
+      "plain": "朴素实现要先把 node_feats[sender] 复制成“每条边一份”的大张量，做完张量积再 scatter_sum 回接收原子，显存和带宽都耗在中间张量上。cuEquivariance 的 SegmentedPolynomial 支持 input_indices / output_indices：MACE 的 conv_fusion 把 {1: sender} 作为输入索引、{0: receiver} 作为输出索引；NequIP 则用 method=fused_tp 做同样的事。于是“取邻居特征—张量积—累加到中心原子”在内核里一次完成。",
+      "math": "\\mathbf m_i=\\sum_{e:\\,\\mathrm{dst}(e)=i}\\mathrm{TP}\\Big(w_e,\\ \\mathbf h_{\\mathrm{src}(e)},\\ Y(\\hat{\\mathbf r}_e)\\Big)",
+      "code": [
+        {"repo": "mace", "file": "mace/modules/wrapper_ops.py", "start": 177, "end": 192, "must": "[tp_weights, node_feats, edge_attrs],", "caption": "CueqConvFusionWrapper.forward：sender 作输入索引、receiver 作输出索引"},
+        {"repo": "mace", "file": "mace/modules/blocks.py", "start": 1017, "end": 1029, "must": "if hasattr(self, \"conv_fusion\"):", "caption": "MACE 交互块：有 conv_fusion 时直接得到 message，否则 gather + scatter_sum"},
+        {"repo": "nequip", "file": "nequip/nn/_tp_scatter_cueq.py", "start": 94, "end": 122, "must": "method=\"fused_tp\",", "caption": "NequIP：CuEquivarianceTensorProductScatter 用 fused_tp 完成 TP + scatter"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "对称收缩：MACE 高体序 B 基的专用描述符",
+      "plain": "MACE 每层把原子基 A 与自身相乘 ν 次，再投影回各 L 通道。symmetric_contraction 为每个阶数 degree 构造一个 STP：同一个输入重复 degree 次，系数是约化对称张量积基 U（同时保证置换对称与旋转等变），所有通道 u 并行；多个阶数再堆叠成一个多项式。权重按中心原子元素 z 选取——PyTorch 层把元素编号作为 input_indices 交给内核，不必先复制一份逐原子的权重。MACE 的 SymmetricContractionWrapper 在 optimize_symmetric 打开时换成 cuet.SymmetricContraction。",
+      "math": "B_{i,u}=\\sum_{\\nu=1}^{\\nu_{\\max}}\\sum_{w}W^{(\\nu)}_{z,\\,wu}\\sum_{a_1\\cdots a_\\nu}U^{(\\nu)}_{a_1\\cdots a_\\nu\\,i\\,w}\\prod_{\\xi=1}^{\\nu}A_{a_\\xi,u}",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/group_theory/descriptors/symmetric_contractions.py", "start": 57, "end": 88, "must": "reduced_symmetric_tensor_product_basis(", "caption": "_symmetric_contraction_core：下标 w_a_b_c_i+abciw，系数为约化对称基，再附加通道模式 u"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/operations/symmetric_contraction.py", "start": 235, "end": 242, "must": "input_indices={0: indices}", "caption": "SymmetricContraction.forward：按元素索引选择权重"},
+        {"repo": "mace", "file": "mace/modules/wrapper_ops.py", "start": 428, "end": 445, "must": "return cuet.SymmetricContraction(", "caption": "MACE SymmetricContractionWrapper：contraction_degree = correlation"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "全连接张量积与等变线性层",
+      "plain": "除卷积外，等变网络还需要“混合通道”的运算：全连接张量积（uvw,iu,jv,kw+ijk，每对输入通道 u、v 到每个输出通道 w 都有独立权重）和等变线性层（uv_iu_iv：只在同一种 irrep 内做通道混合，系数恒为 1，因此天然等变）。它们同样只是路径不同的 STP。MACE 的 Linear / FullyConnectedTensorProduct 包装器在 cueq 模式下分别换成 cuet.Linear、cuet.FullyConnectedTensorProduct。",
+      "math": "z_{k,w}=\\sum_{u,v}\\sum_{i,j}C_{ijk}\\,W_{uvw}\\,x_{i,u}\\,y_{j,v}\\qquad\\text{Linear: }z_{i,v}=\\sum_{u}W_{uv}\\,x_{i,u}",
+      "code": [
+        {"file": "cuequivariance/cuequivariance/group_theory/descriptors/irreps_tp.py", "start": 22, "end": 47, "must": "uvw,iu,jv,kw+ijk", "caption": "_fully_connected_tensor_product_core：每个 (l1,l2,l3) 组合一条带 CG 系数的路径"},
+        {"file": "cuequivariance/cuequivariance/group_theory/descriptors/irreps_tp.py", "start": 505, "end": 518, "must": "from_subscripts(\"uv_iu_iv\")", "caption": "_linear_core：同 irrep 之间的通道混合"},
+        {"repo": "mace", "file": "mace/modules/wrapper_ops.py", "start": 90, "end": 102, "must": "return cuet.Linear(", "caption": "MACE Linear 包装器：cueq 模式用 cuet.Linear"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "后端分派：naive / uniform_1d / fused_tp / indexed_linear",
+      "plain": "同一个描述符可以有多种执行方式：naive 是纯 PyTorch 实现（处处可用但慢）；uniform_1d 是要求所有段等长的 CUDA 内核，经 torch.ops.cuequivariance.uniform_1d 调用；fused_tp 支持更一般的 3/4 操作数收缩；indexed_linear 面向按索引选权重的线性层。真正的 CUDA 代码在二进制包 cuequivariance_ops_torch / cuequivariance-ops-jax 里，开源仓库只包含分派与参数打包的 Python 前端；若内核包未安装，则自动退回 naive 并给出警告。",
+      "math": "\\texttt{method}\\in\\{\\texttt{naive},\\ \\texttt{uniform\\_1d},\\ \\texttt{fused\\_tp},\\ \\texttt{indexed\\_linear}\\}",
+      "code": [
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial.py", "start": 181, "end": 220, "must": "SegmentedPolynomialFromUniform1dJit(", "caption": "cuet.SegmentedPolynomial：按 method 选择实现，缺少内核包时回退 naive"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial_uniform_1d.py", "start": 24, "end": 56, "must": "torch.ops.cuequivariance.uniform_1d(", "caption": "uniform_1d：调用二进制包注册的 torch 自定义算子"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial_fused_tp.py", "start": 27, "end": 41, "must": "ops.FusedTensorProductOp3(", "caption": "fused_tp：把段偏移、段形状、路径索引与系数交给 FusedTensorProductOp3"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "从描述符到内核参数：均匀段 + 拍平的路径表",
+      "plain": "uniform_1d 内核的前提：每个操作数是标量或一维段、同一操作数的所有段等长、所有一维操作数共享同一个段长（通常就是通道数），且路径系数是标量。满足后，所有路径的段索引与系数被拍平成整数/浮点数组，连同各缓冲区的段数一起传给内核。源码提示：段长小于 32 或不是 32 的倍数时 GPU 效率较低。描述符还自带 flop()，用 opt_einsum 估算每条路径的最优收缩代价。",
+      "math": "\\mathrm{FLOP}=B\\sum_{p\\in\\text{paths}}\\mathrm{cost}_{\\mathrm{opt}}\\Big(C^{(p)},\\,x_1\\big[s_1^{(p)}\\big],\\dots,x_{n-1}\\big[s_{n-1}^{(p)}\\big]\\Big)",
+      "code": [
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial_uniform_1d.py", "start": 132, "end": 155, "must": "o.all_same_segment_shape()", "caption": "uniform_1d 前提检查：段形状一致、单一段长"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial_uniform_1d.py", "start": 201, "end": 218, "must": "self.path_coefficients = [", "caption": "把各运算的路径索引与系数拍平成内核参数数组"},
+        {"file": "cuequivariance/cuequivariance/segmented_polynomials/segmented_tensor_product.py", "start": 621, "end": 649, "must": "opt_einsum.contract_path(", "caption": "STP.flop：逐路径用 opt_einsum 估算计算量"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "MACE / NequIP 如何接入",
+      "plain": "MACE：计算器设 enable_cueq=True 时调用 run_e3nn_to_cueq，按原配置新建一个 cueq_config(enabled=True, optimize_all=True) 的同构模型，再把 e3nn 权重逐一搬过去（transfer_weights），所以预训练权重无需重训；训练脚本也有 --enable_cueq / --cueq_conv_fusion 开关。NequIP：enable_CuEquivariance 修饰器把每个 TensorProductScatter 替换为 CuEquivarianceTensorProductScatter（官方标注为 ALPHA 支持，面向推理加速），内部用改写的通道级描述符 + fused_tp。",
+      "math": "\\text{e3nn model}\\xrightarrow{\\ \\texttt{run\\_e3nn\\_to\\_cueq}\\ }\\text{cuEq model},\\qquad \\theta_{\\text{cuEq}}=\\mathcal T\\big(\\theta_{\\text{e3nn}}\\big)",
+      "code": [
+        {"repo": "mace", "file": "mace/cli/convert_e3nn_cueq.py", "start": 246, "end": 269, "must": "transfer_weights(", "caption": "run_e3nn_to_cueq：启用 cueq 配置重建模型并迁移权重"},
+        {"repo": "mace", "file": "mace/calculators/mace.py", "start": 385, "end": 390, "must": "run_e3nn_to_cueq(model, device=device)", "caption": "MACECalculator(enable_cueq=True) 加载时自动转换"},
+        {"repo": "nequip", "file": "nequip/nn/_tp_scatter_base.py", "start": 86, "end": 102, "must": "[ALPHA SUPPORT] Enable CuEquivariance tensor product kernel", "caption": "NequIP enable_CuEquivariance：替换张量积 + scatter 模块"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "三角注意力与三角乘法更新（面向 AlphaFold 类模型）",
+      "plain": "除等变张量积外，库里还提供 AlphaFold 系结构模型常用的成对表示算子：三角注意力（对每一行做带偏置 B 与掩码 M 的注意力）、三角乘法更新（outgoing / incoming 两个方向，含 LayerNorm、门控与投影）以及 attention_pair_bias。它们与 MLFF 的能量/力计算无直接关系；PyTorch 前端同样只做参数检查，再调用 cuequivariance_ops_torch 中的内核。",
+      "math": "\\mathrm{Attn}_q(Q,K,V,B,M)=\\sum_k\\mathrm{softmax}_k\\big(s\\,Q_q\\cdot K_k+B_{qk}\\big)V_k\\qquad(M_k=1)",
+      "code": [
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/triangle.py", "start": 75, "end": 94, "must": "Triangle Attention", "caption": "triangle_attention 的接口与公式"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/triangle.py", "start": 198, "end": 205, "must": "from cuequivariance_ops_torch import triangle_attention as f", "caption": "转发到二进制内核包"},
+        {"file": "cuequivariance_torch/cuequivariance_torch/primitives/triangle.py", "start": 313, "end": 325, "must": "triangle_multiplicative_update as f", "caption": "triangle_multiplicative_update：同样由内核包实现"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "layout（MACE CuEquivarianceConfig 默认）", "value": "mul_ir；optimize_* 与 conv_fusion 默认 False", "note": "与 e3nn 相同的布局", "code": {"repo": "mace", "file": "mace/modules/wrapper_ops.py", "start": 33, "end": 45, "must": "layout: str = \"mul_ir\""}},
+    {"name": "run_e3nn_to_cueq 默认", "value": "layout=ir_mul，group=O3_e3nn，optimize_all=True，conv_fusion=True（仅 CUDA 设备）", "note": "MACE 计算器 enable_cueq=True 时使用", "code": {"repo": "mace", "file": "mace/cli/convert_e3nn_cueq.py", "start": 218, "end": 253, "must": "conv_fusion=conv_fusion and torch.device(device).type == \"cuda\","}},
+    {"name": "MACE 训练开关", "value": "--enable_cueq False，--only_cueq False，--cueq_conv_fusion False", "note": "训练时需显式打开", "code": {"repo": "mace", "file": "mace/tools/arg_parser.py", "start": 1102, "end": 1120, "must": "--cueq_conv_fusion"}},
+    {"name": "cuet.SegmentedPolynomial method", "value": "未指定时默认 uniform_1d（并警告）；无内核包时回退 naive", "note": "v0.6.0 起建议显式指定", "code": {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial.py", "start": 161, "end": 173, "must": "method = \"uniform_1d\""}},
+    {"name": "math_dtype（uniform_1d）", "value": "float32 / float64 / None（跟随输入）", "note": "内核内部计算精度", "code": {"file": "cuequivariance_torch/cuequivariance_torch/primitives/segmented_polynomial_uniform_1d.py", "start": 172, "end": 187, "must": "math_dtype not in [None, torch.float32, torch.float64]"}},
+    {"name": "SphericalHarmonics", "value": "normalize=True；method 默认 uniform_1d", "note": "输入为 (batch, 3) 向量", "code": {"file": "cuequivariance_torch/cuequivariance_torch/operations/spherical_harmonics.py", "start": 29, "end": 37, "must": "normalize: bool = True"}},
+    {"name": "ChannelWiseTensorProduct layout", "value": "默认 cue.mul_ir", "note": "与 e3nn 兼容；描述符内部为 ir_mul", "code": {"file": "cuequivariance_torch/cuequivariance_torch/operations/tp_channel_wise.py", "start": 38, "end": 41, "must": "Default is ``cue.mul_ir``"}},
+    {"name": "SymmetricContraction original_mace", "value": "False（MACE 中取 not use_reduced_cg）", "note": "True 时用投影矩阵复现原版 MACE 权重参数化", "code": {"file": "cuequivariance_torch/cuequivariance_torch/operations/symmetric_contraction.py", "start": 113, "end": 121, "must": "original_mace: bool = False"}},
+    {"name": "JAX method", "value": "naive / uniform_1d / indexed_linear；非 CUDA 平台自动回退 naive", "note": "cuequivariance_jax 前端", "code": {"file": "cuequivariance_jax/cuequivariance_jax/segmented_polynomials/segmented_polynomial.py", "start": 519, "end": 526, "must": "if platform != \"cuda\" and method != \"naive\":"}},
+    {"name": "triangle_multiplicative_update eps", "value": "1e-5", "note": "LayerNorm 稳定项；文档注明 hidden_dim 需为 32 的倍数", "code": {"file": "cuequivariance_torch/cuequivariance_torch/primitives/triangle.py", "start": 208, "end": 226, "must": "eps: float = 1e-5"}}
+  ],
+  "speedNotes": [
+    "等变 MLFF 的 FLOPs 大头在边上的 CG 张量积和（MACE 的）节点对称收缩；朴素实现逐路径做小 einsum 并产生中间张量，cuEquivariance 把整个分段多项式交给一个 CUDA 内核执行。",
+    "gather–TP–scatter 融合（input/output indices）避免物化“边数 × 通道”的边特征张量；官方文档称相对 e3nn 有显著性能提升，并用 MACE 基准图标出单卡显存允许的最大原子数（只有图，此处不引用具体数值）。",
+    "uniform_1d 只接受“单一均匀模式”的描述符：段长一致、系数为标量；源码提示段长 <32 或非 32 倍数时 GPU 低效，所以隐藏通道数取 32 的倍数更划算；不满足时 ChannelWiseTensorProduct 退回 naive。",
+    "uniform_1d 的 math_dtype 只支持 FP32/FP64；STP.flop() 与 JAX 前端打印的 GFLOP / 算术强度可帮助判断瓶颈在算力还是带宽。",
+    "布局转置本身也有开销：MACE 转换脚本默认整网使用 ir_mul，布局一致时转置退化为恒等映射。"
+  ],
+  "weakNotes": [
+    "cuEquivariance 只替换算子、不改变模型数学：截断半径、感受野、是否含色散/静电完全由上层模型（MACE、NequIP…）决定，加速前后能量应一致。",
+    "库中没有邻居表、截断包络、电荷或长程模块；卷积层只接收调用方传入的 edge_envelope 作为截断衰减。",
+    "MACE 转换只是把 e3nn 权重搬到 cuEq 模块（transfer_weights），因此基于 PBE 数据训练的 MACE-MP 等模型缺 vdW 的问题依旧，层状材料、物理吸附等仍需另加 D3 等修正。",
+    "弱相互作用常是微小能量差：使用 FP32 内核或三角算子的 TF32/BF16 精度前，应与 e3nn / FP64 结果对比；MACE 提供 cueq→e3nn 的反向转换脚本（convert_cueq_e3nn）便于核对。"
+  ],
+  "downstreamNotes": [
+    "MD / 结构优化：加速每一步的力计算（前向 + 反传），对大体系、长时间 MD 与主动学习采样最有价值；MACE 计算器设 enable_cueq=True 即可，create_lammps_model 源码注释表明默认启用 cuEquivariance。",
+    "声子 / Hessian 需要二阶导：库的测试工具含 run_bwd_bwd_test（create_graph=True 的二次反传检查），但具体模型的 Hessian 结果仍应与 e3nn 实现对比验证。",
+    "训练与微调：MACE 训练脚本的 --enable_cueq / --cueq_conv_fusion 可在训练阶段使用；NequIP 的 enable_CuEquivariance 标注为 ALPHA，主要面向推理。",
+    "跨领域：JAX 前端（含 Flax NNX 层）便于 JAX 系模型复用同一套描述符；三角注意力/乘法算子服务于蛋白质结构预测等非 MLFF 任务。"
+  ],
+  "strengths": ["统一描述符：CG 张量积、球谐、对称收缩、线性层、旋转都写成分段张量积/多项式", "融合 CUDA 内核 + gather/scatter 融合，减少中间张量与显存", "PyTorch / JAX 双前端，无内核包时自动退回 naive 实现", "MACE、NequIP 官方集成，权重可与 e3nn 互相转换"],
+  "weaknesses": ["CUDA 内核以二进制 wheel 发布，仅支持 Linux x86_64/aarch64 + NVIDIA GPU，内核源码不在开源仓库中", "uniform_1d 要求段长一致，不规则 irreps 会退回较慢的 naive", "仍处 Beta 阶段，API 变动较快（如 v0.6.0 起建议显式指定 method）", "只加速算子，不弥补上层模型在长程、色散等方面的物理缺陷"],
+  "pretrained": [],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

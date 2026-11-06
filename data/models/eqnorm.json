@@ -1,0 +1,197 @@
+{
+  "id": "eqnorm",
+  "name": "Eqnorm",
+  "fullName": "Eqnorm：带等变 RMS 归一化的 E(3) 等变双分支 GNN 原子间势",
+  "year": 2025,
+  "authors": "Yuzhuo Chen, Lyuwen Fu, Shuxiang Yang, Lipeng Chen（之江实验室）",
+  "paper": {"title": "（仓库 README 与 Matbench Discovery 条目均未给出论文，paper/doi 为空）", "venue": "GitHub 仓库 + Matbench Discovery 提交（2025-05-26）", "url": ""},
+  "repos": ["eqnorm"],
+  "family": "spherical-equivariant",
+  "tags": ["E(3) 等变", "球谐张量积 (e3nn)", "双分支：张量/标量", "等变 RMS LayerNorm", "保守力", "MPtrj"],
+  "framework": "PyTorch + e3nn + torch_scatter（ASE 计算器，vesin 邻居表）",
+  "license": "MIT",
+  "oneLiner": "在 NequIP 式球谐张量积消息传递上做“双分支”：张量分支（l≤3 等变特征）逐层卷积、门控更新，标量分支每层再用一次“只输出标量”的卷积从张量分支抽取不变信息并累加，最后只用标量分支读出能量；每次卷积后接一个按 l 平衡的等变 RMS LayerNorm（名字里的 norm），让 4 层等变网络稳定可训。",
+  "analogy": "像一支调研队：外勤组（张量分支）每轮去邻居家，带回有方向、有形状的“立体笔记”；内勤组（标量分支）每轮只读外勤组的笔记，把与朝向无关的结论摘进一本“摘要本”，最后只凭摘要本估算能量。每轮结束还把笔记的“音量”统一调到标准大小（等变 RMS 归一化）——只调大小、不改箭头方向，传很多轮也不会失真。",
+  "arch": {
+    "geometry": "边向量 r_ij → 距离（8 个频率可训练的 Bessel 基 × p=6 多项式包络）+ 方向（实球谐 Y_l^m，l≤3，component 归一化）",
+    "equivariance": "E(3)/O(3) 等变（e3nn irreps 含宇称 0e/1o/2e/3o）；能量只由标量读出，严格不变",
+    "lmax": "边球谐 l≤3；张量分支隐藏特征 128x0e+64x1o+32x2e+32x3o（L_max=3）",
+    "bodyOrder": "每次卷积是两体张量积（同 NequIP，无 MACE 式对称收缩）；多体关联靠 4 层堆叠 + 门控非线性逐步获得",
+    "layers": "4（num_convs=4）；每层 = 张量卷积 + Gate + 标量卷积 + SiLU 累加，共 8 个张量积卷积",
+    "cutoff": "6.0 Å（r_cutoff）",
+    "receptiveField": "最后的标量卷积比张量分支多一跳：5 × 6 Å = 30 Å",
+    "message": "m_i = Σ_j TP_uvu(W₁h_j, Y(r̂_ij); MLP(R(r_ij)))/√61.84 → Linear + 自连接 Linear(h_i) → 等变 RMS LayerNorm",
+    "readout": "标量分支 o_i = h⁰_i + Σ_t SiLU(s_i^(t)) → MLP(128→64→1, SiLU) → ×scale(force_rms) + 元素 shift → 求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R；默认 grad_mode='edge'：一次反传得 ∂E/∂r_ij，再按边两端 scatter 成原子力（SevenNet 式）",
+    "stress": "边维里 σ = (1/V) Σ r_ij ⊗ ∂E/∂r_ij（edge 模式）；node 模式用对称应变 displacement 求导",
+    "longRange": "无（仅 30 Å 消息传递感受野）",
+    "dispersion": "无（代码无 D3 选项；训练数据 MPtrj 为 PBE/PBE+U）",
+    "chargeSpin": "无总电荷/自旋输入",
+    "otherOutputs": "无；DIPOLE/POLAR 开关为占位，forward 始终返回 None",
+    "strictlyLocal": false,
+    "complexity": "O(N·M·C·P_TP)：每层 2 次 l≤3 的边上 uvu 张量积 + 逐边径向 MLP；MPtrj 6 Å 下平均 M≈62",
+    "accel": "纯 PyTorch/e3nn + torch_scatter，可选 torch.compile；仅 ASE 计算器，无 LAMMPS、多 GPU 或自定义 CUDA 内核"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "README（A40、未 compile）：64 原子 0.67 ns/day，约为 MACE-MP-0 的 1/3.4，但比 eSEN-30M-MP 快约 4.5 倍；4 层共 8 次 l≤3 边上张量积，属深层等变一档。"},
+    "expressiveness": {"v": 4, "why": "l≤3 等变特征 + 门控非线性 + 5 跳标量读出，MPtrj 上精度靠前；但每次卷积只是两体张量积、无高阶对称收缩，参数仅约 131 万。"},
+    "longRange": {"v": 2, "why": "只有 5 跳 × 6 Å ≈ 30 Å 的消息传递感受野，无色散、静电或电荷模块。"},
+    "scalability": {"v": 1, "why": "只有 ASE 单 GPU 整图推理，无 LAMMPS/空间分解/多 GPU；README 中 1728 原子已占 44.8 GB 显存。"},
+    "physics": {"v": 4, "why": "能量对坐标自动微分（严格保守）、p=6 多项式包络使径向信号 C² 平滑归零、原子能求和保证广延性；但没有 ZBL 等近程排斥先验。"},
+    "coverage": {"v": 1, "why": "只输出能量/力/应力；DIPOLE/POLAR 开关始终返回 None，无 Hessian、电荷、磁矩等官方接口。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞（ASE → PyG Data）",
+      "plain": "ASE 计算器把原子坐标、原子序数、晶胞和周期平移打包成 PyG 的 Data（float32），一次算一个结构。进入模型后坐标被设为 requires_grad——力和应力都靠对能量求导得到；原子序数再按检查点里的元素表 unique_elements 映射成 0,1,2… 的下标。",
+      "math": "\\mathcal{S}=\\{(\\mathbf r_i, Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\qquad z_i=\\mathrm{searchsorted}(\\mathcal Z_{\\text{ckpt}},Z_i)",
+      "code": [
+        {"file": "eqnorm/calculator.py", "start": 138, "end": 148, "must": "Batch.from_data_list([data])", "caption": "EqnormCalculator.calculate：构造 Data 并调用模型"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 476, "end": 478, "must": "data['pos'] = data['pos'].requires_grad_(True)", "caption": "HDNNP.forward：坐标可求导，元素映射为下标"}
+      ]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 内的全部原子对（含周期镜像）",
+      "plain": "用 vesin 构建“全邻居表”：所有距离小于 6 Å 的原子对 (i, j) 及跨越周期边界的整数平移 S。边向量 r_ij = r_j − r_i + S·C 在模型内部用可求导的坐标重新计算，梯度因此能沿它回传。MPtrj 在 6 Å 下平均每个原子约 62 个邻居（配置 avg_nbr），这决定了后续边上计算量。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_{ij}\\rVert<r_c\\,\\},\\qquad \\mathbf r_{ij}=\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C,\\quad r_c=6",
+      "code": [
+        {"file": "eqnorm/calculator.py", "start": 127, "end": 136, "must": "vesin.NeighborList(cutoff=self.r_cutoff, full_list=True, sorted=False)", "caption": "vesin 全邻居表 (i, j, S)"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 490, "end": 495, "must": "pbc_shift = torch.einsum(", "caption": "边向量 = r_j − r_i + S·C"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 可训练 Bessel × 多项式包络；方向 → 球谐",
+      "plain": "每条边拆成“多远”和“朝哪”。距离用 8 个 Bessel 函数展开（频率初值 nπ，训练中可调），再乘 p=6 的多项式包络——它在 r_c 处函数值和一、二阶导都为 0，所以邻居进出截断球时能量和力都连续。方向用 l≤3 的实球谐 Y_l^m 编码，它们随旋转按已知规律变换，是等变性的来源。",
+      "math": "R_n(r)=\\frac{2}{r_c}\\,\\frac{\\sin(w_n r/r_c)}{r}\\,f_{\\text{cut}}(r),\\ w_n^{(0)}=n\\pi;\\quad f_{\\text{cut}}=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c},\\ p=6;\\qquad Y_{l}^{m}(\\hat{\\mathbf r}_{ij}),\\ l\\le 3",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 188, "end": 194, "must": "data['edge_sh'] = self.sph(data['edge_vec'])", "caption": "E3NN.forward：球谐 + 径向基 × 包络"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 279, "end": 292, "must": "torch.sin(self.bessel_weights * x.unsqueeze(-1) / self.r_max)", "caption": "BesselBasis：前因子 2/r_c，频率可训练"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 312, "end": 317, "must": "return out * (x < 1.0)", "caption": "PolynomialCutoff（p = 6）"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：one-hot(Z) → 128 个标量通道，作为两条分支的共同起点",
+      "plain": "元素下标先变成 one-hot，再经 e3nn 线性层变成 128 个标量通道（128x0e）。这份初始特征同时是两条分支的起点：张量分支 node_hiddens 从这里长出 l=1,2,3 的分量，标量分支 output 以它为“底稿”逐层累加。模型没有单独的 E0 表，元素参考能由后面的 per-species shift 承担。",
+      "math": "h_i^{(0)}=o_i^{(0)}=W_{\\text{emb}}\\,\\mathrm{onehot}(z_i)\\in\\mathbb R^{128}",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 257, "end": 264, "must": "torch.nn.functional.one_hot(atomic_numbers, num_classes=self.num_types)", "caption": "Embedding_layer：one-hot → Linear → 128x0e"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 185, "end": 186, "must": "data['output'] = data['node_hiddens']", "caption": "张量分支与标量分支同一起点"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ①：张量分支卷积（球谐张量积，两体消息）",
+      "plain": "张量分支的卷积与 NequIP 同类：邻居特征先过线性层，再与方向球谐做 Clebsch–Gordan 张量积（uvu：每个通道单独与 Y 耦合，只保留落在目标 irreps 里的 l 组合），权重由“距离 → 两层 64 宽 MLP”逐边给出；对邻居求和后除以 √61.84，再过线性层并加上自连接（中心原子自身特征的线性变换）。单次卷积只含“中心—邻居”两体信息，多体关联靠层层堆叠获得。",
+      "math": "u^{(t)}_i=W_2\\Big[\\frac{1}{\\sqrt{\\bar n}}\\sum_{j\\in\\mathcal N(i)}\\big(W_1h^{(t-1)}_j\\big)\\otimes^{\\text{uvu}}_{w_{ij}}Y(\\hat{\\mathbf r}_{ij})\\Big]+W_{\\text{sc}}h^{(t-1)}_i,\\qquad w_{ij}=\\mathrm{MLP}_{8\\to64\\to64}\\big(R(r_{ij})\\big),\\ \\bar n=61.84",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 38, "end": 44, "must": "instructions.append((i, j, k, \"uvu\", True))", "caption": "get_path：可行的 l_in⊗l_sh→l_out 路径，uvu 模式"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 357, "end": 371, "must": "self.fc = FullyConnectedNet(", "caption": "TensorProduct（外部逐边权重）+ 径向 MLP"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 391, "end": 412, "must": "edge_features = edge_features.div(self.avg_num_neighbors ** 0.5)", "caption": "E3Conv.forward：张量积 → /√n̄ → scatter 求和 → Linear + 自连接"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ②：等变 RMS LayerNorm（名字里的 norm）",
+      "plain": "每次卷积的残差和之后立刻归一化（代码把 RMSLayerNorm 以 EquivariantLayerNorm 之名导入）：对每个原子的全部特征算一个“按 l 平衡”的均方根——每个 l 先在 2l+1 个 m 分量上平均，不同 l 通道数不同（如 256x0e+64x1o+32x2e+32x3o）也按每个通道位置出现的 l 个数 n_c 加权——再整体除以它，并乘每个 (l, 通道) 的可学习系数 γ。范数是旋转不变量，所以缩放不破坏等变；不减均值、不加偏置（centering=False），l>0 分量的方向不变。它让 4 层深的等变网络各层特征保持同一量级，训练更稳。",
+      "math": "\\mathrm{RMS}_i=\\Big(\\frac{1}{C_{\\max}}\\sum_{c}\\frac{1}{n_c}\\sum_{l}\\frac{1}{2l+1}\\sum_{m=-l}^{l}\\big(u^{(l)}_{i,cm}\\big)^2+\\epsilon\\Big)^{1/2},\\qquad \\hat u^{(l)}_{i,cm}=\\gamma_{l,c}\\,\\frac{u^{(l)}_{i,cm}}{\\mathrm{RMS}_i}",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 409, "end": 413, "must": "node_hiddens = self.ln(node_hiddens)", "caption": "残差相加后做等变 RMS LayerNorm"},
+        {"file": "eqnorm/layernorm.py", "start": 228, "end": 248, "must": "feature_norm = (feature_norm + self.eps).pow(-0.5)", "caption": "RMSLayerNorm.forward：每个原子一个不变范数，乘 γ_{l,c}"},
+        {"file": "eqnorm/layernorm.py", "start": 187, "end": 196, "must": "balance_channel_weight[:self.irreps[lval].mul, :] += 1", "caption": "平衡权重 1/(2l+1) × 1/n_c"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互 ③：门控 + 标量分支（从张量分支抽取不变量并累加）",
+      "plain": "张量卷积的输出先过 e3nn Gate：128 个标量直接过 SiLU，另外 128 个“门”标量过 SiLU 后去乘 l=1,2,3 的各通道，给等变特征引入非线性又不破坏对称性。随后第二个卷积读取门控后的张量特征、只输出 128 个标量（相当于把 l 阶特征与同阶球谐耦合成不变量），同样经 RMS 归一化，过 SiLU 后加到标量分支上。标量分支只读不写：从张量分支抽取信息却从不回传，张量分支专心表示几何，标量分支专心为能量做准备。",
+      "math": "h^{(t)}_i=\\Big[\\mathrm{SiLU}(\\hat u^{0e}_{i}),\\ \\mathrm{SiLU}(g_{i,k})\\,\\hat u^{(l>0)}_{i,k}\\Big],\\qquad s^{(t)}_i=\\mathrm{RMSNorm}\\big(\\mathrm{Conv}_{\\to 128\\times0e}(h^{(t)})_i\\big),\\quad o^{(t)}_i=o^{(t-1)}_i+\\mathrm{SiLU}\\big(s^{(t)}_i\\big)",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 138, "end": 172, "must": "mode=\"scalar\"", "caption": "每层组装：张量卷积 → Gate → 标量卷积 → 累加"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 227, "end": 245, "must": "data['output'] = data['output'] + self.nonlinear(data['node_scalars'])", "caption": "EquivariantGate 与 NonlinearAndAdd"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：只用标量分支预测原子能",
+      "plain": "4 层结束后，只把标量分支 o_i（初始嵌入 + 4 次 SiLU 累加）送入 128→64→1 的 SiLU MLP，得到每个原子的（归一化）原子能。读出只用旋转不变的标量，所以能量天然 E(3) 不变；张量分支的最终 l>0 特征不直接参与读出。",
+      "math": "E_i^{\\text{NN}}=W_2\\,\\mathrm{SiLU}\\big(W_1\\,o^{(4)}_i\\big),\\qquad o^{(4)}_i=h^{(0)}_i+\\sum_{t=1}^{4}\\mathrm{SiLU}\\big(s^{(t)}_i\\big),\\quad W_1\\in\\mathbb R^{64\\times128}",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 174, "end": 179, "must": "self.output_block = FullyConnectedNet(", "caption": "读出 MLP：128 → 64 → 1"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 197, "end": 206, "must": "data['output'] = self.output_block(data['output'])", "caption": "逐层执行后对标量分支读出"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：原子能 × scale + 元素 shift，再求和",
+      "plain": "原子能先乘一个全局尺度（force_rms 统计量），再加按元素的能量平移（per_species shift，相当于元素参考能）；两者都从检查点读入且不参与训练。最后按结构求和——总能是原子能之和，体系加倍、能量加倍（广延性）。",
+      "math": "E=\\sum_{i=1}^{N}\\Big[\\,s\\,E_i^{\\text{NN}}+\\mu_{Z_i}\\Big],\\qquad s=\\text{force\\_rms},\\ \\mu_{Z}=\\text{per-species shift}",
+      "code": [
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 497, "end": 511, "must": "energy = energy + self.shift[data['atomic_numbers']]", "caption": "HDNNP.forward：scale/shift → scatter 求和"},
+        {"file": "eqnorm/calculator.py", "start": 93, "end": 104, "must": "checkpoint['energy_shift'], checkpoint['energy_scale']", "caption": "shift/scale 与元素表来自检查点"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对边向量求一次梯度，再分配到原子",
+      "plain": "力严格是能量的负梯度。eqnorm-mptrj 用 SevenNet 式 edge 梯度：对所有边向量 r_ij 做一次反传得到 ∂E/∂r_ij，再按边的两个端点分别加、减到原子上。这样既保证保守性（MD 能量守恒、声子自洽），又能直接复用同一批边梯度算应力；代价是一次反传，约等于再做一次前向。",
+      "math": "\\mathbf f_{ij}=\\frac{\\partial E}{\\partial \\mathbf r_{ij}},\\qquad \\mathbf F_k=-\\frac{\\partial E}{\\partial \\mathbf r_k}=\\sum_{j:(k,j)}\\mathbf f_{kj}-\\sum_{i:(i,k)}\\mathbf f_{ik}",
+      "code": [
+        {"repo": "eqnorm", "file": "eqnorm/grad_output.py", "start": 62, "end": 79, "must": "forces = pf - nf", "caption": "EdgewiseGrad：∂E/∂r_ij → scatter 成原子力"},
+        {"file": "eqnorm/eqnorm-mptrj.py", "start": 464, "end": 469, "must": "self.force_stress_output = EdgewiseGrad(calc_stress=self.calc_stress)", "caption": "grad_mode='edge'（eqnorm-mptrj 配置）"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：边维里求和 / 体积",
+      "plain": "应力用边维里：每条边贡献 r_ij ⊗ ∂E/∂r_ij，先累加到原子（原子维里），再对整个结构求和并除以晶胞体积，按 Voigt 顺序 (xx, yy, zz, yz, zx, xy) 输出。另一种 node 模式（omat 配置使用）像 MACE 一样给坐标和晶胞施加虚拟对称应变，对应变求导；对只通过边向量依赖坐标的能量，两者等价。",
+      "math": "\\boldsymbol\\sigma=\\frac{1}{V}\\sum_{(i,j)}\\mathbf r_{ij}\\otimes\\frac{\\partial E}{\\partial \\mathbf r_{ij}}\\qquad(\\text{Voigt: }xx,yy,zz,yz,zx,xy)",
+      "code": [
+        {"file": "eqnorm/grad_output.py", "start": 81, "end": 104, "must": "_virial = torch.cat([", "caption": "边维里 → 原子 → 结构，除以体积"},
+        {"file": "eqnorm/grad_output.py", "start": 19, "end": 33, "must": "[data['pos'], data['displacement']]", "caption": "NodewiseGrad：对称应变求导（node 模式）"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "r_cutoff", "value": "6.0 Å", "note": "截断半径（MBD graph_construction_radius 同为 6.0）", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 16, "end": 16, "must": "r_cutoff: 6.0"}},
+    {"name": "num_convs", "value": "4", "note": "层数；每层含张量卷积 + Gate + 标量卷积", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 14, "end": 14, "must": "num_convs: 4"}},
+    {"name": "irreps_hidden", "value": "128x0e+64x1o+32x2e+32x3o", "note": "张量分支隐藏特征，各 l 通道数不同", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 12, "end": 12, "must": "128x0e+64x1o+32x2e+32x3o"}},
+    {"name": "irreps_sh", "value": "1x0e+1x1o+1x2e+1x3o", "note": "边球谐 l≤3", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 13, "end": 13, "must": "1x0e+1x1o+1x2e+1x3o"}},
+    {"name": "num_features", "value": "128", "note": "嵌入与标量分支宽度", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 15, "end": 15, "must": "num_features: 128"}},
+    {"name": "num_basis", "value": "8", "note": "Bessel 径向基个数（频率可训练）", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 17, "end": 17, "must": "num_basis: 8"}},
+    {"name": "invariant_layers × invariant_neurons", "value": "2 × 64", "note": "径向 MLP：距离 → 张量积逐边权重", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 18, "end": 19, "must": "invariant_neurons: 64"}},
+    {"name": "poly_p", "value": "6", "note": "多项式截断包络阶数", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 20, "end": 20, "must": "poly_p: 6"}},
+    {"name": "avg_nbr", "value": "61.84", "note": "消息除以 √avg_nbr（MPtrj、6 Å 平均邻居数）", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 23, "end": 23, "must": "avg_nbr: 61.84"}},
+    {"name": "grad_mode", "value": "edge", "note": "力/应力由 ∂E/∂r_ij 得到", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 10, "end": 10, "must": "grad_mode: \"edge\""}},
+    {"name": "shift / scale", "value": "per_species / force_rms（不可训练）", "note": "元素能量平移与全局能量尺度", "code": {"file": "eqnorm/model_settings/eqnorm-mptrj.yaml", "start": 6, "end": 9, "must": "scale: \"force_rms\""}},
+    {"name": "参数量", "value": "1,310,024", "note": "Matbench Discovery model_params", "code": {"repo": "matbench-discovery", "file": "models/eqnorm/eqnorm-mptrj.yml", "start": 61, "end": 61, "must": "model_params: 1310024"}}
+  ],
+  "speedNotes": [
+    "计算集中在边上：每层 2 次 uvu 张量积（张量卷积输出 256x0e+64x1o+32x2e+32x3o，标量卷积输出 128x0e），4 层共 8 次，外加 8 个径向 MLP 为每条边生成权重；6 Å 下 MPtrj 平均约 62 个邻居。",
+    "README 实测（A40，1 fs/步，未用 compile/TorchScript）：64 原子 0.6729 ns/day、2.0 GB；1728 原子 0.02999 ns/day、44.8 GB。同条件 MACE-MP-0 为 2.3171 / 0.1244 ns/day，eSEN-30M-MP 为 0.1489 ns/day 且 512 原子起 OOM。",
+    "力和应力共用一次对 edge_vec 的反传（edge 模式），无需构造应变张量；总耗时约为单次前向的 2–3 倍。",
+    "加速手段有限：张量积为纯 e3nn 实现（无 cuEquivariance 等融合内核），仅可选 torch.compile（并把 float32 matmul 精度设为 'high'）；模型以 float32 运行。",
+    "等变 RMS LayerNorm 每个原子只算一个范数，开销小；但实现中要把各 l 补零到最大通道数再求均值，属于 O(N·(L+1)²·C_max) 的额外小开销。"
+  ],
+  "weakNotes": [
+    "截断 6 Å，标量读出比张量分支多一跳，共 5 跳 → 原子能最多依赖约 30 Å 内的原子；超出部分的色散 r⁻⁶ 尾巴与静电 r⁻¹ 完全缺失，感受野内也只能靠数据隐式学习。",
+    "唯一发布的检查点只在 MPtrj（Materials Project 的 PBE/PBE+U 弛豫轨迹）上训练；PBE 基本不含 vdW，代码也没有 D3 选项，层状 vdW 材料层间距、分子晶体、物理吸附可能明显不准，需用户自行在 ASE 中叠加 DFT-D3。",
+    "没有总电荷/自旋输入，也不预测原子电荷或偶极：带电缺陷、不同氧化态、离子液体、电极/电解质界面等依赖长程静电的体系无法正确区分。",
+    "MPtrj 以近平衡体相晶体为主，表面、分子、强压缩/拉伸构型属外推区，弱相互作用尤其容易出错。"
+  ],
+  "downstreamNotes": [
+    "保守力 + C² 平滑包络，二阶导连续，适合声子与晶格热导：Matbench Discovery κ_SRME = 0.408。",
+    "结构弛豫与稳定性筛选：Matbench Discovery（FIRE + FrechetCellFilter，fmax 0.02 eV/Å）全测试集 F1 = 0.779，几何优化 RMSD = 0.0837。",
+    "MD 可直接用 ASE 计算器运行；README 实测 1000 原子约 0.053 ns/day（A40），适合几百到约两千原子的中小体系，更大体系受单卡显存限制。",
+    "只给能量/力/应力：Hessian 需自行对力再求导；IR/Raman（偶极/极化率）、磁性、电荷相关性质均无官方支持。"
+  ],
+  "strengths": ["双分支：张量分支保留 l≤3 几何信息，标量分支逐层汇总，读出简洁稳定", "按 l 平衡的等变 RMS LayerNorm 让 4 层等变网络训练稳定", "仅约 131 万参数，Matbench Discovery（MPtrj）上 F1 0.779、κ_SRME 0.408", "保守力 + 平滑截断，适合声子与弛豫", "README：比 eSEN-30M-MP 快约 5 倍，可跑约 3 倍大的体系"],
+  "weaknesses": ["比 MACE-MP-0 慢约 3–4 倍、显存更高（README 表）", "无色散、长程静电，无电荷/自旋输入", "只有 ASE 单 GPU 接口，无 LAMMPS/多 GPU，大体系受显存限制", "目前只发布 MPtrj 检查点（omat、max 变体下载链接为占位）", "只输出能量/力/应力"],
+  "pretrained": ["eqnorm-mptrj（MPtrj 训练，1,310,024 参数，figshare 下载）"],
+  "mbdKeys": ["eqnorm-mptrj"],
+  "arenaKeys": []
+}

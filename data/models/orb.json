@@ -1,0 +1,203 @@
+{
+  "id": "orb",
+  "name": "Orb",
+  "fullName": "Orb (v2 / v3): Graph Network Simulator 式无约束力场（Orbital Materials）",
+  "year": 2024,
+  "authors": "M. Neumann, J. Gin, B. Rhodes, J. Godwin 等（Orbital Materials）；v3：B. Rhodes, S. Vandenhaute, V. Šimkus, T. Duignan, M. Neumann 等",
+  "paper": {"title": "Orb: A Fast, Scalable Neural Network Potential（v2）；Orb-v3: atomistic simulation at scale（v3）", "venue": "arXiv 2024 (2410.22570) / arXiv 2025 (2504.06231)", "url": "https://arxiv.org/abs/2410.22570"},
+  "repos": ["orb-models"],
+  "family": "unconstrained",
+  "tags": ["无内置旋转等变", "GNS 编码-处理-解码", "注意力门控 MLP 消息传递", "直接力 / 保守力双版本", "Equigrad 旋转梯度正则", "置信度头"],
+  "framework": "PyTorch（torch.compile；nvalchemiops GPU 建图）",
+  "license": "Apache-2.0",
+  "oneLiner": "Orb 是一个“不强加对称性”的图网络模拟器（GNS）：把原子和边编码成向量后，用 5–15 层带注意力门控的纯 MLP 在边和节点之间反复传话，再由各个“头”读出能量、力、应力；旋转对称性不靠球谐张量积硬编码，而是靠随机旋转增强和（v3 保守版可选的）Equigrad 正则“学”出来，换来极高的 GPU 速度。",
+  "analogy": "像培养一个没背过“旋转不变”规则的学徒：老师不在他脑子里装量角器，而是把同一块晶体从各个角度拍照给他看（随机旋转增强），并且在他的答案随角度变化时扣分（Equigrad）。久而久之他自己学会了近似的对称性；好处是他的“脑子”只需要最简单、最快的乘加运算（MLP）。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（v2：20 个高斯基；v3：8 个 Bessel 基）+ 方向（v2：单位向量 3 分量；v3：实球谐 l≤3 共 16 维，与 Bessel 做外积 × 多项式包络）",
+    "equivariance": "无结构性旋转等变（平移/置换不变是精确的）；靠随机旋转增强 + 可选 Equigrad（∂E/∂旋转生成元 → 0）学得近似不变/等变",
+    "lmax": "v2：无球谐（仅单位向量）；v3：边输入特征球谐 l≤3，隐藏层全部是标量 MLP 通道（不传播 l>0 张量）",
+    "bodyOrder": "无显式体序；边 MLP 同时看 h_i、h_j、e_ij，多层非线性叠加后隐式包含多体关联",
+    "layers": "v3：5 层（MLP 宽 1024）；v2：15 层（宽 512；orb-d3-sm-v2 10 层、xs 5 层）",
+    "cutoff": "6 Å（建图 radius=6.0，注意力包络 r_max=6）；每原子邻居上限 20（v2、v3-*-20）或 120（v3-*-inf）",
+    "receptiveField": "层数 × 6 Å：v3 ≈ 30 Å，v2 ≈ 90 Å（受 20 近邻上限影响，实际更小）",
+    "message": "Δe=MLP([e_ij,h_i,h_j])；sigmoid 注意力 × 平滑包络加权后分别对 receiver/sender 求和；h←h+MLP([h,Σ收,Σ发])，e←e+Δe（残差 + LayerNorm/RMSNorm）",
+    "readout": "能量：节点特征取平均 → MLP → 反归一化 × N + 元素线性参考能（+ ZBL）；direct 版另有逐原子力头与图平均应力头",
+    "forces": "both",
+    "forcesDetail": "v2 与 v3-direct：ForceHead 直接回归 3 维力并减去平均力（非周期体系再去净力矩），非保守；v3-conservative：F=−∂E/∂r（autograd）",
+    "stress": "direct：图平均特征 → MLP 回归 Voigt 6 分量；conservative：对称应变 displacement 技巧 σ=(1/V)∂E/∂ε",
+    "longRange": "Orb v2/v3 材料模型无静电；同仓库 OrbMol-v2 有可学习潜电荷 + CoulombModule（非周期直接求和 / 周期 PME）",
+    "dispersion": "D3SumModel + AlchemiDFTD3（默认 PBE、BJ 阻尼、22 Å 截断）外挂；orb-d3-v2 直接以 D3 校正后的目标训练",
+    "chargeSpin": "材料模型无；OrbMol（v1/v2）经 ChargeSpinConditioner 输入总电荷与自旋多重度（正弦嵌入加到节点）",
+    "otherOutputs": "v3 置信度头（每原子 50 个力误差区间的分类概率）；OrbMol-v2 可选输出实验性原子电荷（ASE 计算器派生偶极）",
+    "strictlyLocal": false,
+    "complexity": "每层 O(N·k·(3C·H+H²)) 的边 MLP + O(N·C·H) 节点 MLP（k≤20/120，C=256，H=512/1024）；无张量积，全是稠密矩阵乘",
+    "accel": "torch.compile（dynamic=True，默认开启）、float32-high（TF32）、nvalchemiops GPU 建图、TorchSim 批量 MD/优化、NVALCHEMI Toolkit、ASE 计算器"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "纯 MLP + 注意力门控，没有球谐张量积，矩阵乘能吃满 GPU 张量核；v3-direct-20 尤其快，但 25M 参数、每条边过 1024 宽 MLP，保守版还要多一次反传。"},
+    "expressiveness": {"v": 4, "why": "v3 边特征含 l≤3 球谐，宽而深的 MLP 能隐式表示复杂多体关联、容量大；但没有体序/完备基的系统保证，对称性也只是近似。"},
+    "longRange": {"v": 3, "why": "材料模型只有消息传递感受野；官方提供 D3 外挂和 D3 训练版 orb-d3-v2，分子版 OrbMol-v2 另有潜电荷 + Coulomb/PME。"},
+    "scalability": {"v": 2, "why": "多层消息传递、整图放在单 GPU 上算，仓库没有 LAMMPS / 空间分解多 GPU 接口，主要靠批处理和 GPU 建图提升吞吐。"},
+    "physics": {"v": 3, "why": "v3-conservative-inf 有保守力、平滑包络、ZBL 近程排斥和广延能量；但旋转对称只是近似，direct 版力非保守，-20 版 PES 不连续。"},
+    "coverage": {"v": 3, "why": "能量/力/应力之外有每原子置信度；OrbMol-v2 有实验性原子电荷（派生偶极），但没有官方 Hessian、极化率等输出。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入构型：坐标、元素、晶胞（可选总电荷/自旋）",
+      "plain": "ForcefieldAtomsAdapter 把 ASE Atoms 转成 AtomGraphs：笛卡尔坐标（周期体系先折回晶胞内）、原子序数、晶胞矩阵与 pbc 标志。OrbMol 系列还要从 atoms.info 读入总电荷和自旋多重度。材料版 Orb 只需要几何和元素。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ \\mathbf C\\in\\mathbb R^{3\\times3},\\ \\text{pbc}\\in\\{0,1\\}^3",
+      "code": [{"repo": "orb-models", "file": "orb_models/forcefield/forcefield_adapter.py", "start": 112, "end": 132, "must": "graph_feat.compute_pbc_radius_graph(", "caption": "from_ase_atoms：取坐标/晶胞/pbc，按 radius 与 max_num_neighbors 建图"}]
+    },
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 内取最近的 k 个邻居",
+      "plain": "先用 nvalchemiops 在 GPU 上找出 6 Å 内（含周期镜像）的所有原子对，再按距离只保留每个原子最近的 k 个（v2 与 v3-*-20 为 20，v3-*-inf 为 120）。限制 k 让边数固定、速度和显存可控；但当第 21 个邻居与第 20 个交换顺序时边集合会突变，所以 -20 模型的势能面不连续。",
+      "math": "\\mathcal N(i)=\\operatorname{kNN}_{k}\\big\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\big\\},\\qquad r_c=6,\\ k\\in\\{20,120\\}",
+      "code": [{"repo": "orb-models", "file": "orb_models/common/atoms/graph_featurization.py", "start": 590, "end": 625, "must": "select_k_neighbors_from_alchemi_neighbor_matrix(", "caption": "compute_pbc_radius_graph：半径近邻表 → 选最近 k 个 → 边向量 r_j − r_i + shift"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "可微几何：应变张量 + 旋转生成元（Equigrad 的入口）",
+      "plain": "保守版在建边向量前，对坐标和晶胞先乘一个全零的对称应变 (1+ε)（用于求应力），再乘一个由“生成元” G=0 经矩阵指数得到的旋转 R=exp(G−Gᵀ)。G=0 时 R 就是单位阵，不改变结果；但能量对 G 的梯度衡量了“把体系转一点点能量变多少”——严格旋转不变的模型这个梯度应为 0。Equigrad 把它的范数加进损失，训练脚本还可对每个样本做随机旋转增强，两者共同让无约束网络学到近似对称性。",
+      "math": "\\mathbf R=\\exp\\big(\\mathbf G-\\mathbf G^{\\top}\\big)\\big|_{\\mathbf G=\\mathbf 0},\\quad \\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon)\\mathbf R\\qquad \\mathcal L_{\\text{equigrad}}=\\lambda\\,\\Big\\lVert\\frac{\\partial E}{\\partial\\mathbf G}\\Big\\rVert_F",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/common/atoms/batch/graph_batch.py", "start": 277, "end": 305, "must": "equigrad_generator = torch.zeros_like(cell, requires_grad=True)", "caption": "compute_differentiable_edge_vectors：应变 displacement + 可微旋转，再算边向量"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/conservative_regressor.py", "start": 382, "end": 388, "must": "rotational_grad_rms = torch.linalg.norm(", "caption": "Equigrad 损失：旋转梯度的 Frobenius 范数"},
+        {"repo": "orb-models", "file": "orb_models/common/dataset/augmentations/geometric_augmentations.py", "start": 173, "end": 186, "must": "atoms.positions = atoms.positions @ rand_rotation", "caption": "rotate_randomly：随机旋转坐标、晶胞与力（数据增强）"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "边特征：径向基 ⊗ 方向特征 × 平滑包络",
+      "plain": "v3 把距离展开成 8 个 Bessel 函数，把方向展开成 l≤3 的 16 个实球谐，两者做外积得到 128 维，再乘 p=4 的多项式包络让特征在 6 Å 处平滑归零。注意球谐在这里只是“输入特征”，后面网络不会按旋转规则处理它们。v2 更简单：20 个高斯（中心 0–9.5 Å）拼接 3 维单位向量，共 23 维。",
+      "math": "\\text{v3: }\\mathbf e^{(0)}_{ij}=f_{\\text{cut}}(r_{ij})\\big[B_n(r_{ij})\\,Y_l^m(\\hat{\\mathbf r}_{ij})\\big]_{n\\le 8,\\,l\\le 3},\\ B_n(r)=\\sqrt{\\tfrac{2}{r_c}}\\frac{\\sin(n\\pi r/r_c)}{r},\\ f_{\\text{cut}}=1-15x^4+24x^5-10x^6,\\ x=\\tfrac{r}{r_c}\\qquad \\text{v2: }\\mathbf e^{(0)}_{ij}=\\big[e^{-(r_{ij}-0.5k)^2}\\big]_{k=0}^{19}\\oplus\\hat{\\mathbf r}_{ij}",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/common/models/gns.py", "start": 532, "end": 547, "must": "outer_product = rbfs[:, :, None] * angular_embedding[:, None, :]", "caption": "featurize_edges：v3 外积 × 包络；v2 直接拼接"},
+        {"repo": "orb-models", "file": "orb_models/common/models/rbf.py", "start": 110, "end": 137, "must": "torch.sin(self.bessel_weights * x[:, None])", "caption": "BesselBasis：sin(nπr/r_max)/r"},
+        {"repo": "orb-models", "file": "orb_models/common/models/nn_util.py", "start": 343, "end": 353, "must": "cutoff = (envelope * (r < r_max)).unsqueeze(-1)", "caption": "get_cutoff：p=4 多项式包络，r_max=6 Å"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "编码器：元素嵌入表 + 节点/边 MLP",
+      "plain": "原子序数查一张可学习的嵌入表得到 256 维向量；随后 GNS 的 Encoder 用两个独立的 MLP（+ LayerNorm / RMSNorm）分别把节点向量和边特征映射到同一个 256 维隐空间。之后所有层都只在这个“标量”隐空间里运算。",
+      "math": "h_i^{(0)}=\\mathrm{Norm}\\big(\\mathrm{MLP}_v(\\mathbf W_{\\text{emb}}[Z_i])\\big),\\qquad \\mathbf e_{ij}\\leftarrow\\mathrm{Norm}\\big(\\mathrm{MLP}_e(\\mathbf e^{(0)}_{ij})\\big)",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/common/models/embedding.py", "start": 29, "end": 53, "must": "h = self.embeddings(atomic_number_rep)", "caption": "AtomEmbedding：元素查表"},
+        {"repo": "orb-models", "file": "orb_models/common/models/gns.py", "start": 90, "end": 92, "must": "encoded_edges = self._edge_fn(edge_features)", "caption": "Encoder.forward：节点/边各过一个 MLP"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "处理器：注意力门控的边-节点 MLP 消息传递（×5 或 ×15）",
+      "plain": "每层先更新边：把边特征与两端原子特征拼起来过 MLP 得到 Δe。再由边特征算两个 sigmoid 注意力权重（作为接收方、作为发送方），乘以平滑包络后，把 Δe 分别加到接收原子和发送原子上；节点把“自己 + 收到的 + 发出的”拼起来过 MLP 更新。全程残差连接 + 归一化，没有任何张量积，所以既快又稳；包络保证邻居跨过 6 Å 时贡献连续地消失。",
+      "math": "\\Delta\\mathbf e_{sr}=\\phi_e\\big([\\mathbf e_{sr},h_s,h_r]\\big),\\ \\alpha^{\\mathrm{in}}_{sr}=\\sigma(\\mathbf w_1^{\\top}\\mathbf e_{sr})f_{\\text{cut}}(r_{sr}),\\ \\alpha^{\\mathrm{out}}_{sr}=\\sigma(\\mathbf w_2^{\\top}\\mathbf e_{sr})f_{\\text{cut}}(r_{sr})\\qquad h_i\\leftarrow h_i+\\phi_v\\Big(\\big[h_i,\\textstyle\\sum_{s}\\alpha^{\\mathrm{in}}_{si}\\Delta\\mathbf e_{si},\\sum_{r}\\alpha^{\\mathrm{out}}_{ir}\\Delta\\mathbf e_{ir}\\big]\\Big),\\ \\ \\mathbf e_{sr}\\leftarrow\\mathbf e_{sr}+\\Delta\\mathbf e_{sr}",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/common/models/gns.py", "start": 235, "end": 265, "must": "updated_edges = self._edge_mlp(edge_features)", "caption": "AttentionInteractionNetwork.forward：注意力 × 包络 → 边更新 → 双向 segment_sum → 节点更新"},
+        {"repo": "orb-models", "file": "orb_models/common/models/gns.py", "start": 494, "end": 507, "must": "for gnn in self.gnn_stacks:", "caption": "MoleculeGNS.forward：编码后堆叠 num_message_passing_steps 层"},
+        {"repo": "orb-models", "file": "orb_models/common/models/nn_util.py", "start": 251, "end": 276, "must": "get_mlp_norm(mlp_norm)(out_dim)", "caption": "mlp_and_layer_norm：每个 φ 都是 MLP + LayerNorm/RMSNorm"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：节点特征平均 → 能量 MLP（以及置信度等其他头）",
+      "plain": "GNS 自带的 Decoder 输出每原子 3 维向量，用于扩散/去噪式预训练；做力场时则把最后一层节点特征交给各个“头”。能量头先对体系内所有原子特征取平均，再过一个小 MLP 得到“每原子平均能量”的归一化值。v3 的头还包括置信度头，direct 版还有力头和应力头。",
+      "math": "\\bar h=\\frac1N\\sum_{i}h_i^{(T)},\\qquad \\tilde e=\\mathrm{MLP}_E(\\bar h)",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 152, "end": 158, "must": "mlp_out = self.mlp(aggregated).squeeze(-1)", "caption": "EnergyHead.forward：mean 聚合 → MLP → 反归一化"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 245, "end": 262, "must": "ConfidenceHead(", "caption": "v3 保守架构的能量头与置信度头配置"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：反归一化 × N + 元素参考能 + ZBL 近程排斥",
+      "plain": "预测值按训练统计量反归一化后乘以原子数 N（保证广延性），再加上按元素计数的线性参考能。v3 还加一个解析的 ZBL 屏蔽库仑斥力（只在两原子共价半径之和以内起作用，p=6 多项式包络），防止原子靠得过近时网络给出不物理的吸引。OrbMol-v2 另外加 Coulomb 能量。",
+      "math": "E=N\\,(\\sigma_E\\,\\tilde e+\\mu_E)+\\sum_i\\varepsilon_{Z_i}+E_{\\text{ZBL}},\\qquad E_{\\text{ZBL}}=\\frac12\\sum_{i\\ne j}\\frac{14.3996\\,Z_iZ_j}{r_{ij}}\\sum_{k=1}^{4}c_k\\,e^{-d_k r_{ij}/a_{ij}}\\,f_{\\text{env}}(r_{ij})",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 232, "end": 237, "must": "x = x * batch.n_node", "caption": "_denormalize：每原子平均能 × N"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/conservative_regressor.py", "start": 222, "end": 245, "must": "interaction_energy += self.pair_repulsion_fn(batch)", "caption": "保守版：能量头 + ZBL（+ Coulomb）+ 参考能"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/pair_repulsion.py", "start": 77, "end": 110, "must": "coulomb_term = 14.3996 * Z_u * Z_v / x", "caption": "ZBLBasis：屏蔽库仑 × 共价半径包络"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：直接回归（v2 / v3-direct）或能量求导（v3-conservative）",
+      "plain": "direct 版用一个 MLP 从每个原子的特征直接输出 3 维力，再减去体系平均力（非周期体系还会解一个 3×3 线性方程去掉净力矩），速度快但力不是任何能量的梯度，NVE MD 不守恒。conservative 版对能量做一次 autograd 反传，同时得到对坐标、应变和旋转生成元的梯度：力严格保守，代价是更慢、更占显存。",
+      "math": "\\text{direct: }\\mathbf F_i=\\mathbf f_i-\\frac1N\\sum_j\\mathbf f_j,\\ \\ \\mathbf f_i=\\mathrm{MLP}_F(h_i)\\qquad \\text{conservative: }\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 311, "end": 320, "must": "pred = maybe_remove_net_force_and_torque(", "caption": "ForceHead.forward：MLP 直接出力"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_utils.py", "start": 52, "end": 62, "must": "force_pred = force_pred - node_broadcasted_means", "caption": "去平均力 / 去净力矩"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_utils.py", "start": 186, "end": 205, "must": "grads = torch.autograd.grad(", "caption": "compute_gradient_forces_and_stress：一次反传得到力、维里、旋转梯度"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：应变求导（保守）或图级 MLP（直接）",
+      "plain": "保守版把全零对称应变 ε 作用在坐标和晶胞上，能量对 ε 的梯度除以体积即为应力，与力在同一次反传中得到。direct 版则把所有原子特征取平均后用 MLP 直接回归 6 个 Voigt 分量（对角与非对角分开归一化；v2 用同样思路的 GraphHead）。",
+      "math": "\\text{conservative: }\\boldsymbol\\sigma=\\frac1V\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}\\qquad \\text{direct: }\\boldsymbol\\sigma=\\mathrm{MLP}_{\\sigma}\\Big(\\frac1N\\sum_i h_i\\Big)",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/common/atoms/batch/graph_batch.py", "start": 512, "end": 523, "must": "symmetric_displacement = 0.5 * (displacement + displacement.transpose(-1, -2))", "caption": "create_and_apply_stress_displacement"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_utils.py", "start": 226, "end": 233, "must": "stress = neg_virials / volume.view(-1, 1, 1)", "caption": "σ = (∂E/∂ε)/V"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 401, "end": 409, "must": "mlp_out = self.mlp(aggregated)", "caption": "StressHead.forward（v3-direct）"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程/弱相互作用：D3 外挂；OrbMol-v2 的潜电荷 + Coulomb",
+      "plain": "材料版 Orb 训练数据（MPtrj、Alexandria、OMat24）几乎不含色散。官方两条路：orb-d3-v2 直接学习 D3 校正后的目标（不增加推理开销）；或用 D3SumModel 把 AlchemiDFTD3（默认 PBE 参数、BJ 阻尼、22 Å 截断）的能量/力/应力加到任意 Orb 模型上。分子版 OrbMol-v2 再由潜电荷头预测原子电荷，非周期体系用直接库仑求和、周期体系用 PME 计算真正的长程静电。",
+      "math": "E_{\\text{tot}}=E_{\\text{Orb}}+E_{\\text{D3(BJ)}}\\qquad \\text{OrbMol-v2: }E\\mathrel{+}=\\frac{k}{2}\\sum_{i\\ne j}\\frac{q_iq_j}{r_{ij}}\\ \\text{(non-PBC) or PME (PBC)}",
+      "code": [
+        {"repo": "orb-models", "file": "orb_models/forcefield/inference/d3_model.py", "start": 362, "end": 376, "must": "d3_out = self.d3_model.predict(", "caption": "D3SumModel.predict：两模型能量/力/应力相加"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/inference/d3_model.py", "start": 31, "end": 43, "must": "cutoff: float = 22.0", "caption": "AlchemiDFTD3 默认参数"},
+        {"repo": "orb-models", "file": "orb_models/forcefield/models/coulomb_module.py", "start": 98, "end": 133, "must": "self._particle_mesh_ewald(", "caption": "CoulombModule.forward：非周期直接求和 / 周期 PME"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "置信度头：每原子力误差的分类概率",
+      "plain": "v3 额外训练一个分类头：把“该原子力误差”分到 0–0.3 eV/Å 之间的 50 个区间，输出 softmax 概率。它从节点特征的拷贝（detach）上训练，不影响力场本身，可用于识别分布外结构或主动学习选样。",
+      "math": "p_{i,b}=\\mathrm{softmax}_b\\big(\\mathrm{MLP}_c(h_i)\\big),\\qquad b=1,\\dots,50",
+      "code": [{"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 561, "end": 575, "must": "return torch.softmax(logits, dim=-1)", "caption": "ConfidenceHead.forward / predict"}]
+    }
+  ],
+  "hyper": [
+    {"name": "latent_dim / MLP 隐藏宽度", "value": "v3：256 / 1024；v2：256 / 512", "note": "隐空间维度与边/节点 MLP 宽度", "code": {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 207, "end": 214, "must": "base_mlp_hidden_dim: int = 1024"}},
+    {"name": "num_message_passing_steps", "value": "v3：5；v2：15", "note": "消息传递层数（v3 更宽更浅）", "code": {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 149, "end": 153, "must": "num_message_passing_steps: int = 15"}},
+    {"name": "base / head MLP 深度", "value": "2 层隐藏层 / 1 层（头宽 256）", "note": "处理器 MLP 与读出头 MLP"},
+    {"name": "v3 边特征", "value": "8 Bessel（r_max=6）⊗ 球谐 l≤3（16）= 128 维", "note": "外积后乘多项式包络", "code": {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 286, "end": 295, "must": "num_bases=8,"}},
+    {"name": "v2 边特征", "value": "20 高斯（中心 0–9.5 Å）+ 单位向量 = 23 维", "note": "radius=10.0 只是高斯中心范围", "code": {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 180, "end": 189, "must": "num_edge_in_features=23,"}},
+    {"name": "建图半径 / 邻居上限", "value": "6.0 Å；20（v2、v3-*-20）或 120（v3-*-inf）", "note": "Matbench YAML 记 v2 graph_construction_radius 为 10 Å", "code": {"repo": "orb-models", "file": "orb_models/forcefield/pretrained.py", "start": 659, "end": 659, "must": "max_num_neighbors=120"}},
+    {"name": "注意力包络", "value": "多项式 p=4，r_max=6 Å", "note": "1−15x⁴+24x⁵−10x⁶", "code": {"repo": "orb-models", "file": "orb_models/common/models/nn_util.py", "start": 343, "end": 353, "must": "p = 4"}},
+    {"name": "激活 / 归一化", "value": "v3：SiLU + RMSNorm；v2：shifted softplus + LayerNorm", "note": "mlp_norm / activation 参数"},
+    {"name": "ZBL 斥力", "value": "p=6，截断 = 两原子共价半径之和", "note": "仅 v3（pair_repulsion=True）", "code": {"repo": "orb-models", "file": "orb_models/forcefield/models/conservative_regressor.py", "start": 92, "end": 94, "must": "ZBLBasis(p=6"}},
+    {"name": "置信度头", "value": "50 bins，0–0.3 eV/Å 线性分箱", "note": "代码默认值（README 写 0–0.4 Å）", "code": {"repo": "orb-models", "file": "orb_models/forcefield/models/forcefield_heads.py", "start": 486, "end": 496, "must": "max_error: float = 0.3,"}},
+    {"name": "参数量", "value": "orb-v2 25,161,727；orb-v3 25,510,582", "note": "Matbench Discovery YAML 中的 model_params"}
+  ],
+  "speedNotes": [
+    "全部计算是稠密 MLP 矩阵乘（无 CG 张量积、无球谐卷积），能充分利用 GPU；主要 FLOPs 在每条边的边 MLP（v3：768→1024→1024→256），与边数 N·k 成正比。",
+    "邻居上限 k 直接决定边数：-20 版本比 -inf（上限 120）显著省时省显存，代价是 PES 不连续（MODELS.md）。",
+    "v3 用“更宽更浅”（5 层 × 1024）替代 v2 的 15 层 × 512，参数量相近，MODELS.md 称快 2–3 倍；保守版需额外 autograd 反传，明显更慢、更占显存。",
+    "默认 torch.compile(dynamic=True) + float32-high（TF32）；README：整模型编译在 10k 原子上约 1.7× 加速，nvalchemiops GPU 建图对大体系最高约 12×、对大批量小体系 >100×。",
+    "TorchSim / NVALCHEMI 支持批量优化与 MD，适合高通量筛选。"
+  ],
+  "weakNotes": [
+    "单层截断 6 Å 且注意力乘 p=4 包络；-20 模型只看最近 20 个邻居，在致密/高配位体系中实际视野可能明显小于 6 Å。多层叠加感受野可达 30–90 Å，但没有任何物理长程尾巴。",
+    "材料版（v2/v3）训练于 PBE(+U) 级的 MPtrj / Alexandria / OMat24，几乎不含色散：层状 vdW 材料层间距、分子晶体、物理吸附需用 orb-d3-v2 或 D3SumModel + AlchemiDFTD3（PBE-BJ，22 Å）。",
+    "材料版没有电荷/自旋输入和静电项，带电缺陷、离子液体、电极界面等不可靠；OrbMol-v2 增加潜电荷 + CoulombModule（直接求和 / PME），并要求输入总电荷与自旋多重度。",
+    "OrbMol 系列训练于 OMol25（+OPoly26，ωB97M-V/def2-TZVPD），截断内的色散可被隐式学到；MODELS.md 提醒 OrbMol-v1 训练集不含周期体系。",
+    "MODELS.md：omat/mpa 数据都是小的体相晶体，模型对分子、表面（slab）有一定外推能力，但需谨慎。"
+  ],
+  "downstreamNotes": [
+    "声子/热导：Matbench Discovery κ_SRME，orb-v3（conservative-inf-mpa）为 0.2102，而直接预测力的 orb-v2 为 1.7338、orb-v2-mptrj 为 1.7255——二阶导性质需要保守、无邻居截断跳变的力场。",
+    "MODELS.md：20 邻居上限导致 PES 不连续，对 Hessian 等高敏计算误差大；README 建议二/三阶导性质使用 float32-highest 精度。",
+    "MD：direct 力不守恒能量，MODELS.md 指出 NVE MD 需用保守模型；v2 起直接力去除净力（非周期体系去净力矩）以提升稳定性，README 推荐恒体积模拟。",
+    "几何优化与稳定性筛选：Matbench Discovery F1（全测试集）orb-v3 0.887、orb-v2 0.858、orb-v2-mptrj 0.755；TorchSim 批量 FIRE 优化便于高通量。",
+    "置信度头可用于分布外检测/主动学习；OrbMol 支持带电、开壳层分子与电解质体系。"
+  ],
+  "strengths": ["纯 MLP 消息传递、无张量积，GPU 推理极快且易于 torch.compile", "同一架构提供直接力（快）与保守力（物理）两种版本", "大数据预训练（OMat24 等），Matbench Discovery 表现靠前，自带置信度头", "生态完善：ASE、TorchSim、NVALCHEMI、D3 外挂、OrbMol 分子/电荷版本"],
+  "weaknesses": ["旋转对称只是近似（数据增强 / Equigrad），预测随朝向有微小差异", "direct 版力非保守，NVE MD、声子需改用保守版", "20 邻居上限使 PES 不连续；保守版更慢更占显存", "材料版无静电与电荷输入，色散需外挂", "仓库无 LAMMPS / 空间分解接口，超大体系受单卡显存限制"],
+  "pretrained": ["orb-v3-conservative-inf-omat / orb-v3-conservative-20-omat", "orb-v3-direct-inf-omat / orb-v3-direct-20-omat", "orb-v3-{conservative,direct}-{inf,20}-mpa（Matbench 兼容）", "orb-v2 / orb-mptraj-only-v2", "orb-d3-v2 / orb-d3-sm-v2 / orb-d3-xs-v2", "orb-v3-conservative-omol / orb-v3-direct-omol / orbmol-v1-conservative / orbmol-v1-direct", "orbmol-v2（潜电荷 + Coulomb/PME）"],
+  "mbdKeys": ["orb-v2", "orb-v2-mptrj", "orb-v3"],
+  "arenaKeys": ["ORBv2", "ORB"]
+}

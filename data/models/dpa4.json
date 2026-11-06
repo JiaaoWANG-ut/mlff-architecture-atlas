@@ -1,0 +1,206 @@
+{
+  "id": "dpa4",
+  "name": "DPA-4",
+  "fullName": "DPA-4 / SeZM: Smooth Equivariant Zone-bridging Model（DeePMD-kit 第四代通用势）",
+  "year": 2026,
+  "authors": "T. Li, W. Li, A. Peng, J. Xue, L. Zhang, D. Zhang, H. Wang",
+  "paper": {"title": "DPA4: Pushing the Accuracy-Cost Frontier of Interatomic Potentials with EMFA SO(2) Convolution", "venue": "arXiv 2026", "url": "https://arxiv.org/abs/2606.02419"},
+  "repos": ["deepmd-kit"],
+  "family": "spherical-equivariant",
+  "tags": ["SO(3) 等变", "eSCN 式 SO(2) 卷积", "包络门控注意力", "网格双线性非线性", "保守力 + ZBL/NLH 桥接", "DPA4C 严格局域变体"],
+  "framework": "PyTorch（pt 后端；DPA4C 用 pt_expt 可导出后端）+ Triton / CUDA / cuTile 推理内核",
+  "license": "LGPL-3.0（Matbench 发布的权重为 CC-BY-4.0）",
+  "oneLiner": "DeePMD-kit 的第四代通用势（SeZM 架构）：每条边先用 Wigner-D 把邻居的球谐特征转到“边沿 z 轴”的局部坐标系，只保留 |m|≤1 分量做便宜的 SO(2) 卷积，再用包络门控注意力聚合、在 SO(3) 网格上做双线性非线性；能量求和后对边向量求导得到力与应力。",
+  "analogy": "像给每对原子拍一张“对准连线”的照片：先把相机转到正对邻居的方向（Wigner-D 旋转），这时问题只剩“绕连线转动”这一种对称（SO(2)），只需记录少数几种绕轴花纹（|m|≤1）；处理完再把照片转回实验室坐标，按“越近票越重”的规则（包络门控注意力）汇总给中心原子。",
+  "arch": {
+    "geometry": "边向量 → 距离（16 个固定高斯基 + C³ 多项式包络）+ 方向（边四元数 → Wigner-D，转到边坐标系）",
+    "equivariance": "SO(3) 等变（Wigner-D 旋转 + SO(2) 卷积；网格非线性的等变精度由求积决定），能量不变",
+    "lmax": "按档位：Nano 1、Mini 2、Neo/Air 3、Plus 4、Pro 5、Max/Ultra 6；消息只用 |m|≤mmax=1",
+    "bodyOrder": "无显式体序；SO(2) 卷积 + 网格双线性积 u(g)·v(g) 使有效体序随层数增长",
+    "layers": "n_blocks：Nano–Neo 2、Air 3、Plus 4、Pro 6、Max/Ultra 8；每块 4 层 SO(2) 混合（Nano–Neo 为 3）",
+    "cutoff": "6.0 Å（全部预设；sel 只是可自动扩容的初始容量）",
+    "receptiveField": "n_blocks × 6 Å：Air ≈ 18 Å，Max ≈ 48 Å",
+    "message": "源原子特征经 Wigner-D 旋到边系 → 边条件跨 l 混合 → 多层 SO(2) 线性 + 门控 → 转回 → 包络门控 softmax 注意力聚合",
+    "readout": "SO(3) 网格 FFN 残差折叠出 l=0 描述符（Pro/Max 只取 l=0）→ dpa4_ener（neuron=[0] 直接线性）+ 元素偏置",
+    "forces": "conservative",
+    "forcesDetail": "对边向量 leaf 做一次 autograd.grad 得 ∂E/∂v_e，再散射成原子力；另有实验性直接力去噪头 dens（非默认）",
+    "stress": "同一批边梯度：W = −Σ_e g_e⊗v_e（可散射成原子维里），σ = −W/V",
+    "longRange": "无内置静电/Ewald；仅有 n_blocks×6 Å 的消息传递感受野",
+    "dispersion": "无内置色散项，代码中未提供官方 D3 外挂",
+    "chargeSpin": "可选 add_chg_spin_ebd：帧级总电荷/自旋条件化类型嵌入；native 自旋方案输入原子自旋矢量（l=1）",
+    "otherOutputs": "原子维里、磁力 −∂E/∂s（native spin）、通用 property 拟合、dens 直接力头（实验）",
+    "strictlyLocal": false,
+    "complexity": "O(E·(lmax+1)²·C) 的 Wigner 旋转 + O(E·(1+3·lmax)·C²·L_mix) 的 SO(2) 线性；mmax=1 截断大幅省算力",
+    "accel": "Triton/cuTile/手写 CUDA 推理内核、make_fx+Inductor 编译（含二阶导）、bf16 AMP、TF32、LAMMPS 多 rank 边界交换"
+  },
+  "scores": {
+    "speed": {"v": 2, "why": "每条边要做两次 Wigner-D 旋转和 4 层 SO(2) 线性，Max 档 8 块、lmax=6，成本接近深层等变网络；Air 档与官方融合内核能明显缓解。"},
+    "expressiveness": {"v": 5, "why": "高阶球谐（lmax 最高 6）+ 注意力 + 网格双线性非线性，多层后有效体序很高，是精度前沿一类。"},
+    "longRange": {"v": 2, "why": "只有多层消息传递带来的 n_blocks×6 Å 感受野，无色散、无静电；总电荷/自旋只是条件输入。"},
+    "scalability": {"v": 3, "why": "支持 LAMMPS 多 rank 推理，但每块都要刷新 ghost 特征；严格局域、可压缩的需求要换用 DPA4C。"},
+    "physics": {"v": 5, "why": "保守力、C³ 包络（前三阶导在 r_c 处连续）、原子能求和保证广延性、可选 ZBL/NLH 近程排斥桥接。"},
+    "coverage": {"v": 3, "why": "能量/力/应力之外有原子维里、自旋磁力、通用性质拟合与电荷/自旋条件，但没有官方偶极/极化率/Hessian 读出。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "邻居图：6 Å 内全部原子对，边向量作为求导叶子",
+      "plain": "DPA4 的能量路径使用稀疏边列表：截断 r_c=6 Å 内的每个邻居都是一条有向边 e（src→dst），sel 只是可按需扩容的初始容量，不会截掉邻居。边向量 v_e 被设成独立的求导叶子，此后能量只通过 v_e 依赖坐标——力和维里都能从一次“对边求导”得到。被屏蔽的填充边被赋予 +z 方向，使长度与四元数计算保持有限。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_j-\\mathbf r_i+\\mathbf S_{ij}\\mathbf C\\rVert<r_c\\,\\},\\qquad \\mathbf v_e=\\mathbf r_{\\mathrm{src}(e)}-\\mathbf r_{\\mathrm{dst}(e)}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/edge_cache.py", "start": 556, "end": 568, "must": "edge_vec = edge_vec + F.pad(1.0 - edge_keep_f, (2, 0))", "caption": "屏蔽边置零并赋予 +z 方向"},
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 1720, "end": 1745, "must": "edge_cache = build_edge_cache_from_edges(", "caption": "forward_with_edges：每次前向只构建一次边缓存"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：距离 → 固定高斯基 + C³ 包络；方向 → 边四元数 → Wigner-D",
+      "plain": "边长用 16 个高斯函数展开（v20260911 预设中心固定，宽度 σ=r_c/(n_radial−1)）。另算一个 C³ 连续的多项式包络 E(r)：它在 r_c 处连同前三阶导数一起归零，之后的消息、注意力质量和度归一化都乘以它，邻居穿过截断面时能量与力都光滑。方向被转成“把边对准局部 z 轴”的四元数，再生成每条边的块对角 Wigner-D 矩阵 D(q_e) 及其转置，供后面旋到边坐标系使用。",
+      "math": "\\phi_n(r)=\\exp\\!\\Big(-\\frac{(r-\\mu_n)^2}{2\\sigma^2}\\Big),\\ \\sigma=\\frac{r_c}{n_{\\text{rad}}-1};\\qquad E_p(x)=(1-x)^4\\sum_{k=0}^{p-1}\\binom{k+3}{3}x^k,\\ x=\\frac{r}{r_c},\\ p=5",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/radial.py", "start": 601, "end": 614, "must": "raw = torch.exp(dr * dr * self.gaussian_coeff)", "caption": "RadialBasis：Bessel 或高斯基"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/radial.py", "start": 265, "end": 272, "must": "return u.pow(4) * series", "caption": "C3CutoffEnvelope：u⁴·Σ C(k+3,3) x^k"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/edge_cache.py", "start": 570, "end": 598, "must": "edge_env = edge_envelope(edge_len) * edge_keep_f", "caption": "边长 → 包络、径向基、Wigner-D、边类型特征"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素向量 + 环境 FiLM + 几何初始嵌入（GIE）",
+      "plain": "每个原子先查表得到 C 维类型嵌入，可选地再叠加帧级总电荷/自旋条件。环境种子把邻居环境矩阵 [s, s·r̂] 压成 FiLM 缩放/平移，以 (1+α·tanh)·x+β·tanh 的形式温和调制 l=0 通道，强度 α、β 以对数参数学习。GIE 再把“径向特征 × 方向”的邻居求和写进 l>0 通道，使第一层之前每个原子就带有方向信息。径向 MLP 输出乘以包络，并与边两端的类型特征相加，供各层复用。",
+      "math": "x^{(0)}_{i,00}=\\big(1+\\alpha\\tanh\\hat a_i\\big)\\odot t_{Z_i}+\\beta\\tanh\\hat b_i,\\qquad x^{(0)}_{i,lm}\\leftarrow x^{(0)}_{i,lm}+\\mathrm{GIE}\\Big(\\sum_{j}E(r_{ij})R_l(r_{ij})Y_{lm}(\\hat{\\mathbf r}_{ij})\\Big)",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 1674, "end": 1690, "must": "type_ebed = self.type_embedding(atype_flat).reshape(", "caption": "类型嵌入（+ 可选电荷/自旋条件）"},
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 1753, "end": 1786, "must": "x0_out = x0 * scale + shift", "caption": "径向 MLP × 包络；环境 FiLM 调制 l=0"},
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 1788, "end": 1810, "must": "x = x + self.gie(", "caption": "几何初始嵌入写入 l>0 通道"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "SO(2) 卷积 ①：旋到边坐标系，只留 |m|≤1，边条件跨 l 混合",
+      "plain": "对每条边，把源原子的 (lmax+1)² 个球谐系数乘以 Wigner-D，转到“边沿 z 轴”的局部坐标系。在这个坐标系里绕边轴的旋转只会让 +m 与 −m 互相转动，因此可以只保留 |m|≤mmax=1 的分量（每条边从 (lmax+1)² 维降到 1+3·lmax 维）——这正是 eSCN 式 SO(2) 卷积省算力的来源。随后由“距离 + 两端元素”生成的边条件核在同一 m 内跨不同 l 混合（degree_channel 模式，各通道各自的核），把径向信息注入角向结构。",
+      "math": "\\tilde x_e=D_{|m|\\le m_{\\max}}(q_e)\\,x_{\\mathrm{src}(e)},\\qquad \\tilde x_{e,lm,c}\\leftarrow\\sum_{l'}K_{e,c}[l,l']\\,\\tilde x_{e,l'm,c},\\quad K_e=\\mathcal K\\big(E(r_e)\\,\\mathrm{MLP}(\\phi(r_e))+t_{\\mathrm{src}}+t_{\\mathrm{dst}}\\big)",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/so2.py", "start": 2478, "end": 2516, "must": "x_local = torch.bmm(D_m_prime, x_src)", "caption": "rotate_to_local + 径向跨度混合（参考实现分支）"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/edge_cache.py", "start": 680, "end": 700, "must": "D_full, Dt_full = wigner_calc(edge_quat)", "caption": "边四元数 →（可选训练期随机绕轴角 γ）→ Wigner-D"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "SO(2) 卷积 ②：多层 SO(2) 线性 + 门控激活 + 多焦点竞争",
+      "plain": "在边坐标系里堆叠 mixing_layers 层（Air/Pro/Max 为 4）“预归一化 → SO2Linear → 非线性 → 残差”。SO2Linear 按 |m| 分块对角：m=0 块可任意跨 l 混合，±m 块用 (W_u, W_v) 的复数乘法形式，因此与绕边轴的旋转对易，保持等变。第一层的偏置被乘上径向 l=0 因子与包络，使截断处的消息严格趋零。n_focus>1 时（Pro/Max 为 2）多条并行焦点流各自混合，再由包络门控的 softmax 竞争决定每条边更信任哪条流。",
+      "math": "\\tilde x\\leftarrow\\tilde x+\\sigma\\big(W\\,\\mathrm{Norm}(\\tilde x)\\big),\\qquad W:\\ (\\tilde x_{+m},\\tilde x_{-m})\\mapsto\\big(W_1^{(m)}\\tilde x_{+m}-W_2^{(m)}\\tilde x_{-m},\\ W_2^{(m)}\\tilde x_{+m}+W_1^{(m)}\\tilde x_{-m}\\big)",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/so2.py", "start": 2652, "end": 2685, "must": "x_local = so2_linear(x_local)", "caption": "_so2_mixing_layers：预归一化残差堆叠 + 焦点竞争"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "SO(2) 卷积 ③：转回实验室系，包络门控注意力聚合",
+      "plain": "混合后的局部特征乘 Dᵀ 转回全局坐标，并对被截掉的 m 分量做幅度补偿。聚合不是简单求和，而是包络门控 softmax 注意力：每条边的权重质量是 E(r)²·exp(logit)，分母额外加一个可学习的正“空质量” ζ，所以只有一个远邻居的原子不会被归一化成权重 1，邻居滑出截断时权重连续衰减到 0。结果再乘由中心原子标量决定的逐头门控，预设还会在 SO(3) 网格上把聚合消息与节点自身特征逐点相乘（双线性非线性）。",
+      "math": "m_i=g_i\\odot\\sum_{e:\\,\\mathrm{dst}(e)=i}\\alpha_e\\,D(q_e)^{\\top}\\tilde x_e,\\qquad \\alpha_e=\\frac{E(r_e)^2\\,e^{\\ell_e}}{\\zeta+\\sum_{e'\\to i}E(r_{e'})^2\\,e^{\\ell_{e'}}}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/so2.py", "start": 2725, "end": 2744, "must": "x_message = torch.bmm(Dt_from_m, x_local)", "caption": "rotate_back + 截断分量的幅度补偿"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/attention.py", "start": 66, "end": 108, "must": "alpha = edge_exp / denominator.index_select(0, dst)", "caption": "segment_envelope_gated_softmax：E² 进 logit，分母含空质量"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/so2.py", "start": 2078, "end": 2118, "must": "out_heads.index_add_(0, dst, weighted_value)", "caption": "加权散射到目标原子 + 输出端头门控"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "交互块：预归一化残差 + SO(3) 网格 FFN",
+      "plain": "每个交互块先做 x + SO2Conv(Norm(x))，再做 x + FFN(Norm(x))（v20260911 预设两支都用预归一化、无后归一化）。FFN 先做按 l 分组的通道线性，再把系数投影到 SO(3)/S² 网格做逐点运算（l=0 分支用 SwiGLU，非标量部分用逐点乘积），最后投影回系数——网格上两路特征相乘 u(g)·v(g) 相当于一次张量积，却不用显式的 CG 系数。块与块之间还可按 l_schedule 逐步缩小 lmax（金字塔）。",
+      "math": "x\\leftarrow x+\\mathrm{SO2Conv}\\big(\\mathrm{Norm}(x)\\big),\\qquad x\\leftarrow x+W_2\\,\\mathcal P^{-1}\\!\\big[u(g)\\odot v(g)\\big],\\quad (u,v)=\\mathcal P\\big(W_1\\,\\mathrm{Norm}(x)\\big)",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/block.py", "start": 894, "end": 905, "must": "so2_state = x + so2_unit_output", "caption": "SeZMInteractionBlock：SO(2) 单元 + FFN 单元的残差"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/ffn.py", "start": 302, "end": 325, "must": "x = self.act.forward_scalar(x) if scalar_only else self.act(x)", "caption": "EquivariantFFN：上投影 → 网格非线性"},
+        {"file": "deepmd/pt/model/descriptor/sezm_nn/grid_net.py", "start": 218, "end": 233, "must": "return from_grid(left_grid * right_grid)", "caption": "GridProduct：网格上的逐点二次乘积"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：把等变特征折叠成 l=0 描述符",
+      "plain": "所有块结束后，只有标量（l=0）通道交给能量网络。Air 等档位用 so3_readout=mlp：最后一个网格 FFN 读入全部 l 通道，把高阶几何信息折叠进 l=0 残差；Pro/Max 预设为 none，只取 l=0 再过 FFN。得到的 C 维描述符 d_i 对旋转不变。",
+      "math": "d_i=x^{(T)}_{i,00}+\\big[\\mathrm{FFN}_{\\text{out}}\\big(x^{(T)}_i\\big)\\big]_{l=0}\\in\\mathbb R^{C}",
+      "code": [
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 1912, "end": 1924, "must": "x = x[:, : self.node_ebed_dims[i], :, :]", "caption": "逐块前向（按 l_schedule 截断维度）"},
+        {"file": "deepmd/pt/model/descriptor/sezm.py", "start": 2026, "end": 2038, "must": "return x_ro[:, 0:1, :, :] + self.output_ffn.forward_scalar(x_ro)", "caption": "_apply_readout：SO(3) 读出到 l=0"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "原子能与总能（+ 可选 ZBL/NLH 区域桥接）",
+      "plain": "dpa4_ener 拟合网络把 d_i 映射为原子能（预设 neuron=[0]，即直接线性投影），加上按元素统计的能量偏置后求和，保证广延性。可选 zone bridging：在 0.26–0.80 倍共价键长的窗口内，描述符读到的距离被冻结、过近原子对其他邻居静默，同时叠加 ZBL（或 NLH）屏蔽库仑排斥，原子靠得极近时由解析项接管。",
+      "math": "E=\\sum_i\\big[\\mathcal F(d_i)+b_{Z_i}\\big]\\;(+E_{\\text{ZBL/NLH}}),\\qquad \\phi_{\\text{ZBL}}(r)=\\frac{Z_aZ_be^2}{r}\\sum_k c_k\\,e^{-b_k r/a_{ab}},\\ a_{ab}=\\frac{0.88534\\,a_0}{Z_a^{0.23}+Z_b^{0.23}}",
+      "code": [
+        {"file": "deepmd/pt/model/task/sezm_ener.py", "start": 539, "end": 547, "must": "@Fitting.register(\"dpa4_ener\")", "caption": "dpa4_ener：GLU 隐藏层的能量拟合网络"},
+        {"file": "deepmd/dpmodel/atomic_model/inner_potential.py", "start": 255, "end": 268, "must": "0.88534 * _A_BOHR", "caption": "InnerPotential：ZBL 屏蔽长度与指数系数表"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：对边向量求一次导，再散射到原子",
+      "plain": "一次 autograd.grad 得到每条边的 g_e = ∂E/∂v_e；由于 v_e = r_src − r_dst，链式法则直接给出原子力。训练时 create_graph=True 保留一阶导图，使力损失能再反传到参数（二阶导），整条路径由 make_fx + Inductor 编译。推理时可换成融合的 CUDA/Triton 散射核。另有实验性 dens 直接力去噪头，但不是默认路径。",
+      "math": "\\mathbf g_e=\\frac{\\partial E}{\\partial\\mathbf v_e},\\qquad \\mathbf F_k=\\sum_{e:\\,\\mathrm{dst}(e)=k}\\mathbf g_e-\\sum_{e:\\,\\mathrm{src}(e)=k}\\mathbf g_e",
+      "code": [
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 284, "end": 295, "must": "torch.autograd.grad(", "caption": "edge_energy_deriv：一次反传得到边梯度"},
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 367, "end": 372, "must": "force_flat = force_flat.index_add(0, src_ext, -g)", "caption": "边梯度散射成原子力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力/维里：同一批边梯度的外积",
+      "plain": "维里不需要额外反传：逐边计算 −g_e⊗v_e，散射到源原子得到原子维里，求和得全局维里，除以体积即应力。这对 NPT 分子动力学和晶胞弛豫（Matbench 评测用 FrechetCellFilter）是必需的。",
+      "math": "\\mathbf W=-\\sum_e\\mathbf g_e\\otimes\\mathbf v_e,\\qquad \\boldsymbol\\sigma=-\\frac{\\mathbf W}{V}",
+      "code": [
+        {"file": "deepmd/pt/model/model/transform_output.py", "start": 373, "end": 382, "must": "w_edge = -torch.einsum(\"ek,ej->ekj\", g, edge_vec).reshape(-1, 9)", "caption": "逐边外积 → 原子维里"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "变体 DPA4C：一次读取、无消息传递的度矩描述符",
+      "plain": "DPA4C 复用 DPA4 的径向/包络表示，但每个原子只读一次自己的邻居壳层：对 l≤lmax（可选 2、3、4）累加邻居的角向矩，再收缩成旋转不变标量交给普通能量拟合网络。没有消息传递，原子能只依赖 6 Å 内的原子，并行时无需中间特征的 halo 交换；径向函数还能换成表格样条做压缩 CUDA 推理。代价是精度低于 DPA4（Matbench F1：DPA-4.1C-Air-OAM 0.783，DPA-4.1-Air-OAM 0.902）。",
+      "math": "M_{i,lm}=\\frac{1}{\\nu_i}\\sum_{j\\in\\mathcal N(i)}A(r_{ij},Z_i,Z_j)\\,E(r_{ij})\\,Y_{lm}(\\hat{\\mathbf r}_{ij}),\\qquad d_i=\\mathcal I\\big(M_{i,0},\\dots,M_{i,l_{\\max}}\\big)",
+      "code": [
+        {"file": "deepmd/dpmodel/descriptor/dpa4c.py", "start": 822, "end": 853, "must": "moments, divisors = self.aggregate_moments(", "caption": "DPA4C：边幅值 × 球谐 → 度矩 → 不变描述符"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "rcut", "value": "6.0 Å", "note": "所有 DPA4 预设共用；Matbench 的 DPA-4.0-Pro 记录 max_neighbors 384", "code": {"file": "deepmd/utils/model_preset_data.py", "start": 26, "end": 48, "must": "\"rcut\": 6.0"}},
+    {"name": "n_radial / basis_type", "value": "16 / gaussian/fix", "note": "v20260911：固定高斯中心，径向基不加包络", "code": {"file": "deepmd/utils/model_preset_data.py", "start": 148, "end": 160, "must": "\"basis_type\": \"gaussian/fix\""}},
+    {"name": "env_exp", "value": "5", "note": "消息上 C³ 多项式包络的阶数 p"},
+    {"name": "mmax", "value": "1", "note": "边坐标系中只保留 |m|≤1"},
+    {"name": "channels × lmax × n_blocks（Air）", "value": "64 × 3 × 3", "note": "dpa4-air 预设（DPA-4.1-Air-OAM）", "code": {"file": "deepmd/utils/model_preset_data.py", "start": 81, "end": 90, "must": "\"n_blocks\": 3"}},
+    {"name": "channels × lmax × n_blocks（Pro）", "value": "64 × 5 × 6", "note": "n_focus=2，so3_readout=none", "code": {"file": "deepmd/utils/model_preset_data.py", "start": 101, "end": 111, "must": "\"lmax\": 5"}},
+    {"name": "channels × lmax × n_blocks（Max）", "value": "96 × 6 × 8", "note": "n_focus=2，radial_so2_rank=4（DPA-4.1-Max-OAM）", "code": {"file": "deepmd/utils/model_preset_data.py", "start": 112, "end": 122, "must": "\"channels\": 96"}},
+    {"name": "mixing_layers", "value": "4（Air 及以上）/ 3（Nano–Neo）", "note": "每块的 SO(2) 混合层数"},
+    {"name": "n_atten_head", "value": "1", "note": "包络门控注意力头数（0 = 纯包络加权求和）"},
+    {"name": "fitting neuron", "value": "[0]", "note": "dpa4_ener 直接线性投影到原子能"},
+    {"name": "DPA-4.0-Pro-MPtrj 上游配置", "value": "n_blocks 8, lmax 5, mmax 1, channels 96, so2_layers 4", "note": "Matbench YAML 记录", "code": {"repo": "matbench-discovery", "file": "models/deepmd/dpa-4.0-pro-mptrj.yml", "start": 73, "end": 97, "must": "graph_construction_radius: 6.0"}}
+  ],
+  "speedNotes": [
+    "FLOPs 集中在边上：每条边两次块对角 Wigner-D 旋转（D 与 Dᵀ）加 mixing_layers 层 SO(2) 线性，开销 ∝ 边数 × 块数 × 系数维数 × 通道²。",
+    "mmax=1 截断把边上 SO(2) 矩阵乘从 (lmax+1)² 维降到 1+3·lmax 维，是 eSCN 式提速的核心；但旋转本身仍随 (lmax+1)² 增长，lmax=6 的 Max 档依然很重。",
+    "推理加速：DP_TRITON_INFER 1–3 级融合内核（文档称 3 级用 fp16 张量核加补偿，4 千原子体系最大力偏差约 4e-6 eV/Å）、DP_CUDA_INFER 手写算子、cuTile；训练用 make_fx + Inductor 编译含二阶导的力损失。",
+    "默认 float32，推荐训练开 bf16 AMP；文档提醒推理时开 TF32/AMP 会让势能面不那么平滑。",
+    "档位跨度极大：Matbench 记录 DPA-4.1C-Air 约 0.43M 参数、Air 约 5.1M、Max 约 99M；大规模 MD 官方推荐 DPA4C（单次读取、可压缩）。"
+  ],
+  "weakNotes": [
+    "截断 6 Å，但 n_blocks 层消息传递使感受野达 n_blocks×6 Å（Air ≈18 Å，Max ≈48 Å），可隐式捕捉部分中程效应；更远的色散/静电尾巴完全缺失。",
+    "没有内置色散或 Ewald 静电，代码中也没有官方 D3 外挂；Matbench 模型训练集为 MPtrj、OMat24、sAlex，层状 vdW 材料、分子晶体、物理吸附需自行叠加色散修正。",
+    "add_chg_spin_ebd 只是把帧级总电荷/自旋“告诉”模型，并没有长程库仑项；带电缺陷、离子液体、界面电荷转移仍受截断限制。",
+    "近程：可选 zone bridging（ZBL 或 NLH）在 0.26–0.80 倍共价键长窗口内平滑接管排斥；Matbench 说明提到部分同核双原子（尤其 Ne）在短距离误差大、数值敏感。",
+    "DPA4C 严格局域（只看 6 Å），中程效应更弱，换来的是可扩展性和速度。"
+  ],
+  "downstreamNotes": [
+    "保守力 + C³ 包络（能量与前三阶导在 r_c 处连续），适合声子与热导计算；Matbench 用 phonondb 协议（位移 0.03 Å）评测 κ。",
+    "Matbench Discovery 全测试集 F1：DPA-4.1-Max-OAM 0.913、DPA-4.1-Air-OAM 0.902、DPA-4.1C-Air-OAM 0.783。",
+    "应力与原子维里来自同一次边梯度反传，可直接做 NPT MD、弹性常数和带晶胞的结构弛豫。",
+    "native 自旋方案给出磁力 −∂E/∂s，可做自旋–晶格耦合；LoRA 微调与多任务共享拟合方便迁移到特定体系。",
+    "zone bridging 让辐照级联、高压等近距碰撞平滑过渡到 ZBL/NLH，避免原子“穿透”。"
+  ],
+  "strengths": ["Nano→Ultra 多档位，从轻量到精度前沿（Matbench F1 最高 0.913）", "eSCN 式 SO(2) 卷积 + mmax=1 截断，高 lmax 也算得动", "C³ 包络 + 保守力 + 可选 ZBL/NLH，物理约束完整", "Triton/CUDA 内核、编译训练、LoRA、自旋与电荷条件化等工程完备", "同族 DPA4C 提供严格局域、可压缩的高通量版本"],
+  "weaknesses": ["Max 档 8 块、lmax=6，推理成本接近大型等变网络", "无内置色散与长程静电", "仅 PyTorch 后端，GPU 导向", "多层消息传递需逐块交换 ghost 特征，空间分解不如严格局域模型简单", "可选开关极多，架构复杂、难以解读"],
+  "pretrained": ["DPA4-Nano/Mini/Neo/Air/Plus-OMat24-v20260805（内置注册表）", "DPA-4.0-Pro-MPtrj / DPA-4.0.1-Pro-MPtrj", "DPA-4.1-Air-OAM", "DPA-4.1-Max-OAM / DPA-4.1-Max-OAM-PFT", "DPA-4.1C-Air-OAM（DPA4C）"],
+  "mbdKeys": ["dpa-4.0-pro-mptrj", "dpa-4.0.1-pro-mptrj", "dpa-4.1-air-oam", "dpa-4.1c-air-oam", "dpa-4.1-max-oam", "dpa-4.1-max-oam-pft"],
+  "arenaKeys": []
+}

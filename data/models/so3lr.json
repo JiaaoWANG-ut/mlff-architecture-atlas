@@ -1,0 +1,208 @@
+{
+  "id": "so3lr",
+  "name": "SO3LR",
+  "fullName": "SO3LR (Solar): pretrained SO3krates network + universal pairwise force fields (repulsion, electrostatics, dispersion)",
+  "year": 2025,
+  "authors": "A. Kabylda, J. T. Frank, S. Suárez-Dou, A. Khabibrakhmanov, L. Medrano Sandonas, O. T. Unke, S. Chmiela, K.-R. Müller, A. Tkatchenko",
+  "paper": {"title": "Molecular Simulations with a Pretrained Neural Network and Universal Pairwise Force Fields", "venue": "J. Am. Chem. Soc. 147, 33723 (2025)", "url": "https://doi.org/10.1021/jacs.5c09558"},
+  "repos": ["so3lr", "mlff"],
+  "family": "spherical-equivariant",
+  "tags": ["长程物理", "SO3krates 欧几里得注意力", "球谐坐标 · 无 CG 张量积", "守恒电荷 + 静电 + QDO 色散", "总电荷/自旋输入", "JAX / JAX-MD"],
+  "framework": "JAX/Flax（JAX-MD 分子动力学、jaxpme 做 Ewald/PME/P3M；flash 模式用 Pallas-Triton 内核）",
+  "license": "MIT（代码与旧版 so3lr 权重）；SO3LR Tauri 权重为 CC BY-NC 4.0（非商用）",
+  "oneLiner": "把只看 4.5 Å 内邻居的 SO3krates 等变注意力网络，与三条有物理形式的通用成对项拼在一起：近程核排斥（ZBL/NLH）、由网络预测且严格守恒总电荷的部分电荷算出的阻尼库仑静电、由网络预测的极化率比例驱动的 QDO 色散（C6/C8/C10）——于是能量在截断之外仍有正确的 1/r 与 1/r⁶ 尾巴。",
+  "analogy": "像一支装修队：SO3krates 是只负责“近处细节”的工匠，只看身边 4.5 Å 内的邻居，用注意力判断谁更重要；远处的作用不再让工匠去“猜”，而是交给三条物理定律——“别撞上”（核排斥）、“电荷同性相斥异性相吸”（库仑）和“分子之间微弱的黏性”（色散）。工匠只需告诉定律每个原子带多少电、有多“蓬松”（极化率），远处的账就按公式一直算到很远。",
+  "arch": {
+    "geometry": "短程边：距离 → Bernstein 径向基 (K=32) × PhysNet 多项式截断；方向 → 实球谐 Y_l^m (l=1–4)。另有长程邻居表的距离 d_ij^lr 供物理项使用",
+    "equivariance": "E(3) 等变：不变特征 x 与球谐坐标 χ（EV，l=1–4 共 24 分量）分两路传递，只经逐 l 范数（不变收缩）耦合，不做 CG 张量积",
+    "lmax": "χ 的 l ∈ {1,2,3,4}（degrees=[1,2,3,4]）；x 只含标量",
+    "bodyOrder": "无 ACE 式显式体序；χ 是邻居球谐之和，其逐 l 范数（类似功率谱）带来 3 体角度信息，多层迭代后更高",
+    "layers": "3（旧版 so3lr、Tauri-m/l）；Tauri-s 为 2",
+    "cutoff": "网络 4.5 Å（Tauri-l 5.0 Å）；物理项另用 lr_cutoff（ASE/CLI 默认 12 Å，气相建议 100 Å）",
+    "receptiveField": "网络 3×4.5 ≈ 13.5 Å；静电/色散直达 r_lr（PME 时无截断）",
+    "message": "无 softmax 多头注意力：α_ij = φ(r)·Σ q_i⊙w_ij⊙k_j / n̄；w_ij = MLP(RBF) + MLP(‖χ_j−χ_i‖_l)；x 聚合 α·W_v x_j，χ 聚合 α^(l)·Y_l^m(r̂_ij)；交换块逐 l 缩放 χ",
+    "readout": "原子能 MLP（128, SiLU）× 元素 scale + shift；另有部分电荷、极化率(Hirshfeld)比例、C6 比例三个原子头，作为物理项参数",
+    "forces": "conservative",
+    "forcesDetail": "forward 返回 −E，jax.value_and_grad 对坐标求导得 F = −∂E/∂R（排斥、静电、色散、电荷随构型变化的贡献全部自动包含）",
+    "stress": "ASE 计算器 calculate_stress=True：对应变 ε 求导，σ = (1/V)∂E/∂ε；flash 引擎给出各向同性维里供 JAX-MD NPT",
+    "longRange": "内置：守恒总电荷的预测部分电荷 + erf 阻尼库仑（σ=4 Å）；截断模式用 shifted-force + 平滑开关，周期体系可选 Ewald/PME/P3M",
+    "dispersion": "内置：网络预测极化率/Hirshfeld 比例 → 缩放自由原子 α、C6 → Casimir–Polder 混合 → QDO 型 C6/C8/C10 有理阻尼；r_lr 前 2 Å 平滑关断，可选色散 PME",
+    "chargeSpin": "是：总电荷 Q 与未成对电子数 S 经 SpookyNet 式嵌入进入网络；部分电荷再被强制归一到 Q（可按残基分段）",
+    "otherOutputs": "部分电荷、偶极矢量 Σq_i r_i、极化率/C6 比例、各能量分量（排斥/静电/色散）、Hessian（jax.hessian）、可观测量梯度",
+    "strictlyLocal": false,
+    "complexity": "短程 O(N·M·F)（无张量积，χ 仅 24 分量）；长程实空间 O(N·M_lr)，M_lr ∝ r_lr³；PME 约 O(N log N)",
+    "accel": "jax.jit/XLA、混合精度；JAX-MD（NVE/NVT/NPT）、ASE 计算器、CLI（opt/nvt/npt/eval）、PySAGES；flash 引擎（Pallas-Triton，单节点多 GPU）"
+  },
+  "scores": {
+    "speed": {"v": 3, "why": "短程网络没有 CG 张量积、接近 PaiNN 级轻量，但每步还要在长程邻居表上逐对算静电与色散，r_lr 大时开销显著，整体与 MACE 类相当。"},
+    "expressiveness": {"v": 4, "why": "等变且含 l≤4 角度信息、注意力滤波灵活；但 χ 只有单通道、不做张量积耦合，完备性不及 MACE/ACE 类高体序模型。"},
+    "longRange": {"v": 5, "why": "守恒电荷 + 阻尼库仑（含 Ewald/PME）+ 环境相关的 C6/C8/C10 色散 + 总电荷/自旋输入，是该维度的典型满分设计。"},
+    "scalability": {"v": 3, "why": "无 LAMMPS 空间分解，标准路径为 JAX-MD 整图计算；flash 引擎靠无逐边存储的内核支持单 GPU 大体系与单节点多 GPU，但不跨节点。"},
+    "physics": {"v": 5, "why": "保守力、C² 多项式截断与无穷阶光滑开关、广延的原子能分解、ZBL/NLH 近程排斥、正确的静电与色散渐近行为。"},
+    "coverage": {"v": 4, "why": "能量/力/应力之外有 Hessian、部分电荷、偶极、极化率与 C6 比例和分项能量；没有极化率张量、BEC、磁矩等。"}
+  },
+  "steps": [
+    {
+      "stage": "input",
+      "title": "输入：坐标、元素、总电荷/自旋 + 短程/长程两张邻居表",
+      "plain": "输入是原子坐标 R、元素 Z、体系总电荷 Q 和未成对电子数 S（ASE 中 atoms.info['charge'] 设总电荷，默认 0），周期体系还有晶胞。SO3LR 同时构建两张邻居表：短程表（r_c = 4.5 Å）只给 SO3krates 网络用；长程表（r_lr，默认 12 Å，气相建议 100 Å）给静电与色散用。forward 先由坐标算出两组位移向量，之后所有能量都是它们的可微函数。",
+      "math": "\\mathcal S=\\{(\\mathbf r_i,Z_i)\\}_{i=1}^{N},\\ Q,\\ S;\\qquad \\mathcal N_{\\text{sr}}(i)=\\{j:r_{ij}<r_c\\},\\quad \\mathcal N_{\\text{lr}}(i)=\\{j:r_{ij}<r_{\\text{lr}}\\}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/base_calculator.py", "start": 60, "end": 80, "must": "pair_displacements(inputs)", "caption": "make_so3lr.forward：组装输入并计算短程/长程位移"},
+        {"repo": "so3lr", "file": "so3lr/jaxmd_utils.py", "start": 182, "end": 192, "must": "neighbor_fn_lr = _make_neighbor_fn(", "caption": "to_jax_md：分别以网络截断和长程截断建立两张 jax_md 邻居表"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "几何编码：Bernstein 径向基 × PhysNet 截断 + 球谐 l=1–4",
+      "plain": "每条短程边的距离被展开成 K=32 个 Bernstein 多项式（自变量是 e^{−γr}），并乘以 PhysNet 的五次多项式截断 φ(r)，使能量与力在 r_c 处平滑归零；方向用 l=1,2,3,4 的实球谐编码（3+5+7+9=24 个分量）。径向基看到的是做过“下限”处理的距离，防止原子相撞时网络外推失控；而 φ(r)、排斥与静电仍用真实距离，所以近距离排斥照样会变大。",
+      "math": "B_k(r)=\\binom{K-1}{k}e^{-k\\gamma r}\\big(1-e^{-\\gamma r}\\big)^{K-1-k},\\ \\gamma=0.9449;\\qquad \\phi(r)=1-6x^5+15x^4-10x^3,\\ x=\\tfrac{r}{r_c};\\qquad Y_l^m(\\hat{\\mathbf r}_{ij}),\\ l=1..4",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/embed/embed_sparse.py", "start": 248, "end": 282, "must": "ylm_ij = [ylm_fn(unit_r_ij) for ylm_fn in self.ylm_fns]", "caption": "GeometryEmbedSparse：距离、径向基、截断、单位向量与球谐"},
+        {"repo": "so3lr", "file": "so3lr/mlff/utils/radial_basis_fn.py", "start": 43, "end": 72, "must": "exp_r = jnp.exp(-gamma * r_ij)", "caption": "Bernstein 径向基（对数形式计算二项式系数）"},
+        {"repo": "so3lr", "file": "so3lr/mlff/utils/cutoff_fn.py", "start": 5, "end": 17, "must": "6 * (x / r_cut) ** 5", "caption": "PhysNet 多项式截断函数"}
+      ]
+    },
+    {
+      "stage": "embedding",
+      "title": "初始嵌入：元素 + 总电荷 + 自旋（SpookyNet 式）",
+      "plain": "每个原子的 128 维初始特征是三种嵌入的平均：元素嵌入、总电荷嵌入、自旋嵌入。电荷/自旋嵌入借鉴 SpookyNet：用元素“查询”向量与按电荷符号选出的“键”向量做注意力，以 softplus 权重把总电荷 Q（或未成对电子数 S）分摊到各原子，再经残差 MLP 变成特征。因此同一几何构型的阳离子、中性分子和自由基会得到不同能量。球谐坐标 χ 初始化为 0。",
+      "math": "\\mathbf x_i^{(0)}=\\tfrac{1}{\\sqrt3}\\big(\\mathbf e_{Z_i}+\\mathbf e_i^{Q}+\\mathbf e_i^{S}\\big),\\qquad \\mathbf e_i^{\\psi}=\\mathrm{Res}\\Big(\\psi\\,\\frac{\\mathrm{softplus}(\\mathbf q_{Z_i}\\cdot\\mathbf k_{\\psi}/\\sqrt F)}{\\sum_j\\mathrm{softplus}(\\mathbf q_{Z_j}\\cdot\\mathbf k_{\\psi}/\\sqrt F)}\\,\\mathbf v_{\\psi}\\Big),\\ \\psi\\in\\{Q,S\\};\\qquad \\boldsymbol\\chi_i^{(0)}=\\mathbf 0",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/stacknet/stacknet_sparse.py", "start": 50, "end": 55, "must": "jnp.stack(embeds, axis=-1).sum(axis=-1) / jnp.sqrt(len(embeds))", "caption": "多个嵌入相加后除以 √n"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/embed/embed_sparse.py", "start": 391, "end": 412, "must": "a = psi[batch_segments] * y / denominator[batch_segments]", "caption": "ChargeSpinEmbedSparse：把总电荷/自旋按注意力权重分摊到原子"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "SO3krates 层：欧几里得注意力 + 交换块（无 CG 张量积）",
+      "plain": "SO3krates 把信息分两路：128 维不变特征 x 和单通道的“欧几里得变量” χ（各 l 的 Y_l^m 坐标）。注意力系数 α_ij = q_i·w_ij·k_j / n̄ 不做 softmax，而是乘上截断 φ(r)，保证邻居进出截断球时连续；滤波器 w_ij 既看距离（径向 MLP），也看 χ_j−χ_i 的逐 l 不变范数（“球面滤波”，携带角度信息）。x 按多头注意力聚合邻居的 value，χ 按每个 l 的注意力系数累加 Y_l^m(r̂_ij)；随后交换块把 x 与 χ 的逐 l 范数拼接过线性层，一部分更新 x、一部分逐 l 缩放 χ。两路只经这种不变收缩交流，从而省掉昂贵的 Clebsch–Gordan 张量积。",
+      "math": "w_{ij}=\\mathrm{MLP}_r(\\mathbf B(r_{ij}))+\\mathrm{MLP}_s\\Big(\\Big\\{\\tfrac{\\lVert\\boldsymbol\\chi_j^{l}-\\boldsymbol\\chi_i^{l}\\rVert^2}{\\sqrt{2l+1}}\\Big\\}_l\\Big),\\quad \\alpha_{ij}=\\frac{\\phi(r_{ij})}{\\bar n}\\sum_f q_{i,f}\\,w_{ij,f}\\,k_{j,f};\\qquad \\Delta\\mathbf x_i=\\sum_j\\alpha^{h}_{ij}W_v^{h}\\mathbf x_j,\\quad \\Delta\\chi^{l}_{i,m}=\\sum_j\\alpha^{(l)}_{ij}Y_l^m(\\hat{\\mathbf r}_{ij});\\qquad \\boldsymbol\\chi_i^{l}\\leftarrow(1+c_i^{l})\\boldsymbol\\chi_i^{l}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/layer/so3krates_layer_sparse.py", "start": 265, "end": 300, "must": "contraction_fn(ev_j - ev_i)", "caption": "径向滤波 + 球面滤波（χ 差的逐 l 不变量）"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/layer/so3krates_layer_sparse.py", "start": 376, "end": 406, "must": "degree_repeat_fn(alpha2_ij) * ylm_ij", "caption": "注意力系数乘截断，分别聚合不变特征与球谐坐标"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/layer/so3krates_layer_sparse.py", "start": 440, "end": 454, "must": "return cx, degree_repeat_fn(cev) * ev", "caption": "ExchangeBlock：x 与 χ 的逐 l 范数互相交换信息"},
+        {"repo": "mlff", "file": "mlff/nn/layer/so3krates_layer.py", "start": 549, "end": 565, "must": "chi_ = segment_sum(alpha_ij * sph_ij", "caption": "原始 SO3krates（mlff 库）中的球谐坐标注意力聚合"}
+      ]
+    },
+    {
+      "stage": "readout",
+      "title": "读出：原子能 + 三个“物理参数”头",
+      "plain": "最后一层的不变特征 x_i 进入几个小 MLP：①原子能（128 维 SiLU 隐层，乘元素相关 scale、加 shift；多“理论级别”时每级一列）；②未约束部分电荷 q̃_i（加元素偏置）；③极化率/Hirshfeld 体积比 h_i（旧版输出 hirshfeld_ratios，Tauri 新模型输出 a0_ratios，取绝对值保证为正）；④C6 比例 κ_i（仅新模型）。②–④ 不是能量，而是长程物理公式的参数——网络负责“看环境”，物理公式负责“算远处”。",
+      "math": "E_i^{\\text{NN}}=s_{Z_i}\\,\\mathbf w^{\\top}\\mathrm{SiLU}(W\\mathbf x_i)+\\mu_{Z_i},\\qquad \\tilde q_i=\\mathrm{MLP}_q(\\mathbf x_i)+b_{Z_i},\\quad h_i=\\big|\\mathrm{MLP}_h(\\mathbf x_i)+b'_{Z_i}\\big|,\\quad \\kappa_i=\\big|\\mathrm{MLP}_{C6}(\\mathbf x_i)+b''_{Z_i}\\big|",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 316, "end": 352, "must": "atomic_energy = atomic_energy * atomic_scales", "caption": "EnergySparse：原子能读出 MLP + 元素 scale/shift"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 528, "end": 549, "must": "a0_ratios = safe_scale(jnp.abs(x_ + q), node_mask)", "caption": "HirshfeldSparse：预测极化率比例（新模型）"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "近程排斥：ZBL（旧版）/ NLH（Tauri）屏蔽核排斥",
+      "plain": "两原子靠得极近时训练数据几乎没有覆盖，纯网络可能给出错误的吸引甚至让原子塌缩。SO3LR 加入有物理形式的屏蔽核排斥 k_e Z_iZ_j/r × Φ(r)：旧版用 4 项指数的 ZBL 通用屏蔽函数（参数可学习，以 ZBL 原值初始化），Tauri 改用按元素对查表的 3 项指数 NLH 系数。开关 s(r) 由 e^{−1/u} 构造，从 r=0 处的 1 无穷阶光滑地降到 1.5 Å 处的 0，不会引入力的跳变。",
+      "math": "E_i^{\\text{rep}}=\\frac12\\sum_{j}s(r_{ij})\\,\\phi(r_{ij})\\,\\frac{k_eZ_iZ_j}{r_{ij}}\\,\\Phi(r_{ij}),\\quad \\Phi_{\\text{ZBL}}=\\sum_{k=1}^{4}c_k\\,e^{-a_k d\\,(Z_i^{p}+Z_j^{p})\\,r},\\quad \\Phi_{\\text{NLH}}=\\sum_{k=1}^{3}A_k^{Z_iZ_j}e^{-B_k^{Z_iZ_j}r};\\qquad s=\\frac{\\sigma(1-c)}{\\sigma(1-c)+\\sigma(c)},\\ c=\\frac{r}{1.5\\,\\text{Å}},\\ \\sigma(u)=e^{-1/u}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 1615, "end": 1630, "must": "rzd = d_ij * (jnp.power(z_i, p) + jnp.power(z_j, p)) * d", "caption": "ZBLRepulsionSparse（旧版 so3lr）"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 1674, "end": 1693, "must": "y = jnp.sum(a * jnp.exp(-b * d_ij[:, None]), axis=-1)", "caption": "NLHRepulsionSparse（Tauri 模型）"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 803, "end": 810, "must": "sigma(1 - c) / (sigma(1 - c) + sigma(c))", "caption": "无穷阶光滑的开关函数"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "静电：守恒电荷 + erf 阻尼库仑（截断平滑或 Ewald/PME）",
+      "plain": "网络给出的 q̃_i 之和一般不等于真实总电荷，于是把差额平均分给每个原子，严格保证 Σq_i = Q（提供 residue_charge 时按残基分别守恒）。静电用 erf(r/σ)/r（σ = 4 Å）代替 1/r：近距离被抹平、不发散，短程细节交给网络；远距离恢复纯库仑。截断模式下在 0.45·r_lr 到 r_lr 之间用平滑开关混入 shifted-force 形式，使能量和力在 r_lr 处都连续；周期体系可改用 jaxpme 的 Ewald、PME 或 P3M，在倒空间严格求和。",
+      "math": "q_i=\\tilde q_i+\\frac{Q-\\sum_j\\tilde q_j}{N};\\qquad E^{\\text{ele}}=\\frac{k_e}{2}\\sum_{i\\ne j}q_iq_j\\Big[f\\,\\big(\\Phi(r)-\\Phi(r_{\\text{lr}})\\big)+(1-f)\\big(\\Phi(r)-\\Phi(r_{\\text{lr}})-\\Phi'(r_{\\text{lr}})(r-r_{\\text{lr}})\\big)\\Big],\\quad \\Phi(r)=\\frac{\\mathrm{erf}(r/\\sigma)}{r}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 720, "end": 738, "must": "charge_conservation = (total_charge - predicted_charge) / safe_atom_counts", "caption": "PartialChargesSparse：总电荷（或残基电荷）守恒"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 1475, "end": 1492, "must": "jax.lax.erf(r / _sigma) / r", "caption": "erf 阻尼 + shifted-force + 平滑开关的库仑对能"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 1853, "end": 1858, "must": "jaxpme.solvers.pme(", "caption": "ElectrostaticEnergyKspace：Ewald / PME / P3M 倒空间求解器"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "色散：环境相关极化率 → Casimir–Polder 混合 → QDO C6/C8/C10",
+      "plain": "每个原子的极化率 α_i 与 C6_i 不是常数，而是自由原子参考值乘以网络预测的比例（旧版：α 乘 h_i、C6 乘 h_i²；Tauri 另有独立的 C6 比例头），所以同一元素在不同化学环境中“黏性”不同。原子对的 C6 用 Casimir–Polder 混合规则组合，再由量子 Drude 振子（QDO）关系导出 C8、C10；每项用 R^n + ρ^n 的有理形式阻尼，近处有限、远处回到 −C_n/R^n。在 r_lr − 2 Å 到 r_lr 之间平滑关断（也可用 PME 把 C6 尾巴移到倒空间）。这正是 4.5 Å 网络“看不到”的 vdW 尾巴。",
+      "math": "\\alpha_i=\\alpha_i^{\\text{free}}h_i,\\quad C_{6,ij}=\\frac{2C_{6,i}C_{6,j}\\alpha_i\\alpha_j}{\\alpha_i^2C_{6,j}+\\alpha_j^2C_{6,i}},\\quad C_8=\\frac{5}{\\gamma}C_6,\\ C_{10}=\\frac{245}{8\\gamma^2}C_6;\\qquad E^{\\text{disp}}=-\\frac12\\sum_{i\\ne j}s(r_{ij})\\sum_{n=6,8,10}\\frac{C_{n,ij}}{R_{ij}^{n}+\\rho_{ij}^{n}},\\quad \\rho_{ij}=2\\cdot2.54\\,\\beta\\,\\bar\\alpha_{ij}^{1/7}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 1158, "end": 1184, "must": "C6_ij = 2 * C6_i * C6_j * alpha_j * alpha_i / (alpha_i ** 2 * C6_j + alpha_j ** 2 * C6_i)", "caption": "mixing_rules：按比例缩放自由原子 α/C6，Casimir–Polder 混合"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 852, "end": 863, "must": "C10 = 245 / 8 / gamma ** 2 * C6", "caption": "vdw_QDO_disp_damp：C6/C8/C10 有理阻尼色散"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 2048, "end": 2063, "must": "x_on=self.cutoff_lr - self.cutoff_lr_damping", "caption": "色散在 r_lr 前平滑关断"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "总能：网络能 + 排斥 + 静电 + 色散，逐原子相加",
+      "plain": "EnergySparse 先得到网络原子能，再依次把 ZBL/NLH 排斥、实空间静电（及可选 k 空间静电）、实空间色散（及可选 k 空间色散）累加到同一个逐原子能量上，最后对原子求和。每一项都写成原子能之和，保证广延性；物理项与网络项处在同一个计算图中，训练总能量时网络实际学习的是“扣除物理项后的剩余部分”。",
+      "math": "E=\\sum_i\\Big[E_i^{\\text{NN}}+E_i^{\\text{rep}}+E_i^{\\text{ele}}\\,(+E_i^{\\text{ele},k})+E_i^{\\text{disp}}\\,(+E_i^{\\text{disp},k})\\Big]",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 355, "end": 397, "must": "atomic_energy += inputs['electrostatic_energy']", "caption": "EnergySparse.__call__：逐项累加排斥、静电、色散"},
+        {"repo": "so3lr", "file": "so3lr/base_calculator.py", "start": 84, "end": 92, "must": "summed_energy = jnp.sum(output['energy'])", "caption": "对原子求和得到结构能量，返回 −E"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：jax.value_and_grad 自动微分（JAX-MD 直接调用）",
+      "plain": "forward 返回 −E，jax.value_and_grad 对坐标求导就直接得到 F = −∂E/∂R。排斥、静电、色散都在同一可微计算图里，连“电荷与极化率随构型变化”带来的力也自动包含，力场严格保守。to_jax_md 把同一能量函数与两张邻居表交给 jax_md 的积分器，用于 NVE/NVT/NPT 分子动力学。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial\\mathbf r_i}=\\nabla_{\\mathbf r_i}\\big(-E\\big)",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/base_calculator.py", "start": 94, "end": 110, "must": "jax.value_and_grad(", "caption": "so3lr_fn：一次反传得到能量与力"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对应变求导",
+      "plain": "ASE 计算器在 calculate_stress=True 时给体系（坐标与晶胞）施加一个应变 ε，再用 jax.value_and_grad 同时对坐标和 ε 求导：前者给出力，后者除以晶胞体积就是应力（Voigt 形式）。flash 引擎另提供各向同性维里，供 JAX-MD 的 NPT 使用。",
+      "math": "\\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E\\big(\\{(\\mathbf 1+\\boldsymbol\\varepsilon)\\mathbf r_i\\},(\\mathbf 1+\\boldsymbol\\varepsilon)\\mathbf C\\big)}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\boldsymbol\\varepsilon=0}",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/calculators/ase_calculator.py", "start": 228, "end": 238, "must": "stress=matrix_to_voigt(grads[1] / volume)", "caption": "AseCalculatorSparse：应变求导得应力"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多输出：Hessian、偶极、电荷、分项能量",
+      "plain": "jax.hessian 可直接给出完整 Hessian（或一段连续原子的部分 Hessian），用于振动频率分析；偶极矢量 μ = Σq_i r_i 来自同一套守恒电荷。部分电荷、极化率/C6 比例以及排斥、静电、色散各分量都能作为中间量输出，便于分析某个相互作用究竟来自哪一项。",
+      "math": "H_{ij}^{\\alpha\\beta}=\\frac{\\partial^2E}{\\partial r_i^{\\alpha}\\partial r_j^{\\beta}},\\qquad \\boldsymbol\\mu=\\sum_i q_i\\,\\mathbf r_i",
+      "code": [
+        {"repo": "so3lr", "file": "so3lr/mlff/calculators/ase_calculator.py", "start": 249, "end": 260, "must": "jax.hessian(penergy_fn, has_aux=has_aux)(system.R)", "caption": "完整或部分 Hessian"},
+        {"repo": "so3lr", "file": "so3lr/mlff/nn/observable/observable_sparse.py", "start": 780, "end": 796, "must": "mu_i = positions * partial_charges[:, None]", "caption": "DipoleVecSparse：由部分电荷得到偶极矢量"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff（网络）", "value": "4.5 Å（Tauri-s/m 与旧版 so3lr）；Tauri-l 5.0 Å", "note": "SO3krates 短程截断，PhysNet 截断函数", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 293, "end": 295, "must": "cutoff: 4.5"}},
+    {"name": "degrees", "value": "[1, 2, 3, 4]", "note": "球谐坐标 χ 的阶数（共 24 分量）", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 297, "end": 301, "must": "degrees:"}},
+    {"name": "num_layers", "value": "3（Tauri-s：2）", "note": "SO3krates 层数", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 318, "end": 321, "must": "num_layers: 3"}},
+    {"name": "num_features / num_heads", "value": "128 / 4 头 × 32（Tauri-l：256 / 8 头）", "note": "不变特征宽度与注意力头", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 318, "end": 321, "must": "num_features: 128"}},
+    {"name": "radial_basis_fn", "value": "bernstein, K = 32（Tauri-l：64）", "note": "径向基类型与个数", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 322, "end": 326, "must": "radial_basis_fn: bernstein"}},
+    {"name": "message_normalization", "value": "avg_num_neighbors（Tauri-m 为 16.0）", "note": "注意力系数除以平均邻居数", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 317, "end": 317, "must": "message_normalization: avg_num_neighbors"}},
+    {"name": "electrostatic_energy_scale σ", "value": "4.0 Å", "note": "库仑 erf(r/σ)/r 的阻尼宽度", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 305, "end": 308, "must": "electrostatic_energy_scale: 4.0"}},
+    {"name": "dispersion_energy_scale β", "value": "1.0（Tauri）；旧版 so3lr 1.2", "note": "色散阻尼半径 ρ 的缩放", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr/hyperparameters.yaml", "start": 141, "end": 144, "must": "dispersion_energy_scale: 1.2"}},
+    {"name": "lr_cutoff", "value": "12 Å（make_so3lr / ASE 默认）；README 建议气相用 100 Å", "note": "静电与色散的长程邻居截断", "code": {"repo": "so3lr", "file": "so3lr/base_calculator.py", "start": 10, "end": 13, "must": "lr_cutoff=12.,"}},
+    {"name": "dispersion_energy_cutoff_lr_damping", "value": "2 Å", "note": "色散在 [r_lr−2 Å, r_lr] 内平滑关断", "code": {"repo": "so3lr", "file": "so3lr/base_calculator.py", "start": 10, "end": 13, "must": "dispersion_energy_cutoff_lr_damping=2.,"}},
+    {"name": "use_charge_embed / use_spin_embed", "value": "true / true", "note": "总电荷与自旋嵌入", "code": {"repo": "so3lr", "file": "so3lr/models/so3lr-tauri-m-2606/hyperparameters.yaml", "start": 329, "end": 334, "must": "use_spin_embed: true"}}
+  ],
+  "speedNotes": [
+    "短程网络没有 CG 张量积：χ 只有 24 个分量、单通道，与 128 维 x 仅通过逐 l 范数耦合；每条边的主要开销是径向/球面滤波 MLP 与逐元素乘法，接近 PaiNN 级。",
+    "长程物理项逐对计算，代价 ∝ N·M_lr，而 M_lr ∝ r_lr³：默认 12 Å 面向凝聚相，气相建议的 100 Å 对大体系会成为主要开销；周期体系可改用 Ewald/PME/P3M（CLI 的 tune_ewald 帮助选 smearing、网格与截断）。",
+    "README 给出的相对速度：Tauri-s 比 -m 快 1.4×，Tauri-l 比 -m 慢 3.7×（l 版 256 维、8 头、5 Å 截断）。",
+    "flash 引擎（Pallas-Triton）：不存逐边/逐对数组，每原子内存仅几 KiB；径向滤波与静电对函数做成三次 Hermite 查表；docstring 称单 GPU 可算百万原子量级，并支持单节点多 GPU。",
+    "全程 jax.jit 编译；float32 权重可配合 float64 坐标与能量求和（混合精度），力和应力一次反传得到。"
+  ],
+  "weakNotes": [
+    "这是 SO3LR 的核心卖点：弱相互作用不靠网络“猜”，而由显式物理项给出——静电（1/r）与色散（C6/r⁶ + C8/r⁸ + C10/r¹⁰）沿长程邻居表一直算到 r_lr（默认 12 Å，气相建议 100 Å），网络本身只负责 4.5 Å 内的半局域部分。",
+    "电荷不是固定参数，而是随构型变化的网络输出，并强制 Σq_i = Q；配合总电荷/自旋嵌入，可处理离子、两性离子、带电生物分子与开壳层体系；残基分段电荷守恒（residue_charge）用于二聚体结合能计算。",
+    "色散的 α、C6 按网络预测的 Hirshfeld/极化率比例随化学环境缩放，再经 Casimir–Polder 混合与 QDO 关系得到 C8、C10，因此氢键网络、π 堆积、溶剂化、分子聚集等非共价相互作用都有物理正确的长程尾巴。",
+    "周期体系：截断式静电用 erf 阻尼 + shifted-force + 平滑开关保证 r_lr 处能量和力连续；需要严格 Ewald 和时用 jaxpme 的 Ewald/PME/P3M，色散也可走 PME。",
+    "局限：面向（生物）分子体系，README 未列出训练泛函（数据集在 Zenodo）；旧版 so3lr 只覆盖 H、C、N、O、F、P、S、Cl，Tauri 覆盖 Z=1–85；物理项是成对加和，没有多体色散（MBD）与诱导偶极极化，金属/无机固体不在设计目标内。"
+  ],
+  "downstreamNotes": [
+    "分子动力学：CLI 提供 opt/nvt/npt，基于 JAX-MD；README 推荐 so3lr-tauri-m 用于生物分子 MD。保守力、平滑截断与近程排斥共同保证长时间 MD 的稳定性。",
+    "振动与光谱：jax.hessian 给出完整或部分 Hessian；偶极矢量 Σq_i r_i 可用于从 MD 轨迹分析红外光谱。",
+    "反应与采样：README 推荐 so3lr-tauri-l 用于反应；PySAGES 接口支持增强采样，可观测量对坐标的梯度也可输出。",
+    "结合能与微调：文档提供结合能（Binding energies）教程；finetuning_strategies 支持只微调能量读出头或“最后一层 + 读出头”等策略。"
+  ],
+  "strengths": ["长程物理显式且可解释：ZBL/NLH 排斥 + 守恒电荷静电 + 环境相关 QDO 色散", "支持总电荷与自旋，电荷严格守恒", "SO3krates 无 CG 张量积，短程网络轻量、MD 稳定", "JAX 全栈：jit、自动微分 Hessian、JAX-MD、PME、flash 大体系内核", "预训练即用：Tauri-s/m/l 覆盖 H–At（Z=1–85）"],
+  "weaknesses": ["长程实空间成对项随 r_lr³ 增长，气相 100 Å 截断对大体系很贵", "面向分子/生物分子，不针对金属与无机固体", "点电荷 + 成对色散，缺少多体色散与显式极化", "无 LAMMPS 空间分解接口，多 GPU 仅限单节点（flash）", "Tauri 权重为 CC BY-NC 4.0，不可商用"],
+  "pretrained": ["so3lr-tauri-m（默认，生物分子 MD）", "so3lr-tauri-l（最准，推荐用于反应）", "so3lr-tauri-s（比 -m 快 1.4×）", "so3lr（JACS 2025 原始模型，H/C/N/O/F/P/S/Cl）", "带日期的固定版本，如 so3lr-tauri-m-2606 / -2602"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

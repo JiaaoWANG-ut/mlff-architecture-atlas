@@ -1,0 +1,206 @@
+{
+  "id": "cace",
+  "name": "CACE",
+  "fullName": "CACE: Cartesian Atomic Cluster Expansion",
+  "year": 2024,
+  "authors": "Bingqing Cheng",
+  "paper": {"title": "Cartesian atomic cluster expansion for machine learning interatomic potentials", "venue": "npj Computational Materials 10, 157 (2024)", "url": "https://www.nature.com/articles/s41524-024-01332-4"},
+  "repos": ["cace"],
+  "family": "cartesian-equivariant",
+  "tags": ["笛卡尔 ACE（无球谐）", "单项式角基 x̂^lx ŷ^ly ẑ^lz", "低维元素嵌入", "LES 隐式电荷 + Ewald", "保守力", "CC BY-NC 4.0"],
+  "framework": "PyTorch（自带精简 torch_geometric 数据结构 + matscipy 邻居表 + ASE 计算器）",
+  "license": "CC BY-NC 4.0（非商用）",
+  "oneLiner": "把 ACE（原子团簇展开）完全改写到笛卡尔坐标：方向不用球谐函数，而用单位向量分量的单项式 x̂^lx ŷ^ly ẑ^lz；对邻居求和得到 A 基，再按多项式系数把同阶笛卡尔张量完全缩并成旋转不变的 B 基（默认最多 4 体），可选消息传递，并原生集成 LES 隐式电荷 + Ewald 长程静电。",
+  "analogy": "想象向朋友描述一个原子周围的“邻居布局”：先把每个邻居的方向写成 x、y、z 分量的乘积清单（如 x·x·y），按距离和元素加权后全部加起来——这就是 A 基；再像算“点积”那样把同阶清单两两、三三对齐相乘求和——不管整个结构怎么转，点积都不变，于是得到旋转不变的 B 基。LES 则像给每个原子发一枚“看不见的电荷”，再用 Ewald 求和让远处的原子也能互相感觉到。",
+  "arch": {
+    "geometry": "边向量 r_ij → 长度（Bessel × 多项式包络）+ 方向：单位向量分量单项式 x̂^lx ŷ^ly ẑ^lz（lx+ly+lz ≤ max_l），不用球谐",
+    "equivariance": "A 基为笛卡尔张量分量（O(3) 等变）；B 基由完全缩并得到严格旋转/反演不变量，能量 E(3) 不变",
+    "lmax": "max_l = 3（单项式总次数 ≤ 3，共 20 个分量）；B 特征只输出 L=0，max_l_out>0 时可另输出 l>0 张量特征",
+    "bodyOrder": "max_nu = 3 → 每次对称化最多 3 个 A 相乘 = 4 体；代码支持 ν ≤ 4；消息传递后有效体序更高",
+    "layers": "1 次 A→B 构建 + T 次消息传递（train.py 默认 T=1）",
+    "cutoff": "train.py 默认 4.0 Å；examples/water_train.py 用 5.5 Å",
+    "receptiveField": "(T+1)·r_c；默认 T=1 → 2r_c（水示例约 11 Å）",
+    "message": "Bchi：h(B_j)·边基 e_ji；Ar：a·exp(−r/r0)·f_cut·A_j；Memory：γ·A_i；邻居求和 ×1/√n̄ 后重新对称化",
+    "readout": "各层 B 特征拼接 → Atomwise MLP（[32,16]，SiLU，可加线性旁路）→ 原子能按构型求和",
+    "forces": "conservative",
+    "forcesDetail": "F = −∂E/∂R（torch.autograd.grad）；另有 DirectForces 可由 l=1 张量特征直接读出力（非保守，可选）",
+    "stress": "对称应变 ε 同时作用于坐标、晶胞与周期平移，σ = (1/V)∂E/∂ε，与力一次反传得到",
+    "longRange": "可选内置 LES：读出头预测隐式电荷 q → EwaldPotential（高斯屏蔽，k ≤ 2π/dl）→ 与短程能相加；另有 ChargeEq（Qeq）与 LesWrapper（多极/极化扩展）",
+    "dispersion": "无 D3 外挂；EwaldPotential(exponent=6) 可做 r⁻⁶ 型 Ewald 求和（隐式“色散系数”）",
+    "chargeSpin": "可选 charge_spin_key：把每个原子上的标量（如总电荷/自旋）嵌入后加到元素嵌入；ChargeEq 支持总电荷约束 system_charge",
+    "otherOutputs": "隐式电荷、极化 P（Berry 相位型）、BEC（Grad 对 P 求导或 LES）、外电场下的力修正、TensorReadout 输出偶极/四极/极化率",
+    "strictlyLocal": false,
+    "complexity": "边基 O(N·M·n_rbf·N_l·C²)（N_l=(l+1)(l+2)(l+3)/6）+ 节点对称化 O(N·n_r·C²·组合数(ν))；LES 的 Ewald 为 O(N·N_k)",
+    "accel": "torch.compile（benchmark/md-opt.py，含复数的 Ewald 排除在编译外、可固定 k 网格以用 CUDA Graph）；ASE CACECalculator；仓库内无 LAMMPS 接口"
+  },
+  "scores": {
+    "speed": {"v": 4, "why": "默认只有 3²=9 个边通道、1 层消息传递，角基是单项式乘法、无 CG 张量积，计算量小；但对称化按 (lx,ly,lz) 组合在 Python 中逐项循环、缺少融合内核。"},
+    "expressiveness": {"v": 4, "why": "ACE 式完备笛卡尔基 + ν=3（可到 4）高体序 + 可选消息传递；但默认元素嵌入/通道很少，B 特征只保留不变量。"},
+    "longRange": {"v": 4, "why": "LES 隐式电荷 + Ewald、Qeq、r⁻⁶ Ewald、总电荷嵌入均为仓库内置模块；但需用户自行组装，纯短程模型只有 (T+1)r_c 感受野。"},
+    "scalability": {"v": 2, "why": "仅 ASE 计算器、单构型推理，仓库内无 LAMMPS/空间分解多 GPU 接口；加 LES 后 Ewald 的 k 点数随体积增长。"},
+    "physics": {"v": 4, "why": "保守力、多项式包络平滑截断、原子能求和保证广延性、完全缩并保证严格旋转不变；没有 ZBL 近程排斥。"},
+    "coverage": {"v": 4, "why": "能量/力/应力之外，官方模块可输出隐式电荷、极化、BEC、外电场响应和张量读出；无专门 Hessian 接口。"}
+  },
+  "steps": [
+    {
+      "stage": "graph",
+      "title": "邻居图：截断半径内的原子对（含周期镜像）",
+      "plain": "AtomicData.from_atoms 调用 matscipy 的 neighbour_list，找出所有距离小于 r_c 的原子对，记录 (sender j → receiver i) 和跨周期边界的整数平移 unit_shifts；非周期方向会被人为扩成超大晶胞。之后所有计算都只在这些边上进行，代价随原子数线性增长。",
+      "math": "\\mathcal N(i)=\\{\\,j:\\ \\lVert\\mathbf r_i-\\mathbf r_j+\\mathbf S_{ji}\\mathbf C\\rVert<r_c\\,\\}",
+      "code": [{"repo": "cace", "file": "cace/data/neighborhood.py", "start": 46, "end": 72, "must": "neighbour_list(", "caption": "get_neighborhood：构建 edge_index、shifts 与 unit_shifts，去掉自身边"}]
+    },
+    {
+      "stage": "geometry",
+      "title": "距离编码：Bessel 径向基 × 多项式包络",
+      "plain": "边向量被拆成长度和单位方向（normalize=True）。长度用 n_rbf 个 Bessel 正弦函数展开（频率可选为可训练），再乘多项式包络 f_cut，使每条边的贡献连同导数在 r_c 处平滑归零，原子进出截断球时力不会跳变。",
+      "math": "R_n(r)=\\sqrt{\\tfrac{2}{r_c}}\\,\\frac{\\sin(n\\pi r/r_c)}{r},\\ n=1..n_{\\rm rbf};\\qquad f_{\\rm cut}(r)=1-\\tfrac{(p+1)(p+2)}{2}x^{p}+p(p+2)x^{p+1}-\\tfrac{p(p+1)}{2}x^{p+2},\\ x=\\tfrac{r}{r_c}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/utils.py", "start": 184, "end": 190, "must": "vectors_normed = vectors / (lengths + eps)", "caption": "边向量、长度与单位方向"},
+        {"repo": "cace", "file": "cace/modules/radial.py", "start": 53, "end": 55, "must": "torch.sin(self.bessel_weights * x)", "caption": "BesselRBF"},
+        {"repo": "cace", "file": "cace/modules/cutoff.py", "start": 182, "end": 189, "must": "envelope * (x < self.cutoff)", "caption": "PolynomialCutoff 平滑包络"}
+      ]
+    },
+    {
+      "stage": "geometry",
+      "title": "方向编码：笛卡尔单项式角基（CACE 的核心）",
+      "plain": "这是 CACE 与 MACE/NequIP 最大的不同：方向不展开成球谐 Y_l^m，而是直接取单位向量分量的单项式 x̂^lx ŷ^ly ẑ^lz（lx+ly+lz=l≤max_l）。它们正是对称张量 û⊗…⊗û 的独立分量，旋转时只在同一 l 内线性混合，因此天然等变；计算上只需递推乘法（低一阶单项式再乘一个分量），完全不需要 Clebsch–Gordan 系数。max_l=3 时共 20 个分量；这些单项式没有去迹，存在冗余（如 x̂²+ŷ²+ẑ²=1）。",
+      "math": "L_{\\mathbf l}(\\hat{\\mathbf u})=\\hat u_x^{\\,l_x}\\,\\hat u_y^{\\,l_y}\\,\\hat u_z^{\\,l_z},\\quad |\\mathbf l|=l_x+l_y+l_z\\le l_{\\max};\\qquad L_{\\mathbf l}=L_{\\mathbf l-\\mathbf e_k}\\,\\hat u_k",
+      "code": [{"repo": "cace", "file": "cace/modules/angular.py", "start": 26, "end": 54, "must": "computed_values[prev_lxlylz_combination] * vectors[:, i]", "caption": "AngularComponent：枚举 (lx,ly,lz) 并递推计算单项式"}]
+    },
+    {
+      "stage": "embedding",
+      "title": "化学嵌入：低维元素嵌入 + 边的外积通道",
+      "plain": "元素先做 one-hot，再乘一个可训练矩阵压缩成 C 维（n_atom_basis，默认 3）的连续“化学坐标”。每条边的化学通道是发送者嵌入与接收者嵌入的外积（EdgeEncoder，directed=True），共 C² 个通道——通道数与元素种类数无关，几十种元素也不会让模型变大。可选 charge_spin_key 把每个原子上的标量（如总电荷/自旋）嵌入后加到元素嵌入上。",
+      "math": "\\tilde{\\mathbf z}_i=W_{\\rm emb}^{\\top}\\,\\mathrm{onehot}(Z_i)\\in\\mathbb R^{C},\\qquad T_{c}(\\sigma_j,\\sigma_i)=\\tilde z_{j,a}\\,\\tilde z'_{i,b},\\ \\ c=(a,b)\\in\\{1..C\\}^2",
+      "code": [
+        {"repo": "cace", "file": "cace/representations/cace_representation.py", "start": 186, "end": 204, "must": "encoded_edges = self.edge_coding(", "caption": "one-hot → 发送/接收嵌入（可叠加电荷/自旋嵌入）→ 边编码"},
+        {"repo": "cace", "file": "cace/modules/type.py", "start": 145, "end": 157, "must": "torch.einsum('ki,kj->kij', node1, node2)", "caption": "EdgeEncoder：发送者 ⊗ 接收者嵌入 → C² 通道"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "A 基：边基函数对邻居求和",
+      "plain": "每条边的基函数是“径向 × 截断 × 角向单项式 × 化学通道”的逐元素乘积（4 维张量 [边, n, l, c]），按接收原子 scatter_sum 求和就得到原子基 A_i，描述 i 周围邻居密度在各笛卡尔方向组合上的投影。随后用按 l 共享的线性变换混合径向通道：同一 l 的所有 (lx,ly,lz) 必须用同一组权重，否则会破坏旋转对称。",
+      "math": "A_{i,cn\\mathbf l}=\\sum_{j\\in\\mathcal N(i)}R_n(r_{ij})\\,f_{\\rm cut}(r_{ij})\\,L_{\\mathbf l}(\\hat{\\mathbf r}_{ij})\\,T_c(\\sigma_j,\\sigma_i),\\qquad \\tilde A_{i,cn'\\mathbf l}=\\sum_{n}W^{(|\\mathbf l|)}_{nn'c}\\,A_{i,cn\\mathbf l}",
+      "code": [
+        {"repo": "cace", "file": "cace/representations/cace_representation.py", "start": 213, "end": 233, "must": "node_feat_A = scatter_sum(src=edge_attri", "caption": "径向×截断、角基、边编码相乘 → scatter_sum → 径向混合"},
+        {"repo": "cace", "file": "cace/tools/torch_tools.py", "start": 30, "end": 37, "must": "a_expanded = a.unsqueeze(2).unsqueeze(3)", "caption": "elementwise_multiply_3tensors：三个因子广播相乘"},
+        {"repo": "cace", "file": "cace/modules/radial_transform.py", "start": 46, "end": 59, "must": "torch.einsum('ijkh,jmh->imkh', group_x, weight)", "caption": "SharedRadialLinearTransform：同一 l 共享权重"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "B 基：笛卡尔张量完全缩并 → 旋转不变的多体特征",
+      "plain": "A 基仍随旋转变化，需要对称化：ν=1 取 l=0 分量；ν=2 把同阶 l 的分量平方后按多项式系数 l!/(lx!ly!lz!) 加权求和，等价于两个秩-l 笛卡尔张量的完全缩并（“点积”）；ν=3 把秩 l₁、l₂ 与秩 l₁+l₂ 的三个张量缩并。乘法只在同一 (n,c) 通道内进行，结果严格旋转（含反演）不变。因为 A 已是对邻居的求和，ν 个 A 相乘自动包含 ν+1 体关联，代价却只与原子数成正比。",
+      "math": "B^{\\nu=1}_{i,cn}=\\tilde A_{i,cn\\mathbf 0},\\quad B^{\\nu=2}_{i,cn,l}=\\sum_{|\\mathbf l|=l}\\frac{l!}{l_x!\\,l_y!\\,l_z!}\\tilde A_{i,cn\\mathbf l}^{2},\\quad B^{\\nu=3}_{i,cn,(l_1,l_2)}=\\sum_{|\\mathbf l_1|=l_1}\\sum_{|\\mathbf l_2|=l_2}\\frac{l_1!}{\\mathbf l_1!}\\frac{l_2!}{\\mathbf l_2!}\\tilde A_{i,cn\\mathbf l_1}\\tilde A_{i,cn\\mathbf l_2}\\tilde A_{i,cn(\\mathbf l_1+\\mathbf l_2)}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/symmetrize_basis.py", "start": 142, "end": 164, "must": "prefactor * product", "caption": "Symmetrizer.forward：同通道内连乘 × 多项式系数后累加"},
+        {"repo": "cace", "file": "cace/modules/angular_tools.py", "start": 86, "end": 98, "must": "lxlylz_factorial_coef([lx1, ly1, lz1])*lxlylz_factorial_coef([lx2, ly2, lz2])", "caption": "ν=3 的缩并组合 (l₁, l₂, l₁+l₂) 与系数"},
+        {"repo": "cace", "file": "cace/modules/angular.py", "start": 193, "end": 209, "must": "result //= factorial(lxly)", "caption": "多项式系数 l!/(lx! ly! lz!)"}
+      ]
+    },
+    {
+      "stage": "interaction",
+      "title": "消息传递（可选）：在 A/B 特征上再传一轮",
+      "plain": "Bchi 消息用邻居 j 的不变量 B_j 经小 MLP 得到权重，乘到原始边基上（相当于随环境变化的“有效元素权重”）；Ar 消息把邻居的 A_j 乘以可学习的指数衰减 a·exp(−r/r0)·f_cut；Memory 项保留自身 A_i 的一部分（初值 0.25）。三者合并（前两项乘 1/√n̄，n̄=avg_num_neighbors）后重新对称化得到新的 B。类默认三种消息都开，水示例只用 Bchi；每多一层，感受野扩大一个 r_c。",
+      "math": "\\tilde A^{(t+1)}_{i}=\\frac{1}{\\sqrt{\\bar n}}\\sum_{j\\in\\mathcal N(i)}\\Big[W\\big(h(B^{(t)}_j)\\,e_{ji}\\big)+a^{(l)}_{nc}\\,e^{-r_{ij}/r^{(l)}_{0,nc}}f_{\\rm cut}(r_{ij})\\,\\tilde A^{(t)}_{j}\\Big]+\\gamma^{(l)}_{nc}\\tilde A^{(t)}_{i},\\qquad B^{(t+1)}_i=\\mathrm{Sym}\\big(\\tilde A^{(t+1)}_i\\big)",
+      "code": [
+        {"repo": "cace", "file": "cace/representations/cace_representation.py", "start": 242, "end": 282, "must": "node_feat_A *= self.mp_norm_factor", "caption": "Memory + Bchi + Ar 消息 → 归一化 → 再对称化"},
+        {"repo": "cace", "file": "cace/modules/interaction.py", "start": 262, "end": 269, "must": "node_weight = self.hnet(features).reshape(n_nodes, self.nl, self.nc)", "caption": "MessageBchi：MLP(B_j) 权重 × 边基"},
+        {"repo": "cace", "file": "cace/modules/interaction.py", "start": 67, "end": 82, "must": "radial_decay = torch.exp(-1.0 * edge_lengths.view(n_edges, 1, 1) * invr0[None, :, :])", "caption": "MessageAr：可学习指数衰减 × 邻居 A_j"}
+      ]
+    },
+    {
+      "stage": "energy",
+      "title": "读出与总能：MLP 原子能求和 + E0",
+      "plain": "把初始层和每层消息传递后的 B 特征拼接成一个不变向量，送入 Atomwise MLP（train.py 默认 3 层、隐藏 [32,16]、SiLU，可加线性旁路）得到原子能，再按构型 scatter_sum。训练数据的能量会先减去各元素参考能 E0（AtomicData），推理时 CACECalculator 再把 E0 加回；“原子能之和”保证了能量的广延性。",
+      "math": "E=\\sum_i\\Big[\\mathrm{MLP}\\big(\\textstyle\\bigoplus_{t=0}^{T}B^{(t)}_i\\big)+\\mathbf w^{\\top}\\textstyle\\bigoplus_{t}B^{(t)}_i\\Big]+\\sum_i E_0(Z_i)",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/atomwise.py", "start": 158, "end": 187, "must": "y = self.outnet(features)", "caption": "Atomwise：MLP（+线性旁路）→ 按构型求和"},
+        {"repo": "cace", "file": "cace/data/atomic_data.py", "start": 146, "end": 147, "must": "energy -= sum(atomic_energies.get(Z, 0) for Z in atomic_numbers)", "caption": "训练标签先减去 E0"},
+        {"repo": "cace", "file": "cace/calculators/cace_calculator.py", "start": 144, "end": 148, "must": "(energy_output + e0) * self.energy_units_to_eV", "caption": "推理时加回 E0"}
+      ]
+    },
+    {
+      "stage": "forces",
+      "title": "力：总能量对坐标的自动微分",
+      "plain": "Forces 输出模块对总能量做 torch.autograd.grad，得到严格保守的力；训练时 create_graph=True，让力误差也能反传到参数。坐标的 requires_grad 由 NeuralNetworkPotential.initialize_derivatives 自动打开。接了 LES 时求导对象是“短程 + 长程”的总能，所以力自动包含长程静电贡献。",
+      "math": "\\mathbf F_i=-\\frac{\\partial E}{\\partial \\mathbf r_i}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/forces.py", "start": 52, "end": 69, "must": "forces, virials, stress = get_outputs(", "caption": "Forces.forward"},
+        {"repo": "cace", "file": "cace/modules/utils.py", "start": 13, "end": 43, "must": "torch.autograd.grad(", "caption": "compute_forces"},
+        {"repo": "cace", "file": "cace/models/atomistic.py", "start": 57, "end": 67, "must": "data[p].requires_grad_(True)", "caption": "initialize_derivatives：坐标设为可求导"}
+      ]
+    },
+    {
+      "stage": "stress",
+      "title": "应力：对“虚拟对称应变”求导",
+      "plain": "需要应力时，Preprocess 先引入一个全零、可求导的对称应变 ε，让坐标、晶胞和周期平移都随之形变；能量对 ε 的导数除以体积即为应力，与力在同一次反传中得到。CACECalculator(compute_stress=True) 输出 Voigt 形式应力，可用于 NPT 与晶胞优化。",
+      "math": "\\mathbf r_i\\to\\mathbf r_i(\\mathbf 1+\\boldsymbol\\varepsilon),\\ \\mathbf C\\to\\mathbf C(\\mathbf 1+\\boldsymbol\\varepsilon),\\qquad \\boldsymbol\\sigma=\\frac{1}{V}\\frac{\\partial E}{\\partial\\boldsymbol\\varepsilon}\\Big|_{\\varepsilon=0}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/utils.py", "start": 126, "end": 145, "must": "symmetric_displacement = 0.5 * (", "caption": "get_symmetric_displacement"},
+        {"repo": "cace", "file": "cace/modules/utils.py", "start": 55, "end": 73, "must": "inputs=[positions, displacement]", "caption": "compute_forces_virials：一次反传得到力与维里/应力"}
+      ]
+    },
+    {
+      "stage": "longrange",
+      "title": "长程：LES 隐式电荷 + Ewald 求和（CACE 是 LES 的发源地）",
+      "plain": "LES（Latent Ewald Summation）用一个读出头从不变特征预测每个原子的“隐式电荷” q_i——不需要电荷标签，只靠能量/力监督学到；再由 EwaldPotential 在倒空间做高斯屏蔽的 Ewald 求和（k ≤ 2π/dl，σ 为高斯宽度；非周期体系改用 erf 屏蔽的实空间直接求和），用 FeatureAdd 与短程能相加。仓库还提供电负性均衡 ChargeEq（带总电荷约束）、exponent=6 的 r⁻⁶ 型 Ewald，以及调用外部 les 库的 LesWrapper（隐式偶极/四极/极化率）。",
+      "math": "q_i=\\mathrm{MLP}_q(B_i),\\quad S(\\mathbf k)=\\sum_i q_i e^{i\\mathbf k\\cdot\\mathbf r_i};\\qquad E_{\\rm LR}=\\frac{1}{V}\\sum_{0<k\\le 2\\pi/dl}\\frac{e^{-\\sigma^2k^2/2}}{k^2}\\,|S(\\mathbf k)|^2-\\frac{\\sum_i q_i^2}{\\sigma(2\\pi)^{3/2}},\\qquad E=E_{\\rm SR}+E_{\\rm LR}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/ewald.py", "start": 402, "end": 422, "must": "S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0)", "caption": "compute_potential_triclinic：结构因子 S(k) 与倒空间能量"},
+        {"repo": "cace", "file": "cace/modules/feature_mix.py", "start": 19, "end": 27, "must": "result += data[feature_key]", "caption": "FeatureAdd：短程能 + Ewald 能"},
+        {"repo": "cace", "file": "cace/modules/charge_eq.py", "start": 95, "end": 104, "must": "q_eq, lambda_eq = self._compute_q_eq(A_now, chi_now, J_i_now, system_charge_now)", "caption": "ChargeEq：带总电荷约束的 Qeq"}
+      ]
+    },
+    {
+      "stage": "output",
+      "title": "更多性质：极化、Born 有效电荷、外电场",
+      "plain": "有了隐式电荷就能算极化（Polarization 模块，电荷先去均值）：非周期体系 P=Σq_i r_i；周期体系（pbc=True）用 Berry 相位型的复数表达，避免原子跨边界时 P 跳变。再用通用 Grad 模块对坐标求导得到 Born 有效电荷 Z*=∂P/∂r（复数时分别对实部和虚部求导），可用于 IR 光谱；给定 external_field 时，CACECalculator 会把 Z*·E 加到力上做外电场 MD。",
+      "math": "\\mathbf P=\\sum_i q_i\\mathbf r_i,\\quad P_\\alpha=\\frac{L_\\alpha}{2\\pi i}\\sum_i q_i e^{2\\pi i s_{i\\alpha}}\\ (\\text{PBC});\\qquad Z^{*}_{i,\\alpha\\beta}=\\frac{\\partial P_\\alpha}{\\partial r_{i\\beta}}",
+      "code": [
+        {"repo": "cace", "file": "cace/modules/polarization.py", "start": 54, "end": 68, "must": "polarization = torch.sum(q_now * r_now, dim=0)", "caption": "Polarization.forward"},
+        {"repo": "cace", "file": "cace/modules/polarization.py", "start": 76, "end": 82, "must": "S = torch.sum(q_now * phase, dim=0)", "caption": "compute_pol_pbc：Berry 相位型极化"},
+        {"repo": "cace", "file": "cace/modules/grad.py", "start": 26, "end": 44, "must": "gradient_real = torch.autograd.grad(", "caption": "Grad：∂P/∂r → BEC"}
+      ]
+    }
+  ],
+  "hyper": [
+    {"name": "cutoff r_c", "value": "4.0 Å（train.py 默认）；水示例 5.5 Å", "note": "截断半径", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 16, "end": 16, "must": "--cutoff"}},
+    {"name": "n_rbf", "value": "6（train.py 默认；BesselRBF 类默认 8）", "note": "Bessel 径向基个数", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 22, "end": 22, "must": "--n_rbf"}},
+    {"name": "n_radial_basis", "value": "8（train.py 默认）；水示例 12", "note": "径向线性混合后的径向通道数", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 32, "end": 32, "must": "--n_radial_basis"}},
+    {"name": "n_atom_basis C", "value": "3 → 边通道 C² = 9", "note": "元素嵌入维度", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 31, "end": 31, "must": "--n_atom_basis"}},
+    {"name": "max_l", "value": "3", "note": "单项式角基最高总次数", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 33, "end": 33, "must": "--max_l"}},
+    {"name": "max_nu", "value": "3（代码支持 ≤ 4）", "note": "对称化阶数 → 每次最多 4 体", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 34, "end": 34, "must": "--max_nu"}},
+    {"name": "num_message_passing", "value": "1", "note": "消息传递次数", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 35, "end": 35, "must": "--num_message_passing"}},
+    {"name": "type_message_passing", "value": "类默认 [M, Ar, Bchi]；水示例仅 ['Bchi']", "note": "消息类型", "code": {"repo": "cace", "file": "examples/water_train.py", "start": 56, "end": 70, "must": "type_message_passing=['Bchi']"}},
+    {"name": "avg_num_neighbors", "value": "10.0", "note": "消息归一化 1/√n̄", "code": {"repo": "cace", "file": "cace/representations/cace_representation.py", "start": 46, "end": 46, "must": "avg_num_neighbors: float = 10.0"}},
+    {"name": "cutoff_fn_p", "value": "5（train.py）；PolynomialCutoff 类默认 6", "note": "多项式包络阶数", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 27, "end": 27, "must": "--cutoff_fn_p"}},
+    {"name": "Atomwise MLP", "value": "3 层，隐藏 [32, 16]", "note": "原子能读出网络", "code": {"repo": "cace", "file": "cace/tools/parser_train.py", "start": 39, "end": 40, "must": "--atomwise_hidden"}},
+    {"name": "Ewald dl / σ", "value": "dl = 2.0，σ = 1.0", "note": "LES 的 k 空间分辨率（k ≤ 2π/dl）与高斯宽度", "code": {"repo": "cace", "file": "cace/modules/ewald.py", "start": 9, "end": 11, "must": "dl=2.0"}}
+  ],
+  "speedNotes": [
+    "主要开销是边基张量 [边数 × n_rbf × N_l × C²] 的构建与 scatter_sum；角基只是单项式递推乘法，比球谐 + CG 张量积便宜得多。",
+    "对称化只在节点上、且只在同一 (n,c) 通道内相乘，不需要 CG 系数；但 Symmetrizer 按 (lx,ly,lz) 组合逐项 Python 循环，ν=4 或大 max_l 时组合数迅速膨胀（einsum 版 Symmetrizer_Tensor 注释称 ν=4 不高效）。",
+    "默认 C=3（9 个边通道）、1 层消息传递，参数量很小；benchmark/md-opt.py 用 torch.compile(mode='reduce-overhead') 编译神经网络部分，benchmark/README 报告提速（如 L40S 38 s → 26 s、RTX PRO 6000 30 s → 19 s）。",
+    "LES 的 Ewald 部分：k 点数随体积/dl³ 增长，结构因子为 O(N·N_k)，且每个构型在 Python 循环中单独计算；因含复数运算，md-opt.py 把 Ewald 模块排除在 torch.compile 之外，并可选固定 k 网格（static_Nk）。",
+    "力与应力通过一次 autograd 反传同时得到。"
+  ],
+  "weakNotes": [
+    "纯短程 CACE 的感受野为 (T+1)·r_c（默认 4 Å 截断、T=1 时约 8 Å；水示例约 11 Å），截断外的静电 1/r 与色散 r⁻⁶ 尾巴全部丢失。",
+    "仓库不附带通用基础模型，是否含色散、用什么泛函完全取决于用户自己的训练数据；没有内置 D3，EwaldPotential(exponent=6) 可作为学习型 r⁻⁶ 长程项。",
+    "LES 只用能量/力即可学出隐式电荷并做 Ewald 静电，适合离子液体、电解质、界面、带电缺陷等短程模型会失败的体系；需要显式总电荷约束时可用 ChargeEq（Qeq）。",
+    "可选 charge_spin_key 输入每原子标量（如总电荷/自旋）；外电场可通过 EwaldPotential 的 external_field 或计算器中的 BEC·E 力修正引入。"
+  ],
+  "downstreamNotes": [
+    "保守力 + 多项式平滑包络 → 适合 MD（NVE/NPT）和几何优化；ASE 计算器支持应力，可做 NPT 与晶胞弛豫（benchmark 即用 ASE NPT）。",
+    "力场二阶可微，可用有限位移或 autograd 做声子；仓库无专门 Hessian 接口。",
+    "LES 隐式电荷 → 极化 P 与 BEC，可算 IR 光谱、介电响应和外电场 MD（CACECalculator 的 external_field 选项）。",
+    "max_l_out>0 时输出 l>0 张量特征，TensorReadout + LesWrapper 可读出隐式偶极/四极/极化率（扩展多极 LES）。"
+  ],
+  "strengths": ["纯笛卡尔实现：无需球谐与 CG 系数，代码直观、角基计算便宜", "ACE 式多体基（ν 可到 4）+ 可选消息传递", "低维元素嵌入：边通道 C² 与元素种类数无关，适合多元素体系", "LES 长程静电的原生家园：隐式电荷、Ewald、Qeq、极化/BEC、外电场一应俱全", "模块化 NeuralNetworkPotential，可自由拼装输出头"],
+  "weaknesses": ["CC BY-NC 4.0 许可，禁止商用", "无通用预训练基础模型，仓库内无 LAMMPS 接口", "对称化逐项 Python 循环、缺少融合 GPU 内核，高 ν/高 l 时组合数爆炸", "单项式角基未去迹，存在线性冗余（如 x̂²+ŷ²+ẑ²=1）"],
+  "pretrained": ["benchmark/best_model.pth（MD 基准脚本附带的液体体系模型，非通用基础模型）"],
+  "mbdKeys": [],
+  "arenaKeys": []
+}

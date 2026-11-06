@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据与方法 · MLFF 架构图解</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="data/index.js"></script>
+<script src="data/benchmarks.js"></script>
+<script src="assets/common.js"></script>
+</head>
+<body>
+<main class="wrap">
+<h1>数据与方法</h1>
+<p class="muted">这个网站怎么做出来的、数字从哪里来、哪些地方需要谨慎看待。</p>
+
+<h2 id="method">做法</h2>
+<div class="grid g2">
+  <div class="card"><h3>① 源码快照</h3><p>把 <b id="n-repos"></b> 个上游仓库在固定 commit 浅克隆下来（见下方 <a href="#manifest">源码快照</a>）。模型页上的每一段代码都是从这些 commit 的文件中按行号截取的原文，并附带指向该 commit 的永久链接，可以逐行核对。</p></div>
+  <div class="card"><h3>② 逐个阅读、统一建模</h3><p>为 <b id="n-models"></b> 个架构 / 模块逐一阅读源码与官方配置，按同一模板整理：从“输入构型”到“其他性质”的 11 个流水线阶段（每步有通俗解释、公式与源码），统一的架构字段（等变性、l<sub>max</sub>、体序、截断、层数、力的类型、长程、色散……），关键超参数、预训练权重与注意事项。</p></div>
+  <div class="card"><h3>③ 自动校验</h3><p>构建脚本检查每个条目：必填字段齐全、取值合法；每段代码引用的文件存在、行号范围有效、摘录不超过 45 行，并且<b>必须包含指定的锚点字符串</b>——如果行号错位，构建会直接失败。基准条目的键名也会与基准仓库核对。</p></div>
+  <div class="card"><h3>④ 基准与图表</h3><p>基准数字由脚本直接从 Matbench Discovery 的 <code>models/*/*.yml</code> 与 MLIP Arena 的结果文件中提取，不手工抄录（见 <a href="bench.html">基准数据</a>）。网站是纯静态页面，所有图表都在浏览器中由这些数据实时绘制。</p></div>
+</div>
+
+<h2 id="curated">能力归类规则</h2>
+<p>分析页与对比页的长程 / 色散 / 感受野图表使用一份从各模型架构字段提炼出来的归类表（<code>data/curated.json</code>）。规则如下：</p>
+<div class="table-wrap free"><table>
+  <thead><tr><th>字段</th><th>含义</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td><code>rc</code></td><td>代表性 / 基础模型发布配置的截断半径（Å）</td><td>数值；配置不同时以 <code>cfg</code> 指明的那个为准</td></tr>
+    <tr><td><code>T</code></td><td>扩大感受野的消息传递层数</td><td>0 = 严格局域（描述符、线性模型、Allegro 等）</td></tr>
+    <tr><td><code>rf</code></td><td>名义感受野（Å）</td><td>T = 0 时等于 r<sub>c</sub>，否则 ≈ T × r<sub>c</sub>；空 = 全局或不适用</td></tr>
+    <tr><td><code>lr</code></td><td>长程静电</td><td><span class="cell-none">无</span>；<span class="cell-optional">可选扩展</span> = 官方代码提供开关或变体，但默认 / 基础模型不启用；<span class="cell-builtin">内置</span> = 默认架构的一部分；<span class="cell-core">本身即长程模块</span></td></tr>
+    <tr><td><code>disp</code></td><td>色散（vdW）</td><td><span class="cell-none">无</span>；<span class="cell-addon">外挂 D3/D4</span> = 官方示例或计算器支持叠加经验色散；<span class="cell-optional">可选内置项</span>；<span class="cell-builtin">内置</span>；<span class="cell-core">本身即色散模块</span></td></tr>
+    <tr><td><code>qs</code></td><td>总电荷 / 自旋输入</td><td><span class="cell-none">无</span> / <span class="cell-optional">可选</span> / <span class="cell-builtin">内置</span></td></tr>
+    <tr><td><code>props</code></td><td>官方提供接口的额外输出</td><td>Hessian、原子电荷、偶极、极化率、Born 有效电荷、磁矩 / 自旋、不确定度</td></tr>
+  </tbody></table></div>
+<p class="small muted">“训练数据是否含色散”是另一回事：一个架构即使没有任何色散项，用含 D3 / VV10 的数据训练后也能在截断内学到色散（见分析页 B2、B5）。</p>
+
+<h2 id="scores">评分（1–5）</h2>
+<p>每个完整势在 6 个维度上相对于整个领域打分，每个分数都附一句理由（见各模型页“评分”一节）。这是编辑判断，用来快速对比，不是测量值：</p>
+<div class="table-wrap free"><table>
+  <thead><tr><th>维度</th><th>看什么</th><th>锚点</th></tr></thead>
+  <tbody>
+    <tr><td>速度</td><td>每原子推理吞吐</td><td>5 = 描述符 / 线性模型（NEP、SNAP、ACE、压缩后的 DeePMD）；3 = MACE 级；1 = 大型等变 Transformer（EquiformerV2、eSEN-30M、UMA-L）</td></tr>
+    <tr><td>表达力</td><td>体序 + 角分辨率 + 容量</td><td>5 = 高体序等变（MACE、完备 ACE）；1 = 只有两体 / 径向</td></tr>
+    <tr><td>长程 / 弱相互作用</td><td>截断之外的物理</td><td>1 = 严格局域无扩展；2 = 只有消息传递感受野；3 = 可选 D3 / 简单电荷；4 = 内置静电或色散；5 = 电荷平衡 + 静电 + 色散（+ 总电荷 / 自旋）</td></tr>
+    <tr><td>并行可扩展性</td><td>大体系、空间分解、多 GPU MD</td><td>5 = 严格局域且有 LAMMPS 并行（Allegro、NEP、DeePMD）；1 = 只能整图计算</td></tr>
+    <tr><td>物理约束</td><td>保守力、截断处光滑、广延性、短程排斥 / ZBL、对称性精确</td><td>5 = 全部满足</td></tr>
+    <tr><td>性质覆盖</td><td>E / F / S 之外的官方输出</td><td>1 = 只有能量和力</td></tr>
+  </tbody></table></div>
+
+<h2 id="caveats">已知局限</h2>
+<div class="callout warn"><ul class="notes">
+  <li><b>一个架构，多种配置</b>：截断、层数、l<sub>max</sub> 等随发布权重而变；本站取“代表性 / 基础模型”配置，并在模型页写明来源。部分基准条目与源码默认配置不一致，例如 CHGNet 0.3.0 源码的建图半径为 6 Å而 MBD 记 5 Å、Orb v2 源码为 6 Å而 MBD 记 10 Å、AlphaNet 的层数与截断（MBD 的 MPtrj 条目记 6 层 / 6 Å，配置默认更小），均已在对应模型页标注。</li>
+  <li><b>代码版本</b>：fairchem v2 主分支已不再包含原始 eSCN / EquiformerV2 / 早期 eSEN 的实现；相关页面引用的是当前 fairchem 中保留的代码与 equiformer_v2 原仓库。MBD 中的 eSEN-30M 权重来自 fairchem v1，与当前代码可能有差异。</li>
+  <li><b>源码内部不一致</b>：如 schnetpack README 称默认表示为 SchNet，而配置文件实际默认 PaiNN；FitSNAP（SNAP 页）的 LICENSE 为 GPL-2.0 而 pyproject 分类器写 MIT；NewtonNet 的 license.txt 为学术非商用而 pyproject 写 MIT。本站以实际代码 / LICENSE 文件为准，并在模型页写明。</li>
+  <li><b>文献信息</b>：少数条目（如 aenet、ANI、GAP、eSCN、NewtonNet）的完整论文标题或作者在仓库中找不到出处，按文献整理；EqNorm、MACE-SOYO、Ewald MP 暂无正式论文链接。少量公式（如 GAP 所依赖的 libAtoms 中的截断函数）不在克隆的仓库里，按文献给出并在页面注明。</li>
+  <li><b>基准的边界</b>：MBD 与 Arena 只覆盖部分模型，且以 PBE 为参考；它们几乎不测弱相互作用、带电体系与分子体系。速度数字只在相同硬件内比较。</li>
+  <li><b>评分与归类</b>是编辑判断；如发现错误，欢迎在 GitHub 提 issue。</li>
+</ul></div>
+
+<h2 id="manifest">源码快照</h2>
+<p class="small muted">每个仓库的固定 commit 与提交日期；“用于”列出引用了该仓库代码的架构页面。</p>
+<div class="filters"><input type="search" id="q" placeholder="搜索仓库或模型…"><span class="muted small" id="count"></span></div>
+<div class="table-wrap"><table id="tbl-manifest"></table></div>
+
+<h2 id="reproduce">复现</h2>
+<div class="card"><p>仓库根目录下运行（需要 git 与 Python 3；提取基准数据还需要 numpy 与 PyYAML）：</p>
+<pre class="codebox" style="padding:12px;white-space:pre-wrap"><code>bash tools/fetch_sources.sh          # 按 data/MANIFEST.tsv 中的固定 commit 克隆 sources/
+python3 tools/extract_benchmarks.py  # 从 MBD / Arena 原始文件生成 docs/data/benchmarks.js
+python3 tools/build_data.py          # 校验 data/models/*.json，截取源码，生成 docs/data/*.js
+python3 -m http.server -d docs 8000  # 本地预览 http://localhost:8000</code></pre>
+<p class="small muted">给 fetch_sources.sh 加 <code>--latest</code> 则改为拉取各仓库最新版本；源码行号如有偏移，build_data.py 会逐条报出失效的引用。</p></div>
+</main>
+<script>
+mountChrome("about.html");
+const D = window.MLFF;
+const repoUsers = {};
+D.models.forEach((m) => (m.repos || []).forEach((r) => (repoUsers[r] = repoUsers[r] || []).push(m)));
+const rows = Object.entries(D.manifest).map(([name, s]) => ({ name, ...s, users: repoUsers[name] || [] }));
+document.getElementById("n-repos").textContent = rows.length;
+document.getElementById("n-models").textContent = D.models.length;
+const treeUrl = (s) => (s.url.includes("gitlab.com") ? `${s.url}/-/tree/${s.commit}` : `${s.url}/tree/${s.commit}`);
+const tbl = document.getElementById("tbl-manifest");
+function render() {
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const rs = rows.filter((r) => !q || [r.name, r.url, ...r.users.map((m) => m.name)].join(" ").toLowerCase().includes(q));
+  tbl.innerHTML = `<thead><tr><th class="sortable">仓库</th><th class="sortable">commit</th><th class="sortable">日期</th><th>用于</th></tr></thead><tbody>${
+    rs.map((r) => `<tr><td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a></td>
+      <td data-v="${esc(r.commit)}"><a href="${esc(treeUrl(r))}" target="_blank" rel="noopener"><code>${esc(r.commit.slice(0, 10))}</code></a></td>
+      <td>${esc(r.date)}</td><td>${r.users.map((m) => `<a href="${modelLink(m)}">${esc(m.name)}</a>`).join("、") || '<span class="muted">基准 / 参考</span>'}</td></tr>`).join("")}</tbody>`;
+  makeSortable(tbl);
+  document.getElementById("count").textContent = `${rs.length} / ${rows.length} 个仓库`;
+}
+document.getElementById("q").addEventListener("input", render);
+render();
+</script>
+</body>
+</html>
