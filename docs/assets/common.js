@@ -133,6 +133,7 @@ const PAGES = [
   ["models.html", "模型库"],
   ["stages.html", "逐步对比"],
   ["compare.html", "架构对比"],
+  ["foundry.html", "架构工坊"],
   ["analysis.html", "深度分析"],
   ["bench.html", "基准数据"],
   ["glossary.html", "术语表"],

@@ -51,6 +51,7 @@
   </tbody></table></div>
 
 <h2 id="caveats">已知局限</h2>
+<div class="callout"><b>Architecture Foundry</b> 使用独立的人工模块目录与契约规则，检查表示、边界、能量汇总、求导路径和物理项冲突。其开销与表达力分数是公开公式的设计启发式，不沿用原模型的实测性能；所有混搭的准确度均为未评测。自定义模块只验证声明，不验证实现。完整规则与来源见 <a href="foundry.html#method">架构工坊的方法说明</a>。DPA-4.1 暂以有来源的 DPA-4 / SeZM 作为参考骨架，独立版本尚待核对。</div>
 <div class="callout warn"><ul class="notes">
   <li><b>一个架构，多种配置</b>：截断、层数、l<sub>max</sub> 等随发布权重而变；本站取“代表性 / 基础模型”配置，并在模型页写明来源。部分基准条目与源码默认配置不一致，例如 CHGNet 0.3.0 源码的建图半径为 6 Å而 MBD 记 5 Å、Orb v2 源码为 6 Å而 MBD 记 10 Å、AlphaNet 的层数与截断（MBD 的 MPtrj 条目记 6 层 / 6 Å，配置默认更小），均已在对应模型页标注。</li>
   <li><b>代码版本</b>：fairchem v2 主分支已不再包含原始 eSCN / EquiformerV2 / 早期 eSEN 的实现；相关页面引用的是当前 fairchem 中保留的代码与 equiformer_v2 原仓库。MBD 中的 eSEN-30M 权重来自 fairchem v1，与当前代码可能有差异。</li>

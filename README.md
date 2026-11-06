@@ -20,6 +20,7 @@
 | `model.html?id=mace` | 单个模型逐步推导，附源码片段 |
 | `stages.html` | 按流水线阶段横向对比所有模型 |
 | `compare.html` | 任选多个模型并排比较 |
+| `foundry.html` | Architecture Foundry：模块拼装、自定义接口、兼容性检查、设计特征评分与 JSON 蓝图 |
 | `analysis.html` | 底层结构分析：速度、弱相互作用、下游性质 |
 | `bench.html` | 基准数据表：Matbench Discovery 74 个条目，以及 MLIP Arena 的稳定性、燃烧、状态方程数据 |
 | `glossary.html` | 术语表 |
@@ -37,6 +38,21 @@ data/
   MANIFEST.tsv  64 个源码仓库及其固定 commit
 tools/       抓取源码、提取基准、生成数据的脚本
 sources/     源码快照（不入库，由 fetch_sources.sh 生成）
+tests/       Foundry 契约、评分、蓝图与静态页面回归测试（Node.js 内置测试器）
+```
+
+## Architecture Foundry · 架构工坊
+
+- 13 个阶段覆盖输入、建图、几何、嵌入、交互、读出、静电、色散、短程排斥、总能量、力、应力与性质输出。可以逐阶段替换模块，或自行声明模块的输入 / 输出、边界、可求导性、对称性与复杂度。
+- 8 个参考骨架：MACE-POLAR、DPA-4.1（暂按已核对的 DPA-4 / SeZM 展示，独立版本待核对）、UMA、AlphaNet，以及 MACE、NequIP、SchNet、DeepPot-SE。模块与模板均有来源；不把可选扩展视为基础模型默认功能。
+- 实时报告缺失接口、表示不匹配、边界 / 求导冲突、未纳入总能量的物理项、色散重复计数等。冲突组合保留为草稿，但不能导出为相容蓝图。自定义模块仅验证声明，不保证工程可连接。
+- 评分公开依据与公式，覆盖计算开销、表达力 / 精度潜力、物理约束、显式长程、并行友好度与输出覆盖。**真实准确度始终为未评测**；评分不是 MAE、吞吐或显存预测，也不继承参考模型的基准成绩。
+- 草稿仅自动保存在当前浏览器。JSON 导出包括模块契约、参数、训练计划、评估与来源；导入时校验格式并重新评估，不信任文件中自报的成绩。蓝图不是可运行配置或模型权重。
+
+该模块不增加前端依赖。人工目录在 [docs/data/foundry.js](docs/data/foundry.js)，纯规则引擎在 [docs/assets/foundry-core.js](docs/assets/foundry-core.js)，均独立于原有生成数据。运行相关测试（Node.js 18+）：
+
+```bash
+node --test tests/foundry.test.cjs
 ```
 
 ## 复现

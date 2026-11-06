@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Architecture Foundry：从已有 MLIP 架构拆解出基础模块，自定义力场设计，检查概念接口并比较复杂度与能力取舍。">
+<title>Architecture Foundry · MLFF 架构图解</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/foundry.css">
+<script defer src="data/index.js"></script>
+<script defer src="assets/common.js"></script>
+<script defer src="data/foundry.js"></script>
+<script defer src="assets/foundry-core.js"></script>
+<script defer src="assets/foundry.js"></script>
+</head>
+<body class="foundry-page">
+<section class="hero foundry-hero">
+  <div class="inner">
+    <div class="foundry-eyebrow">MLIP ARCHITECTURE LAB</div>
+    <h1>Architecture Foundry <span>架构工坊</span></h1>
+    <p>不止比较模型，也试着设计一个。把已有力场拆成可理解的模块，选择自己的组合，检查接口契约，观察物理能力与计算代价如何取舍。</p>
+    <div class="stats" id="foundry-stats"></div>
+    <div class="btns"><a class="btn" href="#workbench">开始拼装 ↓</a><a class="foundry-hero-link" href="#method">先了解评分与边界 →</a></div>
+  </div>
+</section>
+<main class="wrap">
+  <noscript><div class="callout warn">架构工坊需要 JavaScript。请启用脚本后使用模块选择与兼容性检查。</div></noscript>
+  <div class="callout warn"><b>这是设计蓝图，不是可运行模型。</b>这里检查表示、输入、求导和物理项之间的概念契约，不连接工程代码、不复用权重、不训练模型。<strong>相容不等于实现可用；表达力评分不等于实测准确度。</strong></div>
+  <section aria-labelledby="presets-title">
+    <h2 id="presets-title"><span class="foundry-section-number">01</span> 从一个真实架构开始</h2>
+    <p class="muted small">模板展示“选了哪些模块”，不代表完整 checkpoint 配置。切换模板会替换当前选择与参数，保留自定义模块库。</p>
+    <div id="preset-list" class="foundry-presets"></div>
+    <div id="template-context" class="card foundry-template-context"></div>
+  </section>
+
+  <section aria-labelledby="settings-title">
+    <h2 id="settings-title"><span class="foundry-section-number">02</span> 定义你的设计问题</h2>
+    <form id="design-settings" class="card">
+      <div class="foundry-settings">
+        <label class="foundry-wide">设计名称<input id="design-name" name="name" maxlength="100" required></label>
+        <label>体系边界<select id="design-boundary"><option value="periodic">周期材料 / 晶胞</option><option value="molecule">非周期分子</option></select></label>
+        <label>力的目标<select id="design-target"><option value="conservative">能量一致的保守力</option><option value="exploration">非保守探索（直接力可选）</option></select></label>
+        <label class="foundry-wide">训练标签是否已包含色散<select id="design-dispersion"><option value="unknown">未知，尚需核对</option><option value="included">已包含（例如 D3 / VV10）</option><option value="excluded">不包含 / 已定义去色散残差</option></select></label>
+      </div>
+      <details class="foundry-parameter-details">
+        <summary>设计参数与规模假设 <span class="muted small">影响开销档位和名义感受野</span></summary>
+        <p class="small muted">参数初值仅用于结构示意，不是完整发布配置。C、l_max 在不同框架中的含义并不完全相同；隐藏 irreps、径向基、MPS 键维数等仍需单独配置。M 是独立的邻居数假设，改变 r_c 不会自动改变 M。</p>
+        <div class="foundry-settings" id="parameter-fields"></div>
+      </details>
+      <label class="foundry-training">数据 / 训练 / 验证计划（可选）
+        <textarea id="design-training" rows="2" maxlength="3000" placeholder="记录元素覆盖、数据集、DFT 泛函、单位、E/F/应力标签与损失、独立测试集、MD 与部署验证计划……"></textarea>
+      </label>
+    </form>
+  </section>
+
+  <section id="workbench" aria-labelledby="workbench-title">
+    <h2 id="workbench-title"><span class="foundry-section-number">03</span> 拼装与检查</h2>
+    <div class="foundry-toolbar">
+      <p class="muted small">点击左侧阶段，选择中间模块。冲突不会偷偷改掉你的选择。</p>
+      <div class="btns">
+        <button type="button" class="btn" id="export-blueprint" disabled>导出 JSON 蓝图</button>
+        <button type="button" class="btn ghost" id="import-blueprint">导入蓝图 / 草稿</button>
+        <button type="button" class="btn ghost" id="reset-blueprint">重置当前模板</button>
+        <input type="file" id="blueprint-file" accept=".json,application/json" hidden>
+      </div>
+    </div>
+    <p id="storage-status" class="small muted" role="status"></p>
+    <div id="storage-error" class="callout warn" role="alert" hidden></div>
+    <div id="foundry-notice" class="callout" role="status" hidden></div>
+    <div class="foundry-workbench">
+      <nav id="stage-list" class="foundry-stage-list" aria-label="选择架构阶段"></nav>
+      <section class="card foundry-module-panel" aria-labelledby="module-stage-title">
+        <div id="module-heading"></div>
+        <label class="foundry-search">筛选此阶段模块<input type="search" id="module-search" placeholder="名称、算法或模型关键词"></label>
+        <fieldset id="module-options"><legend class="visually-hidden">选择本阶段的模块</legend></fieldset>
+        <button class="btn ghost" id="open-custom" type="button">+ 定义这个阶段的模块</button>
+      </section>
+      <aside class="foundry-assessment" aria-label="设计评估">
+        <section class="card" aria-labelledby="compatibility-title">
+          <h3 id="compatibility-title">概念兼容性</h3>
+          <div id="compatibility-summary" role="status" aria-live="polite"></div>
+          <div id="compatibility-issues"></div>
+        </section>
+        <section class="card" aria-labelledby="scores-title">
+          <h3 id="scores-title">设计特征评分 <small>1–5</small></h3>
+          <p class="foundry-accuracy"><b>实测准确度</b><span>未知 · 未训练 / 未评测</span></p>
+          <div id="foundry-scores"></div>
+          <a class="small" href="#method">如何打分？为什么不能预测 MAE？</a>
+        </section>
+      </aside>
+    </div>
+    <section class="card foundry-complexity" aria-labelledby="complexity-title">
+      <h3 id="complexity-title">算法复杂度与感受野</h3>
+      <p id="receptive-field"></p>
+      <p class="muted small">总成本是各条已选路径之和，不能只看主干。N：原子数；M：平均邻居数；E=N·M；T：消息层数；C：通道；l：方向阶数；ν：收缩阶；K：倒空间向量数；U：非局域更新次数。公式忽略实现常数，不是 FLOPs、时延或显存预测。</p>
+      <details><summary>逐模块查看复杂度</summary><div id="complexity-table" class="table-wrap free"></div></details>
+    </section>
+  </section>
+
+  <details id="custom-builder" class="card foundry-custom">
+    <summary><strong>自定义模块工作台</strong> <span class="muted small">用显式输入 / 输出契约描述自己的算法</span></summary>
+    <p class="small muted">先复制一个阶段的接口，再修改声明。这里的“标量 / 球谐 / 向量”等表示必须对齐；同名接口仅代表设计约定，不代表张量维数、归一化、权重或软件 ABI 已经匹配。未知性能可以留空，不会被当成零开销或高准确度。</p>
+    <form id="custom-form">
+      <div class="foundry-settings">
+        <label>所属阶段<select id="custom-stage"></select></label>
+        <label>复制接口模板<select id="custom-base"></select></label>
+        <label class="foundry-wide">模块名称<input id="custom-name" maxlength="80" required placeholder="例如：我的局域多体交互"></label>
+        <label class="foundry-wide">算法说明<textarea id="custom-description" rows="2" maxlength="1600" required></textarea></label>
+        <label class="foundry-wide">文献 / 设计来源（可选 http(s) URL）<input id="custom-source" type="url" maxlength="500" placeholder="https://…"></label>
+      </div>
+      <div class="foundry-contract-edit">
+        <fieldset><legend>需要的上游输入</legend><div id="custom-requires" class="foundry-checkboxes"></div></fieldset>
+        <fieldset><legend>提供给下游的输出</legend><div id="custom-provides" class="foundry-checkboxes"></div></fieldset>
+      </div>
+      <div class="foundry-settings">
+        <label>边界支持<select id="custom-boundary"><option value="both">周期 + 非周期</option><option value="periodic">仅周期</option><option value="molecule">仅非周期</option></select></label>
+        <label>可求导阶数<select id="custom-derivatives"><option value="unknown">未知</option><option value="0">不提供导数</option><option value="1">至少一阶</option><option value="2">至少二阶</option></select></label>
+        <label>截断光滑性<select id="custom-smoothness"><option value="unknown">未知</option><option value="0">不保证连续</option><option value="1">至少 C¹</option><option value="2">至少 C²</option></select></label>
+        <label>对称性声明<select id="custom-symmetry"><option value="unknown">未知</option><option value="exact">构造性不变 / 等变</option><option value="approximate">近似 / 有实现局限</option><option value="none">无对称性保证</option></select></label>
+        <label>通信范围<select id="custom-locality"><option value="unknown">未知</option><option value="local">严格局域</option><option value="message">多跳消息传递</option><option value="global">全局</option></select></label>
+        <label>能量汇总的广延性<select id="custom-extensive"><option value="unknown">未知 / 不适用</option><option value="yes">广延求和</option><option value="no">非广延（例如原子平均）</option></select></label>
+        <label>开销自评 0–5（留空 = 未知）<input id="custom-cost" type="number" min="0" max="5" step="0.1" placeholder="不填则组合开销待定"></label>
+        <label>主干表达力自评 0–5（可选）<input id="custom-expressiveness" type="number" min="0" max="5" step="0.1" placeholder="非实测准确度"></label>
+        <label class="foundry-wide">复杂度声明<input id="custom-complexity" maxlength="250" required placeholder="例如 O(N·M·C²)，或“未知，待评估”"></label>
+      </div>
+      <label class="foundry-ack"><input type="checkbox" id="custom-ack" required> 我理解这些是自己的接口与物理性质声明，尚未经过实现验证；自评分会标明来源。</label>
+      <p id="custom-error" class="foundry-error-text" role="alert" hidden></p>
+      <div class="btns"><button class="btn" id="save-custom" type="submit">保存并选用模块</button><button class="btn ghost" id="cancel-custom" type="button">取消编辑</button></div>
+    </form>
+    <div id="custom-library"></div>
+  </details>
+
+  <section aria-labelledby="matrix-title">
+    <h2 id="matrix-title">这些基础架构分别选了什么？</h2>
+    <p class="muted small">固定模板的模块拆解，不随你的草稿改变。MACE-POLAR 与局域 MACE、总电荷条件化与显式静电、直接力与保守力分别列开。</p>
+    <div class="table-wrap" id="preset-matrix"></div>
+  </section>
+
+  <section id="method" aria-labelledby="method-title">
+    <h2 id="method-title">契约、评分与证据边界</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h3>检查的是算法契约，不是“能 pip install”</h3>
+        <p>按顺序传递结构、几何表示、特征、原子能 / 电荷、修正能、总能量、力与性质。检查缺失输入、表示不匹配、边界条件、完整能量的导数路径、直接力与保守目标冲突、色散重复计数以及周期偶极限制。</p>
+        <p>自定义模块还必须声明必需的阶段接口。通过仅说明<strong>这些声明没有发现规则内的冲突</strong>；未证明算法正确，也未检查框架、数值精度、权重维度、单位换算、许可证或部署接口。需要真正的适配、训练与验证才能成为 MLIP package。</p>
+      </div>
+      <div class="card">
+        <h3>准确度不能从模块名称推算</h3>
+        <p>所有组合的能量 / 力 MAE、稳定性和应用域准确度都标为<strong>未评测</strong>。表达力只是基于结构的编辑量表，数据覆盖、参考泛函、训练预算、损失和分布外误差没有被模拟。模板分数也不是原模型的基准分数。</p>
+        <p>实际验证应包含独立测试集上的 E/F/应力误差、旋转与置换测试、能量–力有限差分、截断连续性、MD 能量漂移及同硬件吞吐。已有模型的实测记录另见 <a href="bench.html">基准数据</a>，不会自动转移给混搭模型。</p>
+      </div>
+    </div>
+    <details class="card foundry-method-details">
+      <summary>展开可复核的评分公式（编辑规则 v1，不做综合排名）</summary>
+      <p>所有数值最终截到 [1,5] 并保留一位小数。每个模块的开销 / 表达力基数可在选项中查看；自定义模块若没有相关自评，就显示“待定”。</p>
+      <ul class="notes">
+        <li><b>开销档位（低分更省）</b> = 模块开销基数之和 + 0.25 log₂(N/1000) + 0.25 log₂(M/32) + 0.5 log₂(C/64) + 0.5 log₂(T_eff/2) + a + b。严格局域主干 T_eff=1，否则为 T。</li>
+        <li><b>表达力 / 精度潜力</b> = 主干基数 + 0.15 log₂(T_eff/2) + 0.15 log₂(C/64) + a + b。适用球谐 / SO(2) 主干时 a=0.1(l−2)，否则为 0；MACE 主干 b=0.15(ν−3)，否则为 0。这是容量提示，不是普适准确度排序。</li>
+        <li><b>物理约束</b> = 1 + 保守力 + 对称性 + 截断光滑性 + 广延性。完全满足每项加 1，已知近似 / 部分满足加 0.5，不满足加 0；未知声明不补成满分。</li>
+        <li><b>显式长程 / 色散</b> = 1 + 静电项×2 + PolarMACE 场更新 + 显式色散。只统计显式模块，不把电荷输入、多跳消息或含色散训练标签算成显式求解器。</li>
+        <li><b>空间并行友好度</b> = 5 − 消息通信罚项 min(2,T/4) − 全局运算罚项 1.5 − 全对枚举罚项 1；仅在对应项存在时扣分。输出覆盖 = 1 + 应力×0.5 + 额外输出契约数×0.75。</li>
+      </ul>
+      <p class="small muted">开销档位中的权重是公开的编辑启发式，不是 Big-O 的数值拟合。不要跨不同数据、硬件或精度把它解释为加速倍数。图构造、MPS 键维、张量积路径、极化更新数、倒空间分辨率、完整 Hessian 成本均需额外核算。</p>
+    </details>
+    <h3>模板来源与版本</h3>
+    <div id="foundry-sources"></div>
+    <p class="small muted">模块目录人工整理，核对日期 <span id="catalog-date"></span>。DPA-4.1 暂无已核对的独立配置，因此页面显式标为 DPA-4 / SeZM 参考骨架。其他模型可在 <a href="models.html">模型库</a>查看逐阶段源码，不能把尚未整理的模型自动视为已有模板。</p>
+  </section>
+</main>
+</body>
+</html>
