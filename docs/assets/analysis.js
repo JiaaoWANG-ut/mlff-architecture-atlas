@@ -209,7 +209,7 @@ const ck = fk.filter((r) => r.targets !== "EFS_D").map((r) => r.phonons["κ_SRME
 const med = (xs) => xs.length ? (xs.length % 2 ? xs[(xs.length - 1) / 2] : (xs[xs.length / 2 - 1] + xs[xs.length / 2]) / 2) : null;
 const byKey0 = Object.fromEntries(B.mbd.map((r) => [r.key, r]));
 const kOf = (key) => byKey0[key]?.phonons?.["κ_SRME"];
-$("kappa-callout").innerHTML = `<b>数据</b>${dk.length} 个直接力条目的 κ<sub>SRME</sub> 为 ${dk.map((x) => fmt(x)).join("、")}，全部接近最差值 2；
+$("kappa-callout").innerHTML = `<b>数据：</b>${dk.length} 个直接力条目的 κ<sub>SRME</sub> 为 ${dk.map((x) => fmt(x)).join("、")}，全部接近最差值 2；
   ${ck.length} 个保守力条目的中位数是 ${fmt(med(ck))}，最好的已到 ${fmt(ck[0])}。直接力的 F1 并不差（eqv2-m 达 0.917），说明它们“静态能量”学得很好；
   它们的失败也不是因为计算崩溃（因虚频等被判失败的比例只有 0–6%），而是总热导率本身就算错了：力不是能量的梯度，二阶力常数不对称、不自洽。
   Orb 从 v2（直接力，κ ${fmt(kOf("orb-v2"))}）到 v3（保守力，κ ${fmt(kOf("orb-v3"))}）是最直接的对照；
