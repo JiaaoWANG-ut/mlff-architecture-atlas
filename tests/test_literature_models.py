@@ -16,6 +16,7 @@ class LiteratureModelTests(unittest.TestCase):
     def test_provisional_unknowns_are_accepted(self):
         model = copy.deepcopy(self.model)
         model["arch"]["strictlyLocal"] = None
+        model["arch"]["forces"] = "unknown"
         built, errors = validate_and_build(model, {}, set())
         self.assertEqual(errors, [])
         self.assertIsNone(built["scores"])
@@ -25,6 +26,7 @@ class LiteratureModelTests(unittest.TestCase):
         model = copy.deepcopy(self.model)
         del model["reviewStatus"]
         model["arch"]["strictlyLocal"] = None
+        model["arch"]["forces"] = "unknown"
         _, errors = validate_and_build(model, {}, set())
         self.assertTrue(any("scores required" in error for error in errors))
         self.assertTrue(any("strictlyLocal must be bool" in error for error in errors))

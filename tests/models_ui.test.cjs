@@ -74,7 +74,7 @@ test("search and force filters narrow the catalog without losing provisional mod
   assert.equal(elements.count.textContent, "1");
   assert.match(elements.cards.innerHTML, /FACTO/);
   assert.match(elements.cards.innerHTML, /文献初录/);
-  elements.forces.value = "conservative";
+  elements.forces.value = "direct";
   elements.forces.dispatch("input");
   assert.equal(elements.count.textContent, "0");
   assert.match(elements.cards.innerHTML, /没有找到匹配的模型/);

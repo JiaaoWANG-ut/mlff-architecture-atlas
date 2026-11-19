@@ -52,9 +52,16 @@ test("placeholder repository is not presented as implementation code", async () 
 });
 
 test("unknown source and force type remain visibly uncertain", async () => {
-  const html = await renderModel("facto");
+  const html = await renderModel("matlantis-pfp-v8");
   assert.match(html, /暂未找到公开源码/);
   assert.match(html, /待核验/);
+});
+
+test("FACTO presents its paper-reported conservative force without implying source audit", async () => {
+  const html = await renderModel("facto");
+  assert.match(html, /保守/);
+  assert.match(html, /总能量解析求导/);
+  assert.match(html, /尚未完成逐步源码审计/);
 });
 
 test("candidate repository is not claimed to be official", async () => {
