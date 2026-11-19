@@ -119,15 +119,18 @@ def validate_and_build(model, manifest, mbd_keys):
     for k in ARCH_KEYS:
         if k not in arch:
             errs.append(f"{mid}: arch missing '{k}'")
-    if arch.get("forces") not in FORCES:
+    if arch.get("forces") not in FORCES and not (model.get("reviewStatus") == "literature" and arch.get("forces") == "unknown"):
         errs.append(f"{mid}: arch.forces must be one of {FORCES}")
-    if not isinstance(arch.get("strictlyLocal"), bool):
+    provisional = model.get("reviewStatus") == "literature"
+    if not isinstance(arch.get("strictlyLocal"), bool) and not (provisional and arch.get("strictlyLocal") is None):
         errs.append(f"{mid}: arch.strictlyLocal must be bool")
-    if model.get("scores") or not component:
+    if model.get("scores") is not None:
         for k in SCORE_KEYS:
             s = model["scores"].get(k)
             if not (isinstance(s, dict) and isinstance(s.get("v"), int) and 1 <= s["v"] <= 5 and s.get("why")):
                 errs.append(f"{mid}: scores.{k} must be {{v:1-5, why:str}}")
+    elif not component and not provisional:
+        errs.append(f"{mid}: scores required for non-provisional models")
     else:
         model["scores"] = None
     for k in model["mbdKeys"]:

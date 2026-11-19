@@ -65,7 +65,7 @@ const SCORE_LABEL = {
 };
 
 const FORCES_LABEL = {
-  conservative: "保守力（−∂E/∂R）", direct: "直接预测力", both: "保守 / 直接均支持", "n/a": "不适用",
+  conservative: "保守力（−∂E/∂R）", direct: "直接预测力", both: "保守 / 直接均支持", unknown: "力的类型待核验", "n/a": "不适用",
 };
 const FORCES_CLASS = { conservative: "cons", direct: "direct", both: "both", "n/a": "" };
 
@@ -143,8 +143,8 @@ const PAGES = [
 function mountChrome(active) {
   const top = document.createElement("header");
   top.className = "topbar";
-  top.innerHTML = `<div class="inner"><a class="brand" href="index.html">MLFF <span>架构图解</span></a>
-    <nav class="nav">${PAGES.map(([h, t]) => `<a href="${h}" class="${h === active ? "active" : ""}">${t}</a>`).join("")}</nav></div>`;
+  top.innerHTML = `<div class="inner"><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">✳</span><span class="brand-text"><b>MLFF 架构图谱</b><small>机器学习力场知识库</small></span></a>
+    <nav class="nav" aria-label="主导航">${PAGES.map(([h, t]) => `<a href="${h}" class="${h === active ? "active" : ""}"${h === active ? ' aria-current="page"' : ""}>${t}</a>`).join("")}</nav></div>`;
   document.body.prepend(top);
   const foot = document.createElement("footer");
   foot.className = "footer";

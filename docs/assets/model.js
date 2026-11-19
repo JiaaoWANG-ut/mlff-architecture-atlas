@@ -46,12 +46,13 @@
     <div class="card"><dl class="kv">
       <dt>作者</dt><dd>${esc(m.authors || "—")}</dd>
       <dt>论文</dt><dd>${paper}</dd>
-      <dt>源码</dt><dd>${repoLinks}</dd>
+      <dt>源码</dt><dd>${repoLinks || '<span class="muted">暂未找到公开源码</span>'}${m.sourceStatus === "placeholder" ? '<br><span class="muted">该固定版本仅含许可证，未包含实现代码</span>' : m.sourceStatus === "docs-only" ? '<br><span class="muted">该固定版本仅含文档和图片，未包含实现代码</span>' : m.sourceStatus === "unverified" ? '<br><span class="muted">候选相关仓库，与论文的官方对应关系尚未确认</span>' : ""}</dd>
       <dt>框架</dt><dd>${esc(m.framework)}</dd>
       <dt>许可证</dt><dd>${esc(m.license)}</dd>
       ${cur ? `<dt>截断 / 层数</dt><dd>${cur.rc != null ? `r<sub>c</sub> = ${cur.rc} Å` : "无截断 / 全局"}，${cur.T === 0 ? "无消息传递（严格局域）" : cur.T != null ? `${cur.T} 层消息传递` : "层数见检查点"}，名义感受野 ${cur.rf != null ? cur.rf + " Å" : "全局 / 未知"} <span class="muted small">（${esc(cur.cfg)}）</span></dd>` : ""}
     </dl></div>
   </div>
+  ${m.reviewStatus === "literature" ? '<div class="callout"><b>文献初录</b>：此条目依据论文及公开资料整理，尚未完成逐步源码审计和编辑评分；未找到的资料不代表一定不存在。</div>' : ""}
   <div class="pipeline">${D.stages.map((s, i) => {
     const on = stagesHave.has(s);
     return `${on ? `<a class="node on" href="#step-${firstStepOf[s]}">` : '<span class="node off">'}${i + 1}. ${STAGE[s].short}${on ? "</a>" : "</span>"}${i < D.stages.length - 1 ? '<span class="arrow">→</span>' : ""}`;
@@ -61,7 +62,7 @@
 
   // ---- steps
   html += `<h2 id="steps">逐步拆解：从构型到${m.arch.forces === "n/a" ? "输出" : "能量与力"}</h2>
-    <div class="flex"><span class="muted small">共 ${m.steps.length} 步 · 每段源码都链接到固定 commit 的原文件与行号</span><span class="spacer"></span><button class="btn ghost" id="toggle-code" style="padding:4px 12px">展开全部源码</button></div>`;
+    <div class="flex"><span class="muted small">共 ${m.steps.length} 步 · ${m.reviewStatus === "literature" ? "依据论文整理，源码核验待补充" : "每段源码都链接到固定 commit 的原文件与行号"}</span><span class="spacer"></span><button class="btn ghost" id="toggle-code" style="padding:4px 12px">展开全部源码</button></div>`;
   m.steps.forEach((s, i) => {
     html += `<div class="card step" id="step-${i}"><span class="stage-tag">${i + 1} · ${esc(STAGE[s.stage]?.name || s.stage)}</span>
       <h3>${esc(s.title)}</h3><p>${esc(s.plain)}</p>${s.math ? `<div class="math" data-tex="${esc(s.math)}"></div>` : ""}
@@ -72,7 +73,7 @@
   html += `<h2 id="arch">架构参数表</h2><div class="table-wrap free"><table><tbody>${Object.keys(ARCH_LABEL).map((k) => {
     let v = m.arch[k];
     if (k === "forces") v = FORCES_LABEL[v] || v;
-    if (k === "strictlyLocal") v = v ? "是：原子能只依赖 r_c 球内原子" : "否：多层传递使感受野大于 r_c";
+    if (k === "strictlyLocal") v = v == null ? "未知 / 取决于配置" : v ? "是：原子能只依赖 r_c 球内原子" : "否：可能存在多层传递或全局相互作用";
     return `<tr><th style="width:150px;position:static">${ARCH_LABEL[k]}</th><td>${esc(v)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
   if (cur) {
@@ -98,7 +99,7 @@
     <div class="card"><h3>🧲 长程与弱相互作用</h3>${ul(m.weakNotes)}</div>
     <div class="card"><h3>🔬 下游性质</h3>${ul(m.downstreamNotes)}</div></div>`;
   html += `<h2 id="sw">优势与局限</h2><div class="grid g2"><div class="card"><h3 style="color:var(--ok)">优势</h3>${ul(m.strengths)}</div><div class="card"><h3 style="color:var(--bad)">局限</h3>${ul(m.weaknesses)}</div></div>`;
-  html += `<h2 id="pretrained">预训练模型 / 发布版本</h2><div class="card">${(m.pretrained || []).length ? ul(m.pretrained) : '<p class="muted">无公开预训练模型（或为方法/模块）。</p>'}</div>`;
+  html += `<h2 id="pretrained">预训练模型 / 发布版本</h2><div class="card">${(m.pretrained || []).length ? ul(m.pretrained) : '<p class="muted">本站暂无预训练模型信息（或为方法/模块）。</p>'}</div>`;
 
   // ---- benchmarks
   html += `<h2 id="bench">基准数据</h2>` + benchHtml(m);
@@ -140,7 +141,7 @@
   function benchHtml(m) {
     const b = benchForModel(m.id);
     if (!b || (!b.mbd.length && !b.stab.length && !b.comb.length && !b.eos.length)) {
-      return `<div class="card muted">该架构没有出现在 Matbench Discovery 或 MLIP Arena 的公开结果中（多为分子/专用势或方法模块）。</div>`;
+      return `<div class="card muted">当前收录的数据中没有该架构的 Matbench Discovery 或 MLIP Arena 结果；不代表公开结果不存在。</div>`;
     }
     let h = "";
     if (b.mbd.length) {

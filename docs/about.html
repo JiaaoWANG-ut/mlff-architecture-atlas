@@ -16,7 +16,7 @@
 
 <h2 id="method">做法</h2>
 <div class="grid g2">
-  <div class="card"><h3>① 源码快照</h3><p>把 <b id="n-repos"></b> 个上游仓库在固定 commit 浅克隆下来（见下方 <a href="#manifest">源码快照</a>）。模型页上的每一段代码都是从这些 commit 的文件中按行号截取的原文，并附带指向该 commit 的永久链接，可以逐行核对。</p></div>
+  <div class="card"><h3>① 源码快照</h3><p>把 <b id="n-repos"></b> 个上游仓库在固定 commit 浅克隆下来（见下方 <a href="#manifest">源码快照</a>）。已审计模型页的代码按行号链接到固定版本；近期文献初录尚未完成源码审计，可能没有公开源码或源码片段。</p></div>
   <div class="card"><h3>② 逐个阅读、统一建模</h3><p>为 <b id="n-models"></b> 个架构 / 模块逐一阅读源码与官方配置，按同一模板整理：从“输入构型”到“其他性质”的 11 个流水线阶段（每步有通俗解释、公式与源码），统一的架构字段（等变性、l<sub>max</sub>、体序、截断、层数、力的类型、长程、色散……），关键超参数、预训练权重与注意事项。</p></div>
   <div class="card"><h3>③ 自动校验</h3><p>构建脚本检查每个条目：必填字段齐全、取值合法；每段代码引用的文件存在、行号范围有效、摘录不超过 45 行，并且<b>必须包含指定的锚点字符串</b>——如果行号错位，构建会直接失败。基准条目的键名也会与基准仓库核对。</p></div>
   <div class="card"><h3>④ 基准与图表</h3><p>基准数字由脚本直接从 Matbench Discovery 的 <code>models/*/*.yml</code> 与 MLIP Arena 的结果文件中提取，不手工抄录（见 <a href="bench.html">基准数据</a>）。网站是纯静态页面，所有图表都在浏览器中由这些数据实时绘制。</p></div>
@@ -51,7 +51,7 @@
   </tbody></table></div>
 
 <h2 id="caveats">已知局限</h2>
-<div class="callout"><b>Architecture Foundry</b> 使用独立的人工模块目录与契约规则，检查表示、边界、能量汇总、求导路径和物理项冲突。其开销与表达力分数是公开公式的设计启发式，不沿用原模型的实测性能；所有混搭的准确度均为未评测。自定义模块只验证声明，不验证实现。完整规则与来源见 <a href="foundry.html#method">架构工坊的方法说明</a>。DPA-4.1 暂以有来源的 DPA-4 / SeZM 作为参考骨架，独立版本尚待核对。</div>
+<div class="callout"><b>架构工坊</b> 使用独立的人工模块目录与契约规则，检查表示、边界、能量汇总、求导路径和物理项冲突。其开销与表达力分数是公开公式的设计启发式，不沿用原模型的实测性能；所有混搭的准确度均为未评测。自定义模块只验证声明，不验证实现。完整规则与来源见 <a href="foundry.html#method">架构工坊的方法说明</a>。DPA-4.1 暂以有来源的 DPA-4 / SeZM 作为参考骨架，独立版本尚待核对。</div>
 <div class="callout warn"><ul class="notes">
   <li><b>一个架构，多种配置</b>：截断、层数、l<sub>max</sub> 等随发布权重而变；本站取“代表性 / 基础模型”配置，并在模型页写明来源。部分基准条目与源码默认配置不一致，例如 CHGNet 0.3.0 源码的建图半径为 6 Å而 MBD 记 5 Å、Orb v2 源码为 6 Å而 MBD 记 10 Å、AlphaNet 的层数与截断（MBD 的 MPtrj 条目记 6 层 / 6 Å，配置默认更小），均已在对应模型页标注。</li>
   <li><b>代码版本</b>：fairchem v2 主分支已不再包含原始 eSCN / EquiformerV2 / 早期 eSEN 的实现；相关页面引用的是当前 fairchem 中保留的代码与 equiformer_v2 原仓库。MBD 中的 eSEN-30M 权重来自 fairchem v1，与当前代码可能有差异。</li>
@@ -62,7 +62,7 @@
 </ul></div>
 
 <h2 id="manifest">源码快照</h2>
-<p class="small muted">每个仓库的固定 commit 与提交日期；“用于”列出引用了该仓库代码的架构页面。</p>
+<p class="small muted">每个仓库的固定 commit 与提交日期；“用于”列出关联页面，文献初录不表示代码已审计。MCSA 和 MARA 固定版本没有实现代码；MLANet 仓库与论文的官方对应关系尚未确认。</p>
 <div class="filters"><input type="search" id="q" placeholder="搜索仓库或模型…"><span class="muted small" id="count"></span></div>
 <div class="table-wrap"><table id="tbl-manifest"></table></div>
 

@@ -10,23 +10,54 @@
 <script src="assets/common.js"></script>
 </head>
 <body>
-<main class="wrap">
-  <h1>模型库</h1>
-  <p class="muted">所有收录的架构与模块。可按家族、力的类型、局域性、长程能力筛选；卡片上的 F1 / κ<sub>SRME</sub> 取自 Matbench Discovery 中该架构最好的一个模型（F1 越高越好，κ<sub>SRME</sub> 越低越好）。</p>
-  <div class="filters">
-    <input type="search" id="q" placeholder="搜索名称、作者、标签…">
-    <select id="forces"><option value="">力的类型：全部</option><option value="conservative">保守力</option><option value="direct">直接力</option><option value="both">两者均支持</option><option value="n/a">不适用</option></select>
-    <select id="local"><option value="">局域性：全部</option><option value="1">严格局域</option><option value="0">消息传递（半局域）</option></select>
-    <select id="lr"><option value="">长程静电：全部</option><option value="builtin">内置 / 核心</option><option value="optional">可选扩展</option><option value="none">无</option></select>
-    <select id="sort"><option value="family">排序：家族</option><option value="year">年份（新→旧）</option><option value="name">名称</option><option value="f1">MBD F1（高→低）</option><option value="kappa">κ_SRME（低→高）</option></select>
-    <span class="muted small" id="count"></span>
-  </div>
-  <div class="pill-select" id="fam-chips"></div>
-  <div class="grid g3" id="cards" style="margin-top:14px"></div>
+<main class="wrap catalog">
+  <section class="catalog-hero" aria-labelledby="catalog-title">
+    <div class="catalog-intro">
+      <div class="catalog-eyebrow"><span></span> 机器学习力场 · 架构图谱</div>
+      <h1 id="catalog-title">探索模型，<br><span>理解架构。</span></h1>
+      <p>从经典势函数到最新基础模型，按架构、物理特性和公开基准，找到适合研究的问题与方法。</p>
+      <div class="catalog-intro-links"><a href="#catalog-results">浏览全部模型 <span aria-hidden="true">↓</span></a><a href="about.html">了解数据与方法 <span aria-hidden="true">↗</span></a></div>
+    </div>
+    <div class="catalog-summary" aria-label="图谱概览">
+      <div class="catalog-summary-head"><span>图谱概览</span><span class="catalog-summary-mark" aria-hidden="true">✳</span></div>
+      <div class="catalog-stat"><strong id="total-models">—</strong><span>收录模型与方法</span></div>
+      <div class="catalog-stat-row">
+        <div><strong id="total-families">—</strong><span>架构家族</span></div>
+        <div><strong id="total-literature">—</strong><span>文献初录</span></div>
+      </div>
+      <p>源码分析与文献初录分别标注。基准数据仅覆盖部分模型。</p>
+    </div>
+  </section>
+
+  <section class="catalog-controls" aria-labelledby="filter-title">
+    <div class="catalog-section-head">
+      <div><div class="catalog-kicker">探索与筛选</div><h2 id="filter-title">找到你需要的模型</h2></div>
+      <button type="button" class="catalog-reset" id="reset-filters">重置筛选 <span aria-hidden="true">↺</span></button>
+    </div>
+    <div class="catalog-filter-grid">
+      <label class="catalog-search">搜索模型<input type="search" id="q" placeholder="搜索名称、作者或关键词"></label>
+      <label>力的类型<select id="forces"><option value="">全部类型</option><option value="conservative">保守力</option><option value="direct">直接力</option><option value="both">两者均支持</option><option value="unknown">待核验</option><option value="n/a">不适用</option></select></label>
+      <label>局域性<select id="local"><option value="">全部类型</option><option value="1">严格局域</option><option value="0">非严格局域</option></select></label>
+      <label>长程静电<select id="lr"><option value="">全部类型</option><option value="builtin">内置 / 核心</option><option value="optional">可选扩展</option><option value="none">无</option></select></label>
+    </div>
+    <div class="catalog-families"><span class="catalog-filter-label">架构家族</span><div class="pill-select" id="fam-chips" aria-label="按架构家族筛选"></div></div>
+  </section>
+
+  <section id="catalog-results" class="catalog-results" aria-labelledby="results-title">
+    <div class="catalog-results-head">
+      <div><div class="catalog-kicker">模型目录</div><h2 id="results-title">浏览模型 <span id="count" aria-live="polite"></span></h2></div>
+      <label class="catalog-sort">排序方式<select id="sort"><option value="family">架构家族</option><option value="year">年份：由新到旧</option><option value="name">模型名称</option><option value="f1">MBD F1：由高到低</option><option value="kappa">κ_SRME：由低到高</option></select></label>
+    </div>
+    <p class="catalog-benchmark-note">卡片指标来自 Matbench Discovery 的已收录结果，分别展示该架构的最佳 F1 和 κ<sub>SRME</sub>；两项不一定来自同一模型。</p>
+    <div class="grid catalog-cards" id="cards"></div>
+  </section>
 </main>
 <script>
 mountChrome("models.html");
 const D = window.MLFF;
+document.getElementById("total-models").textContent = D.models.length;
+document.getElementById("total-families").textContent = D.families.length;
+document.getElementById("total-literature").textContent = D.models.filter((m) => m.reviewStatus === "literature").length;
 const best = {};
 for (const r of (window.MLFF_BENCH?.mbd || [])) {
   if (!r.modelId) continue;
@@ -37,15 +68,25 @@ for (const r of (window.MLFF_BENCH?.mbd || [])) {
 }
 const famOn = new Set();
 document.getElementById("fam-chips").innerHTML = D.families.map((f) =>
-  `<button class="chip" data-f="${f}" style="border-color:${famColor(f)}">${esc(FAMILY[f].name)}</button>`).join("");
+  `<button type="button" class="chip" data-f="${esc(f)}" aria-pressed="false"><span class="catalog-family-dot" style="background:${famColor(f)}"></span>${esc(FAMILY[f].name)}</button>`).join("");
 document.querySelectorAll("#fam-chips .chip").forEach((b) => b.addEventListener("click", () => {
   const f = b.dataset.f;
   famOn.has(f) ? famOn.delete(f) : famOn.add(f);
-  b.classList.toggle("on");
-  b.style.background = famOn.has(f) ? famColor(f) : "";
+  b.classList.toggle("on", famOn.has(f));
+  b.setAttribute("aria-pressed", String(famOn.has(f)));
   render();
 }));
 ["q", "forces", "local", "lr", "sort"].forEach((id) => document.getElementById(id).addEventListener("input", render));
+document.getElementById("reset-filters").addEventListener("click", () => {
+  ["q", "forces", "local", "lr"].forEach((id) => { document.getElementById(id).value = ""; });
+  document.getElementById("sort").value = "family";
+  famOn.clear();
+  document.querySelectorAll("#fam-chips .chip").forEach((b) => {
+    b.classList.remove("on");
+    b.setAttribute("aria-pressed", "false");
+  });
+  render();
+});
 const init = param("family");
 if (init && FAMILY[init]) document.querySelector(`#fam-chips .chip[data-f="${init}"]`)?.click();
 
@@ -56,10 +97,11 @@ function render() {
   let ms = D.models.filter((m) => {
     if (famOn.size && !famOn.has(m.family)) return false;
     if (fo && m.arch.forces !== fo) return false;
-    if (lo && String(+m.arch.strictlyLocal) !== lo) return false;
+    if (lo && (m.arch.strictlyLocal == null || String(+m.arch.strictlyLocal) !== lo)) return false;
     const c = D.curated[m.id];
     if (lr) {
-      const v = c ? c.lr : "none";
+      if (!c) return false;
+      const v = c.lr;
       if (lr === "builtin" && !["builtin", "core"].includes(v)) return false;
       if (lr !== "builtin" && v !== lr) return false;
     }
@@ -77,19 +119,20 @@ function render() {
     kappa: (a, b) => (best[a.id]?.kappa ?? 99) - (best[b.id]?.kappa ?? 99),
   }[sort];
   ms = ms.slice().sort(cmp);
-  document.getElementById("count").textContent = `共 ${ms.length} 个`;
+  document.getElementById("count").textContent = `${ms.length}`;
   document.getElementById("cards").innerHTML = ms.map((m) => {
     const c = D.curated[m.id];
     const b = best[m.id];
     const lrTag = c && ["builtin", "core"].includes(c.lr) ? '<span class="badge lr">内置长程静电</span>' : "";
     const dispTag = c && ["builtin", "core"].includes(c.disp) ? '<span class="badge lr">内置色散</span>' : "";
-    const bench = b ? `<div class="meta">MBD 最佳：F1 <b>${fmt(b.f1)}</b>${b.kappa != null ? ` · κ<sub>SRME</sub> <b>${fmt(b.kappa)}</b>` : ""}</div>` : "";
-    return `<a class="card model-card" href="${modelLink(m)}" style="color:inherit;text-decoration:none;border-top:4px solid ${famColor(m.family)}">
-      <div class="flex"><h3>${esc(m.name)}</h3><span class="spacer"></span><span class="muted small">${esc(m.year)}</span></div>
-      <div class="tags">${famBadge(m.family)}${m.arch.forces !== "n/a" ? forcesBadge(m.arch.forces) : ""}${m.arch.strictlyLocal ? '<span class="badge local">严格局域</span>' : ""}${lrTag}${dispTag}</div>
+    const bench = b ? `<div class="catalog-card-bench"><span>公开基准 · 最佳</span><span>F1 <b>${fmt(b.f1)}</b> ${b.kappa != null ? `· κ<sub>SRME</sub> <b>${fmt(b.kappa)}</b>` : ""}</span></div>` : "";
+    return `<a class="card model-card" href="${modelLink(m)}" style="--family-color:${famColor(m.family)}">
+      <div class="catalog-card-top"><span class="catalog-card-family"><i></i>${esc(FAMILY[m.family].name)}</span><span class="catalog-card-year">${esc(m.year)}</span></div>
+      <div class="catalog-card-title"><h3>${esc(m.name)}</h3><span aria-hidden="true">↗</span></div>
       <div class="one">${esc(m.oneLiner)}</div>
-      <div class="meta">${esc(m.framework)}</div>${bench}</a>`;
-  }).join("") || '<p class="muted">没有匹配的模型。</p>';
+      <div class="tags">${m.reviewStatus === "literature" ? '<span class="badge">文献初录</span>' : ""}${m.arch.forces !== "n/a" ? forcesBadge(m.arch.forces) : ""}${m.arch.strictlyLocal ? '<span class="badge local">严格局域</span>' : ""}${lrTag}${dispTag}</div>
+      <div class="catalog-card-footer"><span>${esc(m.framework)}</span></div>${bench}</a>`;
+  }).join("") || '<div class="catalog-empty"><strong>没有找到匹配的模型</strong><p>试试其他关键词，或重置筛选条件。</p></div>';
 }
 render();
 </script>
